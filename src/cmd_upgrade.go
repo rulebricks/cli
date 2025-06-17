@@ -575,9 +575,9 @@ func (um *UpgradeManager) generateValues() (string, error) {
 
 	case "managed":
 		// For managed Supabase, try to load from deployment state
-		if stateFile, err := os.ReadFile(".rulebricks-state.json"); err == nil {
+		if stateFile, err := os.ReadFile(".rulebricks-state.yaml"); err == nil {
 			var state DeploymentState
-			if err := json.Unmarshal(stateFile, &state); err == nil && state.Database.URL != "" {
+			if err := yaml.Unmarshal(stateFile, &state); err == nil && state.Database.URL != "" {
 				rulebricksValues["app"].(map[string]interface{})["supabaseUrl"] = state.Database.URL
 				rulebricksValues["app"].(map[string]interface{})["supabaseAnonKey"] = state.Database.AnonKey
 				rulebricksValues["app"].(map[string]interface{})["supabaseServiceKey"] = state.Database.ServiceKey

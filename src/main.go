@@ -379,9 +379,10 @@ Use --cluster to also destroy the Kubernetes cluster and all infrastructure.`,
 			fmt.Println("💡 Run 'rulebricks deploy' to redeploy applications to the existing cluster.")
 		} else {
 			fmt.Println("\n✅ All resources destroyed successfully.")
-			// Clean up state only on full destroy
-			os.Remove(".rulebricks-state.yaml")
 		}
+
+		// Always clean up state file
+		os.Remove(".rulebricks-state.yaml")
 	},
 }
 

@@ -176,7 +176,11 @@ func NewDeployer(config Config, plan DeploymentPlan, chartVersion string, verbos
 		Verbose:       verbose,
 		workDir:       workDir,
 		secrets:       make(map[string]string),
-		state:         &DeploymentState{},
+		state: &DeploymentState{
+			ProjectName: config.Project.Name,
+			Version:     chartVersion,
+			CreatedAt:   time.Now(),
+		},
 		sharedSecrets: SharedSecrets{},
 		chartManager:  chartManager,
 		chartVersion:  chartVersion,
@@ -691,7 +695,7 @@ func (d *Deployer) deployRulebricksApp() error {
 
 	d.state.Application = ApplicationState{
 		Deployed: true,
-		Version:  "latest",
+		Version:  d.chartVersion,
 		URL:      fmt.Sprintf("https://%s", d.config.Project.Domain),
 		Replicas: 2, // Default replicas, could be from config
 	}
@@ -1404,6 +1408,7 @@ func (d *Deployer) checkGCPCredentials() error {
 // State management structures
 
 type DeploymentState struct {
+	ProjectName          string               `yaml:"project_name"`
 	Version              string               `yaml:"version"`
 	CreatedAt            time.Time            `yaml:"created_at"`
 	UpdatedAt            time.Time            `yaml:"updated_at"`
