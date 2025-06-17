@@ -41,7 +41,7 @@ func NewCloudOperations(config Config, verbose bool) *CloudOperations {
 
 // SetupCluster creates the Kubernetes cluster on the specified cloud provider
 func (c *CloudOperations) SetupCluster() error {
-	fmt.Printf("🚀 Setting up Kubernetes cluster on %s...\n", c.config.Cloud.Provider)
+	fmt.Printf("🚀 Setting up Kubernetes cluster...\n")
 
 	switch c.config.Cloud.Provider {
 	case "aws":
@@ -502,7 +502,7 @@ func (c *CloudOperations) updateGCPKubeconfig(outputs map[string]string) error {
 
 // DestroyCluster tears down the Kubernetes cluster
 func (c *CloudOperations) DestroyCluster() error {
-	fmt.Printf("🗑️  Destroying Kubernetes cluster on %s...\n", c.config.Cloud.Provider)
+	fmt.Printf("🗑️  Destroying Kubernetes cluster...\n")
 
 	// Set terraform directory based on provider
 	c.terraformDir = filepath.Join("terraform", c.config.Cloud.Provider)

@@ -124,9 +124,17 @@ func (am *AssetManager) EnsureTerraformAssets(targetDir string) error {
 
 // pullDockerImage pulls the Docker image with license key authentication
 func (am *AssetManager) pullDockerImage(ctx context.Context, imageName string) error {
+	if am.verbose {
+		fmt.Printf("🐳 Pulling Docker image: %s\n", imageName)
+		fmt.Printf("   Using username: rulebricks\n")
+	}
+
+	// Create base64 encoded auth string in the format username:password
+	// This matches how Kubernetes docker secrets work
+	authString := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("rulebricks:%s", am.licenseKey)))
+
 	authConfig := registry.AuthConfig{
-		Username: "license",
-		Password: am.licenseKey,
+		Auth: authString,
 	}
 
 	encodedAuth, err := json.Marshal(authConfig)
@@ -134,12 +142,20 @@ func (am *AssetManager) pullDockerImage(ctx context.Context, imageName string) e
 		return err
 	}
 
+	encodedAuthStr := base64.StdEncoding.EncodeToString(encodedAuth)
 	pullOptions := image.PullOptions{
-		RegistryAuth: base64.URLEncoding.EncodeToString(encodedAuth),
+		RegistryAuth: encodedAuthStr,
+	}
+
+	if am.verbose {
+		fmt.Println("   Authentication configured, attempting pull...")
 	}
 
 	reader, err := am.dockerClient.ImagePull(ctx, imageName, pullOptions)
 	if err != nil {
+		if am.verbose {
+			fmt.Printf("   Pull failed: %v\n", err)
+		}
 		return err
 	}
 	defer reader.Close()

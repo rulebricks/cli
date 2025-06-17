@@ -315,11 +315,10 @@ var deployCmd = &cobra.Command{
 		}
 
 		// Execute deployment
-		deployer, err := NewDeployer(config, plan, chartVersion)
+		deployer, err := NewDeployer(config, plan, chartVersion, verbose)
 		if err != nil {
 			log.Fatalf("Failed to initialize deployer: %v", err)
 		}
-		deployer.Verbose = verbose
 
 		if err := deployer.Execute(); err != nil {
 			log.Fatalf("Deployment failed: %v", err)

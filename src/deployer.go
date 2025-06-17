@@ -161,7 +161,7 @@ type Deployer struct {
 }
 
 // NewDeployer creates a new deployer
-func NewDeployer(config Config, plan DeploymentPlan, chartVersion string) (*Deployer, error) {
+func NewDeployer(config Config, plan DeploymentPlan, chartVersion string, verbose bool) (*Deployer, error) {
 	workDir, _ := os.Getwd()
 
 	// Initialize chart manager
@@ -173,6 +173,7 @@ func NewDeployer(config Config, plan DeploymentPlan, chartVersion string) (*Depl
 	d := &Deployer{
 		config:        &config,
 		plan:          plan,
+		Verbose:       verbose,
 		workDir:       workDir,
 		secrets:       make(map[string]string),
 		state:         &DeploymentState{},

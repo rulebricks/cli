@@ -105,6 +105,14 @@ func (s *SupabaseOperations) deployManaged() error {
 		}
 	}
 
+	// Ensure Supabase assets are available before linking
+	if s.verbose {
+		fmt.Println("📦 Checking for Supabase assets...")
+	}
+	if err := s.EnsureSupabaseAssets(); err != nil {
+		return fmt.Errorf("failed to ensure Supabase assets: %w", err)
+	}
+
 	// Link the project
 	if err := s.linkProject(); err != nil {
 		return err
@@ -410,11 +418,6 @@ func (s *SupabaseOperations) linkProject() error {
 // configureProject configures the Supabase project
 func (s *SupabaseOperations) configureProject() error {
 	fmt.Println("⚙️  Configuring Supabase project...")
-
-	// Ensure Supabase assets are available
-	if err := s.EnsureSupabaseAssets(); err != nil {
-		return fmt.Errorf("failed to ensure Supabase assets: %w", err)
-	}
 
 	// Create config.toml from template
 	configTemplate := filepath.Join("supabase", "config.example.toml")
@@ -1011,6 +1014,9 @@ func (s *SupabaseOperations) EnsureSupabaseAssets() error {
 			return fmt.Errorf("supabase directory not found and no license key provided to extract from Docker image")
 		}
 		// Local directory exists, use it
+		if s.verbose {
+			fmt.Println("✓ Using existing local Supabase directory")
+		}
 		return nil
 	}
 
@@ -1020,6 +1026,12 @@ func (s *SupabaseOperations) EnsureSupabaseAssets() error {
 	if s.config.Advanced.DockerRegistry.AppImage != "" {
 		// Use custom image
 		imageName = s.config.Advanced.DockerRegistry.AppImage
+
+		// If custom image doesn't have a registry prefix, add docker.io
+		if !strings.Contains(imageName, "/") || (!strings.Contains(strings.Split(imageName, "/")[0], ".") && !strings.Contains(strings.Split(imageName, "/")[0], ":")) {
+			// Image is like "myimage" or "myorg/myimage" without registry
+			// Docker Hub doesn't need explicit registry prefix
+		}
 
 		// If custom image doesn't have a tag, append the chartVersion
 		if !strings.Contains(imageName, ":") {
@@ -1039,6 +1051,9 @@ func (s *SupabaseOperations) EnsureSupabaseAssets() error {
 	}
 
 	// Extract Supabase assets if not already present
+	if s.verbose {
+		fmt.Printf("🐳 Using Docker image: %s\n", imageName)
+	}
 	return s.assetManager.EnsureSupabaseAssets(imageName, "supabase")
 }
 

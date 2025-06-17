@@ -509,7 +509,7 @@ func (um *UpgradeManager) generateValues() (string, error) {
 
 	// Load secrets
 	secrets := make(map[string]string)
-	if d, err := NewDeployer(*um.config, DeploymentPlan{}, ""); err == nil {
+	if d, err := NewDeployer(*um.config, DeploymentPlan{}, "", false); err == nil {
 		d.loadSecrets()
 		secrets = d.secrets
 	}
