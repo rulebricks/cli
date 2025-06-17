@@ -182,6 +182,14 @@ func NewDeployer(config Config, plan DeploymentPlan, chartVersion string, verbos
 		chartVersion:  chartVersion,
 	}
 
+	// Initialize monitoring state based on configuration
+	if !config.Monitoring.Enabled {
+		d.state.Monitoring = MonitoringState{
+			Enabled:  false,
+			Provider: "",
+		}
+	}
+
 	// Initialize operations handlers
 	d.cloudOps = NewCloudOperations(config, d.Verbose)
 	d.supabaseOps = NewSupabaseOperations(config, d.Verbose, chartVersion)
@@ -717,6 +725,9 @@ func (d *Deployer) deployPrometheus() error {
 		return err
 	}
 
+	// Generate and store Grafana password
+	grafanaPassword := generateRandomString(16)
+
 	// Install kube-prometheus-stack
 	prometheusValues := map[string]interface{}{
 		"prometheus": map[string]interface{}{
@@ -738,7 +749,7 @@ func (d *Deployer) deployPrometheus() error {
 		},
 		"grafana": map[string]interface{}{
 			"enabled": true,
-			"adminPassword": generateRandomString(16),
+			"adminPassword": grafanaPassword,
 			"ingress": map[string]interface{}{
 				"enabled": true,
 				"className": "traefik",
@@ -784,7 +795,20 @@ func (d *Deployer) deployPrometheus() error {
 		cmd.Stderr = os.Stderr
 	}
 
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	// Update monitoring state
+	d.state.Monitoring = MonitoringState{
+		Enabled:         true,
+		Provider:        "prometheus",
+		PrometheusURL:   fmt.Sprintf("https://prometheus.%s", d.config.Project.Domain),
+		GrafanaURL:      fmt.Sprintf("https://grafana.%s", d.config.Project.Domain),
+		GrafanaPassword: grafanaPassword,
+	}
+
+	return nil
 }
 
 // executeScript executes custom scripts
@@ -1309,7 +1333,7 @@ func (d *Deployer) DisplayConnectionInfo() {
 		fmt.Printf("\n📈 Grafana Dashboard:\n")
 		fmt.Printf("   URL: https://grafana.%s\n", d.config.Project.Domain)
 		fmt.Printf("   Username: admin\n")
-		fmt.Printf("   Password: (check deployment output)\n")
+		fmt.Printf("   Password: %s\n", d.state.Monitoring.GrafanaPassword)
 	}
 
 	fmt.Printf("\n💾 State saved to: .rulebricks-state.yaml\n")
@@ -1423,8 +1447,9 @@ type ApplicationState struct {
 }
 
 type MonitoringState struct {
-	Enabled      bool   `yaml:"enabled"`
-	Provider     string `yaml:"provider"`
-	PrometheusURL string `yaml:"prometheus_url,omitempty"`
-	GrafanaURL    string `yaml:"grafana_url,omitempty"`
+	Enabled        bool   `yaml:"enabled"`
+	Provider       string `yaml:"provider"`
+	PrometheusURL  string `yaml:"prometheus_url,omitempty"`
+	GrafanaURL     string `yaml:"grafana_url,omitempty"`
+	GrafanaPassword string `yaml:"grafana_password,omitempty"`
 }
