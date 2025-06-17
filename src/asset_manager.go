@@ -129,12 +129,16 @@ func (am *AssetManager) pullDockerImage(ctx context.Context, imageName string) e
 		fmt.Printf("   Using username: rulebricks\n")
 	}
 
-	// Create base64 encoded auth string in the format username:password
-	// This matches how Kubernetes docker secrets work
-	authString := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("rulebricks:%s", am.licenseKey)))
+	// Create auth config with username and password for standard Docker registry auth
+	// Ensure Docker Hub PAT has the required prefix
+	password := am.licenseKey
+	if !strings.HasPrefix(password, "dckr_pat_") {
+		password = "dckr_pat_" + password
+	}
 
 	authConfig := registry.AuthConfig{
-		Auth: authString,
+		Username: "rulebricks",
+		Password: password,
 	}
 
 	encodedAuth, err := json.Marshal(authConfig)

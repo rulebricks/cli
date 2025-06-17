@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
-
 	"github.com/fatih/color"
 	"gopkg.in/yaml.v3"
 )
@@ -745,6 +745,18 @@ func (d *Deployer) deployPrometheus() error {
 				"hosts": []string{
 					fmt.Sprintf("grafana.%s", d.config.Project.Domain),
 				},
+				"annotations": map[string]interface{}{
+					"traefik.ingress.kubernetes.io/router.entrypoints": "websecure",
+					"traefik.ingress.kubernetes.io/router.tls": "true",
+					"traefik.ingress.kubernetes.io/router.tls.certresolver": "le",
+				},
+				"tls": []map[string]interface{}{
+					{
+						"hosts": []string{
+							fmt.Sprintf("grafana.%s", d.config.Project.Domain),
+						},
+					},
+				},
 			},
 		},
 		"alertmanager": map[string]interface{}{
@@ -1031,39 +1043,73 @@ func (d *Deployer) configureTLS() error {
 	}
 
 	traefikNamespace := d.getNamespace("traefik")
+	// Create a temporary values file that overrides the ACME configuration
+	tlsOverrides := map[string]interface{}{
+		"additionalArguments": []string{
+			"--api.insecure=false",
+			"--api.dashboard=true",
+			"--log.level=DEBUG",
+			"--accesslog=true",
+			"--entrypoints.metrics.address=:9100",
+			"--entrypoints.traefik.address=:9000",
+			"--entrypoints.web.address=:8000",
+			"--entrypoints.websecure.address=:8443",
+			"--entrypoints.web.http.redirections.entryPoint.to=websecure",
+			"--entrypoints.web.http.redirections.entryPoint.scheme=https",
+			fmt.Sprintf("--certificatesresolvers.le.acme.email=%s", d.config.Security.TLS.AcmeEmail),
+			"--certificatesresolvers.le.acme.storage=/data/acme.json",
+			"--certificatesresolvers.le.acme.tlschallenge=true",
+		},
+		"ports": map[string]interface{}{
+			"websecure": map[string]interface{}{
+				"tls": map[string]interface{}{
+					"enabled": true,
+					"certResolver": "le",
+					"domains": []map[string]interface{}{
+						{
+							"main": d.config.Project.Domain,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Add SANs if needed
+	domains := tlsOverrides["ports"].(map[string]interface{})["websecure"].(map[string]interface{})["tls"].(map[string]interface{})["domains"].([]map[string]interface{})[0]
+
+	var sans []string
+	// Add monitoring domain if enabled
+	if d.config.Monitoring.Enabled && d.config.Monitoring.Provider == "prometheus" {
+		sans = append(sans, fmt.Sprintf("grafana.%s", d.config.Project.Domain))
+	}
+	// Add Supabase domain if self-hosted
+	if d.config.Database.Type == "self-hosted" {
+		sans = append(sans, fmt.Sprintf("supabase.%s", d.config.Project.Domain))
+	}
+	// Add any additional domains from config
+	sans = append(sans, d.config.Security.TLS.Domains...)
+
+	if len(sans) > 0 {
+		domains["sans"] = sans
+	}
+
+	// Create temporary values file
+	tlsValuesFile, err := createTempValuesFile("traefik-tls", tlsOverrides)
+	if err != nil {
+		return fmt.Errorf("failed to create TLS values file: %w", err)
+	}
+	defer os.Remove(tlsValuesFile)
+
 	args := []string{
 		"upgrade", "--install", "traefik", "traefik/traefik",
 		"--namespace", traefikNamespace,
 		"-f", filepath.Join(d.extractedChartPath, "rulebricks", "traefik-values-tls.yaml"),
-		"--set", fmt.Sprintf("additionalArguments[11]=--certificatesresolvers.le.acme.email=%s", d.config.Security.TLS.AcmeEmail),
-		"--set", "additionalArguments[12]=--certificatesresolvers.le.acme.storage=/data/acme.json",
-		"--set", "additionalArguments[13]=--certificatesresolvers.le.acme.tlschallenge=true",
-		"--set", fmt.Sprintf("ports.websecure.tls.domains[0].main=%s", d.config.Project.Domain),
+		"-f", tlsValuesFile,
+		"--wait",
 	}
 
-	// Build list of additional domains (SANs)
-	var additionalDomains []string
 
-	// Add monitoring domain if enabled
-	if d.config.Monitoring.Enabled && d.config.Monitoring.Provider == "prometheus" {
-		additionalDomains = append(additionalDomains, fmt.Sprintf("grafana.%s", d.config.Project.Domain))
-	}
-
-	// Add Supabase domain if self-hosted
-	if d.config.Database.Type == "self-hosted" {
-		additionalDomains = append(additionalDomains, fmt.Sprintf("supabase.%s", d.config.Project.Domain))
-	}
-
-	// Add any additional domains from config
-	additionalDomains = append(additionalDomains, d.config.Security.TLS.Domains...)
-
-	// Set all additional domains as SANs
-	for i, domain := range additionalDomains {
-		args = append(args, "--set", fmt.Sprintf("ports.websecure.tls.domains[0].sans[%d]=%s", i, domain))
-	}
-
-	// Add wait flag
-	args = append(args, "--wait")
 
 	cmd := exec.Command("helm", args...)
 
@@ -1133,7 +1179,41 @@ func (d *Deployer) configureTLS() error {
 
 			// Give DNS and certificate a moment to propagate
 			time.Sleep(10 * time.Second)
-			return nil
+
+			// Verify HTTPS is working
+			httpsURL := fmt.Sprintf("https://%s", d.config.Project.Domain)
+			client := &http.Client{
+				Timeout: 30 * time.Second,
+			}
+
+			maxRetries := 6 // 1 minute total
+			for i := 0; i < maxRetries; i++ {
+				resp, err := client.Get(httpsURL)
+				if err == nil {
+					resp.Body.Close()
+					if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
+						cert := resp.TLS.PeerCertificates[0]
+						// Check if certificate is valid for the domain
+						if err := cert.VerifyHostname(d.config.Project.Domain); err == nil {
+							color.Green("✓ HTTPS endpoint verified successfully!\n")
+							return nil
+						}
+					}
+				}
+
+				if i < maxRetries-1 {
+					if d.Verbose {
+						fmt.Printf("⏳ HTTPS not ready yet, retrying in 10 seconds... (attempt %d/%d)\n", i+1, maxRetries)
+						if err != nil {
+							fmt.Printf("   Error: %v\n", err)
+						}
+					}
+					time.Sleep(10 * time.Second)
+				}
+			}
+
+			// If we get here, HTTPS verification failed
+			return fmt.Errorf("HTTPS endpoint verification failed for %s - certificate may not be valid", d.config.Project.Domain)
 		}
 
 		if i == 0 {
