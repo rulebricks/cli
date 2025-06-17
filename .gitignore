@@ -2,6 +2,7 @@
 *.yml
 *.json
 
+!.github/**
 !.goreleaser.yml
 
 rulebricks
