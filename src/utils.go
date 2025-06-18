@@ -65,12 +65,11 @@ func generateSecureToken(length int) string {
 
 // generateDatabasePassword creates a strong database password
 func generateDatabasePassword() string {
-	// Use a mix of characters but avoid problematic ones for shell/URL encoding
+	// Use only alphanumeric characters to avoid URL encoding issues
 	const (
-		upperChars   = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-		lowerChars   = "abcdefghijklmnopqrstuvwxyz"
-		digitChars   = "0123456789"
-		specialChars = "!@#%^&*()-_=+"
+		upperChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		lowerChars = "abcdefghijklmnopqrstuvwxyz"
+		digitChars = "0123456789"
 	)
 
 	// Ensure at least one character from each set
@@ -78,11 +77,10 @@ func generateDatabasePassword() string {
 	password += getRandomChar(upperChars)
 	password += getRandomChar(lowerChars)
 	password += getRandomChar(digitChars)
-	password += getRandomChar(specialChars)
 
 	// Fill the rest randomly from all sets
-	allChars := upperChars + lowerChars + digitChars + specialChars
-	remaining := 12 // Total length of 16
+	allChars := upperChars + lowerChars + digitChars
+	remaining := 13 // Total length of 16
 	for i := 0; i < remaining; i++ {
 		password += getRandomChar(allChars)
 	}

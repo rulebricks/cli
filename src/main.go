@@ -368,7 +368,7 @@ Use --cluster to also destroy the Kubernetes cluster and all infrastructure.`,
 			}
 		}
 
-		destroyer := NewDestroyer(config, !destroyCluster)
+		destroyer := NewDestroyer(config, destroyCluster)
 		if err := destroyer.Execute(); err != nil {
 			log.Fatalf("Destroy failed: %v", err)
 		}

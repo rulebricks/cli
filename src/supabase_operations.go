@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	"github.com/fatih/color"
+	"gopkg.in/yaml.v3"
 )
 
 // SupabaseOperations handles Supabase deployment and configuration
@@ -27,6 +28,7 @@ type SupabaseOperations struct {
 	sharedSecrets *SharedSecrets
 	assetManager  *AssetManager
 	chartVersion  string
+	chartManager  *ChartManager
 }
 
 // NewSupabaseOperations creates a new Supabase operations handler
@@ -42,13 +44,22 @@ func NewSupabaseOperations(config Config, verbose bool, chartVersion string) *Su
 		}
 	}
 
+	// Create chart manager for downloading Supabase chart
+	chartManager, err := NewChartManager("", verbose)
+	if err != nil && verbose {
+		fmt.Printf("Warning: Failed to create chart manager: %v\n", err)
+	}
+
 	return &SupabaseOperations{
 		config:       config,
 		verbose:      verbose,
 		assetManager: assetManager,
 		chartVersion: chartVersion,
+		chartManager: chartManager,
 	}
 }
+
+
 
 // Deploy handles Supabase deployment based on type
 func (s *SupabaseOperations) Deploy() error {
@@ -503,8 +514,35 @@ func (s *SupabaseOperations) PushDatabaseSchema(dryRun bool) error {
 			cmd = exec.Command("supabase", "db", "push", "--include-all")
 		}
 
-	case "self-hosted", "external":
-		// For self-hosted/external, use --db-url flag
+	case "self-hosted":
+		// For self-hosted, we need to port-forward to access the database
+		supabaseNamespace := s.getNamespace("supabase")
+
+		// Start port-forward in the background
+		portForwardCmd := exec.Command("kubectl", "port-forward",
+			"-n", supabaseNamespace,
+			"svc/supabase-supabase-db",
+			"5433:5432")
+
+		if err := portForwardCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start port-forward: %w", err)
+		}
+		defer portForwardCmd.Process.Kill() // Ensure we clean up the port-forward
+
+		// Give port-forward time to establish
+		time.Sleep(2 * time.Second)
+
+		// Use localhost with the forwarded port
+		dbURL := fmt.Sprintf("postgresql://postgres:%s@localhost:5433/postgres?sslmode=disable", s.dbPassword)
+
+		if dryRun {
+			cmd = exec.Command("supabase", "db", "push", "--include-all", "--db-url", dbURL, "--dry-run")
+		} else {
+			cmd = exec.Command("supabase", "db", "push", "--include-all", "--db-url", dbURL)
+		}
+
+	case "external":
+		// For external database, use the configured connection URL
 		dbURL, err := s.getConnectionURL()
 		if err != nil {
 			return fmt.Errorf("failed to get database connection URL: %w", err)
@@ -575,9 +613,81 @@ func (s *SupabaseOperations) getAPIKeys() error {
 	return nil
 }
 
+// loadChartValues loads values from a YAML file in the chart directory
+func (s *SupabaseOperations) loadChartValues(chartPath string, filename string) (map[string]interface{}, error) {
+	valuesPath := filepath.Join(chartPath, filename)
+
+	data, err := os.ReadFile(valuesPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", filename, err)
+	}
+
+	var values map[string]interface{}
+	if err := yaml.Unmarshal(data, &values); err != nil {
+		return nil, fmt.Errorf("failed to parse %s: %w", filename, err)
+	}
+
+	return values, nil
+}
+
+// mergeValues recursively merges override values into base values
+func mergeValues(base, override map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	// Copy base values
+	for k, v := range base {
+		result[k] = v
+	}
+
+	// Apply overrides
+	for k, v := range override {
+		if baseVal, exists := result[k]; exists {
+			// If both are maps, merge recursively
+			if baseMap, baseOk := baseVal.(map[string]interface{}); baseOk {
+				if overrideMap, overrideOk := v.(map[string]interface{}); overrideOk {
+					result[k] = mergeValues(baseMap, overrideMap)
+					continue
+				}
+			}
+		}
+		// Otherwise, override the value
+		result[k] = v
+	}
+
+	return result
+}
+
 // createSelfHostedValues creates Helm values for self-hosted deployment
 func (s *SupabaseOperations) createSelfHostedValues() map[string]interface{} {
+	// Generate analytics key if not set
+	analyticsKey := generateRandomString(32)
+
+	// Create complete values configuration with injected values
+	// This mirrors what setup.sh does when creating values-selfhosted-configured.yaml
 	values := map[string]interface{}{
+		"secret": map[string]interface{}{
+			"jwt": map[string]interface{}{
+				"anonKey":    s.anonKey,
+				"serviceKey": s.serviceKey,
+				"secret":     s.jwtSecret,
+			},
+			"smtp": map[string]interface{}{
+				"username": s.config.Email.SMTP.Username,
+				"password": s.secrets["smtp_password"],
+			},
+			"db": map[string]interface{}{
+				"username": "postgres",
+				"password": s.dbPassword,
+				"database": "postgres",
+			},
+			"analytics": map[string]interface{}{
+				"apiKey": analyticsKey,
+			},
+			"dashboard": map[string]interface{}{
+				"username": "supabase",
+				"password": s.dashboardPass,
+			},
+		},
 		"global": map[string]interface{}{
 			"jwt": map[string]interface{}{
 				"secret":     s.jwtSecret,
@@ -589,66 +699,123 @@ func (s *SupabaseOperations) createSelfHostedValues() map[string]interface{} {
 		"db": map[string]interface{}{
 			"enabled": true,
 			"image": map[string]interface{}{
-				"tag": "15.1.0.147",
+				"repository": "supabase/postgres",
+				"tag":        "15.1.0.147",
+				"pullPolicy": "IfNotPresent",
+			},
+			"persistence": map[string]interface{}{
+				"enabled": true,
+				"size":    "10Gi",
 			},
 			"auth": map[string]interface{}{
 				"username": "postgres",
 				"password": s.dbPassword,
 				"database": "postgres",
 			},
-			"persistence": map[string]interface{}{
-				"enabled": true,
-				"size":    "20Gi",
-			},
 		},
 		"studio": map[string]interface{}{
 			"enabled": true,
 			"image": map[string]interface{}{
-				"tag": "20231123-64a766a",
+				"repository": "supabase/studio",
+				"tag":        "20231123-64a766a",
+				"pullPolicy": "IfNotPresent",
 			},
 			"auth": map[string]interface{}{
 				"password": s.dashboardPass,
+			},
+			"environment": map[string]interface{}{
+				"SUPABASE_PUBLIC_URL":             fmt.Sprintf("https://supabase.%s", s.config.Project.Domain),
+				"NEXT_PUBLIC_ENABLE_LOGS":         "true",
+				"NEXT_ANALYTICS_BACKEND_PROVIDER": "postgres",
+				"STUDIO_PG_META_URL":              "http://supabase-supabase-meta:8080",
+				"POSTGRES_PASSWORD":               s.dbPassword,
+				"DEFAULT_ORGANIZATION_NAME":       "Default Organization",
+				"DEFAULT_PROJECT_NAME":            "Default Project",
+				"SUPABASE_URL":                    "http://supabase-supabase-kong:8000",
 			},
 		},
 		"auth": map[string]interface{}{
 			"enabled": true,
 			"image": map[string]interface{}{
-				"tag": "v2.132.3",
+				"repository": "supabase/gotrue",
+				"tag":        "v2.132.3",
+				"pullPolicy": "IfNotPresent",
 			},
-			"env": s.createAuthEnv(),
+			"environment": s.createAuthEnv(),
 		},
 		"rest": map[string]interface{}{
 			"enabled": true,
 			"image": map[string]interface{}{
-				"tag": "v12.0.1",
+				"repository": "postgrest/postgrest",
+				"tag":        "v12.0.1",
+				"pullPolicy": "IfNotPresent",
+			},
+			"environment": map[string]interface{}{
+				"PGRST_DB_SCHEMAS":            "public,storage,graphql_public",
+				"PGRST_DB_EXTRA_SEARCH_PATH":  "public,extensions",
+				"PGRST_DB_MAX_ROWS":           "1000",
+				"PGRST_DB_ANON_ROLE":          "anon",
+				"PGRST_JWT_AUD":               "authenticated",
 			},
 		},
 		"realtime": map[string]interface{}{
 			"enabled": true,
 			"image": map[string]interface{}{
-				"tag": "v2.25.50",
+				"repository": "supabase/realtime",
+				"tag":        "v2.25.50",
+				"pullPolicy": "IfNotPresent",
+			},
+		},
+		"meta": map[string]interface{}{
+			"enabled": true,
+			"image": map[string]interface{}{
+				"repository": "supabase/postgres-meta",
+				"tag":        "v0.75.0",
+				"pullPolicy": "IfNotPresent",
 			},
 		},
 		"storage": map[string]interface{}{
 			"enabled": true,
 			"image": map[string]interface{}{
-				"tag": "v0.46.4",
+				"repository": "supabase/storage-api",
+				"tag":        "v0.46.4",
+				"pullPolicy": "IfNotPresent",
 			},
 			"persistence": map[string]interface{}{
 				"enabled": true,
 				"size":    "10Gi",
 			},
+			"environment": map[string]interface{}{
+				"FILE_SIZE_LIMIT":              "52428800",
+				"STORAGE_BACKEND":              "file",
+				"FILE_STORAGE_BACKEND_PATH":    "/var/lib/storage",
+				"TENANT_ID":                    "stub",
+				"REGION":                       "stub",
+				"GLOBAL_S3_BUCKET":             "stub",
+			},
+		},
+		"imgproxy": map[string]interface{}{
+			"enabled": true,
+			"image": map[string]interface{}{
+				"repository": "darthsim/imgproxy",
+				"tag":        "v3.8.0",
+				"pullPolicy": "IfNotPresent",
+			},
 		},
 		"kong": map[string]interface{}{
 			"enabled": true,
 			"image": map[string]interface{}{
-				"tag": "2.8.1",
+				"repository": "kong",
+				"tag":        "2.8.1",
+				"pullPolicy": "IfNotPresent",
 			},
 			"ingress": map[string]interface{}{
 				"enabled":   true,
 				"className": "traefik",
 				"annotations": map[string]interface{}{
-					"cert-manager.io/cluster-issuer": "letsencrypt-prod",
+					"traefik.ingress.kubernetes.io/router.entrypoints":   "websecure",
+					"traefik.ingress.kubernetes.io/router.tls":           "true",
+					"traefik.ingress.kubernetes.io/router.tls.certresolver": "le",
 				},
 				"hosts": []map[string]interface{}{
 					{
@@ -661,14 +828,31 @@ func (s *SupabaseOperations) createSelfHostedValues() map[string]interface{} {
 						},
 					},
 				},
-				"tls": []map[string]interface{}{
-					{
-						"secretName": "supabase-tls",
-						"hosts": []string{
-							fmt.Sprintf("supabase.%s", s.config.Project.Domain),
-						},
-					},
-				},
+				"tls": []interface{}{},
+			},
+		},
+		"analytics": map[string]interface{}{
+			"enabled": true,
+			"image": map[string]interface{}{
+				"repository": "supabase/logflare",
+				"tag":        "1.4.0",
+				"pullPolicy": "IfNotPresent",
+			},
+		},
+		"vector": map[string]interface{}{
+			"enabled": true,
+			"image": map[string]interface{}{
+				"repository": "timberio/vector",
+				"tag":        "0.28.1-alpine",
+				"pullPolicy": "IfNotPresent",
+			},
+		},
+		"functions": map[string]interface{}{
+			"enabled": false,
+			"image": map[string]interface{}{
+				"repository": "supabase/edge-runtime",
+				"tag":        "v1.29.1",
+				"pullPolicy": "IfNotPresent",
 			},
 		},
 	}
@@ -724,16 +908,16 @@ func (s *SupabaseOperations) createExternalDBValues() map[string]interface{} {
 )
 
 	// Update auth service
-	authEnv := values["auth"].(map[string]interface{})["env"].(map[string]interface{})
+	authEnv := values["auth"].(map[string]interface{})["environment"].(map[string]interface{})
 	authEnv["DATABASE_URL"] = dbURL
 
 	// Update rest service
-	values["rest"].(map[string]interface{})["env"] = map[string]interface{}{
+	values["rest"].(map[string]interface{})["environment"] = map[string]interface{}{
 		"PGRST_DB_URI": dbURL,
 	}
 
 	// Update realtime service
-	values["realtime"].(map[string]interface{})["env"] = map[string]interface{}{
+	values["realtime"].(map[string]interface{})["environment"] = map[string]interface{}{
 		"DB_HOST":     s.config.Database.External.Host,
 		"DB_PORT":     fmt.Sprintf("%d", s.config.Database.External.Port),
 		"DB_USER":     s.config.Database.External.Username,
@@ -743,7 +927,7 @@ func (s *SupabaseOperations) createExternalDBValues() map[string]interface{} {
 	}
 
 	// Update storage service
-	values["storage"].(map[string]interface{})["env"] = map[string]interface{}{
+	values["storage"].(map[string]interface{})["environment"] = map[string]interface{}{
 		"DATABASE_URL": dbURL,
 	}
 
@@ -822,6 +1006,31 @@ func (s *SupabaseOperations) deploySupabaseHelm(values map[string]interface{}) e
 	}
 	defer os.Remove(valuesFile)
 
+	// Download and extract Supabase chart
+	var supabaseChartPath string
+	if s.chartManager != nil && s.chartVersion != "" {
+		// Pull the Supabase chart using ChartManager
+		chartInfo, err := s.chartManager.PullSupabaseChart(s.chartVersion)
+		if err != nil {
+			return fmt.Errorf("failed to get Supabase chart: %w", err)
+		}
+
+		// Extract the chart
+		extractedPath, err := s.chartManager.ExtractChart(chartInfo.CachedPath)
+		if err != nil {
+			return fmt.Errorf("failed to extract Supabase chart: %w", err)
+		}
+		defer os.RemoveAll(extractedPath)
+
+		// The chart should be extracted as "supabase" directory
+		supabaseChartPath = filepath.Join(extractedPath, "supabase")
+	} else {
+		// Fallback to local path
+		supabaseChartPath = "./charts/supabase"
+	}
+
+
+
 	// Create namespace
 	supabaseNamespace := s.getNamespace("supabase")
 	cmd := exec.Command("kubectl", "create", "namespace", supabaseNamespace)
@@ -829,8 +1038,9 @@ func (s *SupabaseOperations) deploySupabaseHelm(values map[string]interface{}) e
 
 	// Deploy with Helm
 	cmd = exec.Command("helm", "upgrade", "--install", "supabase",
-		"./charts/supabase",
+		supabaseChartPath,
 		"--namespace", supabaseNamespace,
+		"--reset-values",
 		"--values", valuesFile,
 		"--wait",
 		"--timeout", "15m")
@@ -858,49 +1068,13 @@ func (s *SupabaseOperations) waitForSupabaseReady() error {
 
 // RunMigrations runs database migrations
 func (s *SupabaseOperations) RunMigrations() error {
-	fmt.Println("🔄 Running database migrations...")
-
 	// Ensure Supabase assets are available
 	if err := s.EnsureSupabaseAssets(); err != nil {
 		return fmt.Errorf("failed to ensure Supabase assets: %w", err)
 	}
 
-	// Get database pod
-	supabaseNamespace := s.getNamespace("supabase")
-	cmd := exec.Command("kubectl", "get", "pod",
-		"-l", "app.kubernetes.io/name=supabase-db",
-		"-n", supabaseNamespace,
-		"-o", "jsonpath={.items[0].metadata.name}")
-
-	output, err := cmd.Output()
-	if err != nil {
-		return fmt.Errorf("failed to get database pod: %w", err)
-	}
-
-	dbPod := strings.TrimSpace(string(output))
-
-	// Copy migrations
-	migrationsPath := filepath.Join("supabase", "migrations")
-	cmd = exec.Command("kubectl", "cp", migrationsPath,
-		fmt.Sprintf("%s/%s:/tmp/migrations", supabaseNamespace, dbPod))
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to copy migrations: %w", err)
-	}
-
-	// Run migrations
-	cmd = exec.Command("kubectl", "exec", dbPod,
-		"-n", supabaseNamespace,
-		"--",
-		"bash", "-c",
-		fmt.Sprintf("cd /tmp/migrations && PGPASSWORD=%s psql -U postgres -d postgres -f init.sql", s.dbPassword))
-
-	if s.verbose {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	}
-
-	return cmd.Run()
+	// Use PushDatabaseSchema which handles all database types correctly
+	return s.PushDatabaseSchema(false)
 }
 
 // RunMigrationsExternal runs migrations on external database
@@ -1114,7 +1288,7 @@ func (s *SupabaseOperations) getConnectionURL() (string, error) {
 	case "self-hosted":
 		// For self-hosted, connect to the PostgreSQL service in the cluster
 		supabaseNamespace := s.getNamespace("supabase")
-		return fmt.Sprintf("postgresql://postgres:%s@supabase-db.%s.svc.cluster.local:5432/postgres?sslmode=disable",
+		return fmt.Sprintf("postgresql://postgres:%s@supabase-supabase-db.%s.svc.cluster.local:5432/postgres?sslmode=disable",
 			s.dbPassword, supabaseNamespace), nil
 
 	case "external":

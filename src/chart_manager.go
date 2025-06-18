@@ -63,16 +63,26 @@ func NewChartManager(cacheDir string, verbose bool) (*ChartManager, error) {
 
 // GetChart downloads or retrieves a chart from cache
 func (cm *ChartManager) GetChart(version string) (*ChartInfo, error) {
-	chartName := fmt.Sprintf("rulebricks-%s.tgz", version)
+	return cm.getChartByName("rulebricks", version)
+}
+
+// GetSupabaseChart downloads or retrieves the Supabase chart from cache
+func (cm *ChartManager) GetSupabaseChart(version string) (*ChartInfo, error) {
+	return cm.getChartByName("supabase", version)
+}
+
+// getChartByName is the generic method for downloading any chart type
+func (cm *ChartManager) getChartByName(name, version string) (*ChartInfo, error) {
+	chartName := fmt.Sprintf("%s-%s.tgz", name, version)
 	chartPath := filepath.Join(cm.cacheDir, chartName)
 
 	// Check if already cached
 	if _, err := os.Stat(chartPath); err == nil {
 		if cm.verbose {
-			fmt.Printf("📦 Using cached chart: %s\n", chartPath)
+			fmt.Printf("📦 Using cached %s chart: %s\n", name, chartPath)
 		}
 		return &ChartInfo{
-			Name:       "rulebricks",
+			Name:       name,
 			Version:    version,
 			Downloaded: false,
 			CachedPath: chartPath,
@@ -80,7 +90,7 @@ func (cm *ChartManager) GetChart(version string) (*ChartInfo, error) {
 	}
 
 	// Download chart
-	fmt.Printf("📥 Downloading Rulebricks chart version %s...\n", version)
+	fmt.Printf("📥 Downloading %s chart version %s...\n", name, version)
 
 	chartURL := fmt.Sprintf("%s/v%s/%s", cm.baseURL, version, chartName)
 	checksumURL := fmt.Sprintf("%s.sha256", chartURL)
@@ -105,7 +115,7 @@ func (cm *ChartManager) GetChart(version string) (*ChartInfo, error) {
 	color.Green("✅ Chart downloaded and verified successfully")
 
 	return &ChartInfo{
-		Name:       "rulebricks",
+		Name:       name,
 		Version:    version,
 		URL:        chartURL,
 		SHA256:     checksum,
@@ -143,15 +153,20 @@ func (cm *ChartManager) GetLatestVersion() (string, error) {
 	return string(matches[1]), nil
 }
 
-// ListCachedVersions returns all cached chart versions
+// ListCachedVersions returns all cached chart versions for rulebricks
 func (cm *ChartManager) ListCachedVersions() ([]string, error) {
+	return cm.ListCachedVersionsByName("rulebricks")
+}
+
+// ListCachedVersionsByName returns all cached chart versions for a specific chart
+func (cm *ChartManager) ListCachedVersionsByName(name string) ([]string, error) {
 	entries, err := os.ReadDir(cm.cacheDir)
 	if err != nil {
 		return nil, err
 	}
 
 	var versions []string
-	re := regexp.MustCompile(`^rulebricks-(.+)\.tgz$`)
+	re := regexp.MustCompile(fmt.Sprintf(`^%s-(.+)\.tgz$`, name))
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -382,9 +397,28 @@ func (cm *ChartManager) PullChart(version string) (*ChartInfo, error) {
 	return cm.GetChart(version)
 }
 
+// PullSupabaseChart is a convenience method that downloads a specific version or latest of Supabase chart
+func (cm *ChartManager) PullSupabaseChart(version string) (*ChartInfo, error) {
+	if version == "" || version == "latest" {
+		var err error
+		version, err = cm.GetLatestVersion()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get latest version: %w", err)
+		}
+		fmt.Printf("📌 Latest version: %s\n", version)
+	}
+
+	return cm.GetSupabaseChart(version)
+}
+
 // GetChartURL returns the URL for a specific chart version
 func (cm *ChartManager) GetChartURL(version string) string {
-	return fmt.Sprintf("%s/v%s/rulebricks-%s.tgz", cm.baseURL, version, version)
+	return cm.GetChartURLByName("rulebricks", version)
+}
+
+// GetChartURLByName returns the URL for a specific chart and version
+func (cm *ChartManager) GetChartURLByName(name, version string) string {
+	return fmt.Sprintf("%s/v%s/%s-%s.tgz", cm.baseURL, version, name, version)
 }
 
 // SetBaseURL allows overriding the default base URL (useful for testing or mirrors)

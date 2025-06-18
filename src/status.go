@@ -966,15 +966,15 @@ func (u *Updater) updateDatabase(change Change) error {
 
 // Destroyer handles deployment teardown
 type Destroyer struct {
-	config     Config
-	softDelete bool
+	config        Config
+	destroyCluster bool
 }
 
 // NewDestroyer creates a new destroyer
-func NewDestroyer(config Config, softDelete bool) *Destroyer {
+func NewDestroyer(config Config, destroyCluster bool) *Destroyer {
 	return &Destroyer{
-		config:     config,
-		softDelete: softDelete,
+		config:        config,
+		destroyCluster: destroyCluster,
 	}
 }
 
@@ -996,19 +996,20 @@ func (d *Destroyer) Execute() error {
 		{"Delete ingress controller", d.deleteIngress, false},
 		{"Clean up persistent volumes", d.cleanupPVCs, false},
 		{"Delete namespaces", d.deleteNamespaces, false},
-		{"Delete managed Supabase project", d.deleteManagedSupabase, false},
-		{"Destroy infrastructure", d.destroyInfrastructure, d.softDelete},
+		{"Clean up cluster-wide resources", d.cleanupClusterResources, false},
+		{"Delete managed Supabase", d.deleteManagedSupabase, false},
+		{"Destroy infrastructure", d.destroyInfrastructure, !d.destroyCluster},
 	}
 
-	if d.softDelete {
-		fmt.Println("\n🗑️  Beginning soft deployment teardown (preserving infrastructure)...")
+	if d.destroyCluster {
+		fmt.Println("\n🗑️  Beginning full deployment teardown (including infrastructure)...")
 	} else {
-		fmt.Println("\n🗑️  Beginning full deployment teardown...")
+		fmt.Println("\n🗑️  Beginning deployment teardown (preserving cluster infrastructure)...")
 	}
 
 	for _, step := range steps {
 		if step.skip {
-			fmt.Printf("\n⏭️  Skipping %s (soft delete mode)\n", step.name)
+			fmt.Printf("\n⏭️  Skipping %s (preserving cluster)\n", step.name)
 			continue
 		}
 
@@ -1049,8 +1050,45 @@ func (d *Destroyer) deleteDatabase() error {
 		return nil
 	}
 
-	cmd := exec.Command("helm", "uninstall", "supabase", "-n", "default")
-	return cmd.Run()
+	supabaseNamespace := d.getNamespace("supabase")
+
+	// First uninstall the helm release
+	cmd := exec.Command("helm", "uninstall", "supabase", "-n", supabaseNamespace)
+	if err := cmd.Run(); err != nil {
+		// Don't fail if release doesn't exist
+		if !strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("failed to uninstall supabase: %w", err)
+		}
+	}
+
+	// Clean up cluster-wide resources that Supabase might have created
+	fmt.Println("  Cleaning up Supabase cluster-wide resources...")
+
+	// Delete ClusterRoles
+	clusterRoles := []string{"supabase-reader"}
+	for _, cr := range clusterRoles {
+		cmd = exec.Command("kubectl", "delete", "clusterrole", cr, "--ignore-not-found=true")
+		if err := cmd.Run(); err != nil {
+			color.Yellow("  Warning: Failed to delete ClusterRole %s: %v\n", cr, err)
+		}
+	}
+
+	// Delete ClusterRoleBindings
+	clusterRoleBindings := []string{"supabase-view"}
+	for _, crb := range clusterRoleBindings {
+		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", crb, "--ignore-not-found=true")
+		if err := cmd.Run(); err != nil {
+			color.Yellow("  Warning: Failed to delete ClusterRoleBinding %s: %v\n", crb, err)
+		}
+	}
+
+	// Delete the namespace itself
+	cmd = exec.Command("kubectl", "delete", "namespace", supabaseNamespace, "--wait=false", "--ignore-not-found=true")
+	if err := cmd.Run(); err != nil {
+		color.Yellow("  Warning: Failed to delete namespace %s: %v\n", supabaseNamespace, err)
+	}
+
+	return nil
 }
 
 func (d *Destroyer) deleteIngress() error {
@@ -1100,7 +1138,7 @@ func (d *Destroyer) cleanupPVCs() error {
 	if d.config.Database.Type == "self-hosted" {
 		supabaseNamespace := d.getNamespace("supabase")
 		fmt.Printf("  Deleting self-hosted Supabase PVCs in %s namespace...\n", supabaseNamespace)
-		cmd = exec.Command("kubectl", "delete", "pvc", "-l", "app.kubernetes.io/instance=supabase", "-n", supabaseNamespace)
+		cmd = exec.Command("kubectl", "delete", "pvc", "-l", "app.kubernetes.io/instance=supabase", "-n", supabaseNamespace, "--wait=false")
 		if err := cmd.Run(); err != nil {
 			color.Yellow("  Warning: Failed to delete Supabase PVCs: %v\n", err)
 		}
@@ -1110,23 +1148,76 @@ func (d *Destroyer) cleanupPVCs() error {
 }
 
 func (d *Destroyer) deleteNamespaces() error {
-	namespace := d.config.Project.Namespace
-	if namespace == "" {
-		namespace = d.getNamespace("rulebricks")
+	// Delete all project-related namespaces
+	namespaces := []string{
+		d.getNamespace("app"),
+		d.getNamespace("supabase"),
+		d.getNamespace("monitoring"),
+		d.getNamespace("traefik"),
 	}
 
-	fmt.Printf("  Deleting all PVCs in %s namespace...\n", namespace)
-	cmd := exec.Command("kubectl", "delete", "namespace", namespace, "--wait=false", "--ignore-not-found=true")
-	if err := cmd.Run(); err != nil {
-		color.Yellow("  Warning: Failed to delete %s namespace: %v\n", namespace, err)
+	// Also add the custom namespace if specified
+	if d.config.Project.Namespace != "" {
+		namespaces = append(namespaces, d.config.Project.Namespace)
 	}
 
-	// Delete the traefik namespace
-	traefikNamespace := d.getNamespace("traefik")
-	fmt.Printf("  Deleting %s namespace...\n", traefikNamespace)
-	cmd = exec.Command("kubectl", "delete", "namespace", traefikNamespace, "--wait=false", "--ignore-not-found=true")
-	if err := cmd.Run(); err != nil {
-		color.Yellow("  Warning: Failed to delete %s namespace: %v\n", traefikNamespace, err)
+	for _, ns := range namespaces {
+		fmt.Printf("  Deleting namespace %s...\n", ns)
+		cmd := exec.Command("kubectl", "delete", "namespace", ns, "--wait=false", "--ignore-not-found=true")
+		if err := cmd.Run(); err != nil {
+			color.Yellow("  Warning: Failed to delete namespace %s: %v\n", ns, err)
+		}
+	}
+
+	return nil
+}
+
+func (d *Destroyer) cleanupClusterResources() error {
+	fmt.Println("  Cleaning up cluster-wide resources...")
+
+	// Clean up any remaining ClusterRoles with project prefix
+	projectPrefix := d.config.Project.Name
+
+	// Get all clusterroles
+	cmd := exec.Command("kubectl", "get", "clusterroles", "-o", "name")
+	output, err := cmd.Output()
+	if err == nil {
+		roles := strings.Split(string(output), "\n")
+		for _, role := range roles {
+			role = strings.TrimSpace(role)
+			if role == "" {
+				continue
+			}
+			// Check if role contains project name or supabase
+			if strings.Contains(role, projectPrefix) || strings.Contains(role, "supabase") {
+				roleName := strings.TrimPrefix(role, "clusterrole.rbac.authorization.k8s.io/")
+				cmd = exec.Command("kubectl", "delete", "clusterrole", roleName, "--ignore-not-found=true")
+				if err := cmd.Run(); err != nil {
+					color.Yellow("  Warning: Failed to delete ClusterRole %s: %v\n", roleName, err)
+				}
+			}
+		}
+	}
+
+	// Get all clusterrolebindings
+	cmd = exec.Command("kubectl", "get", "clusterrolebindings", "-o", "name")
+	output, err = cmd.Output()
+	if err == nil {
+		bindings := strings.Split(string(output), "\n")
+		for _, binding := range bindings {
+			binding = strings.TrimSpace(binding)
+			if binding == "" {
+				continue
+			}
+			// Check if binding contains project name or supabase
+			if strings.Contains(binding, projectPrefix) || strings.Contains(binding, "supabase") {
+				bindingName := strings.TrimPrefix(binding, "clusterrolebinding.rbac.authorization.k8s.io/")
+				cmd = exec.Command("kubectl", "delete", "clusterrolebinding", bindingName, "--ignore-not-found=true")
+				if err := cmd.Run(); err != nil {
+					color.Yellow("  Warning: Failed to delete ClusterRoleBinding %s: %v\n", bindingName, err)
+				}
+			}
+		}
 	}
 
 	return nil

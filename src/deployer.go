@@ -550,8 +550,8 @@ func (d *Deployer) deployRulebricksApp() error {
 	switch d.config.Database.Type {
 	case "self-hosted":
 		supabaseURL = fmt.Sprintf("https://supabase.%s", d.config.Project.Domain)
-		anonKey = d.secrets["supabase_anon_key"]
-		serviceKey = d.secrets["supabase_service_key"]
+		anonKey = d.sharedSecrets.SupabaseAnonKey
+		serviceKey = d.sharedSecrets.SupabaseServiceKey
 
 	case "managed":
 		// Should have been configured in executeScript
@@ -616,14 +616,19 @@ func (d *Deployer) deployRulebricksApp() error {
 		}
 	}
 
+	// Configure HPS
+	hpsConfig := map[string]interface{}{
+		"enabled": true,
+	}
+
 	// Configure HPS image if custom registry is specified
 	if d.config.Advanced.DockerRegistry.HPSImage != "" {
-		rulebricksValues["hps"] = map[string]interface{}{
-			"image": map[string]interface{}{
-				"repository": d.config.Advanced.DockerRegistry.HPSImage,
-			},
+		hpsConfig["image"] = map[string]interface{}{
+			"repository": d.config.Advanced.DockerRegistry.HPSImage,
 		}
 	}
+
+	rulebricksValues["hps"] = hpsConfig
 
 	// Add custom values if specified
 	if customApp, ok := d.config.Advanced.CustomValues["app"].(map[string]interface{}); ok {
@@ -1084,6 +1089,7 @@ func (d *Deployer) configureTLS() error {
 			"--entrypoints.websecure.address=:8443",
 			"--entrypoints.web.http.redirections.entryPoint.to=websecure",
 			"--entrypoints.web.http.redirections.entryPoint.scheme=https",
+			"--entrypoints.web.http.redirections.entrypoint.port=443",
 			fmt.Sprintf("--certificatesresolvers.le.acme.email=%s", d.config.Security.TLS.AcmeEmail),
 			"--certificatesresolvers.le.acme.storage=/data/acme.json",
 			"--certificatesresolvers.le.acme.tlschallenge=true",
@@ -1283,10 +1289,9 @@ func (d *Deployer) configureTLS() error {
 	return fmt.Errorf("timeout waiting for TLS certificate after 5 minutes - check if domain is accessible and DNS is properly configured")
 }
 
+
 // rollback reverses completed steps
 func (d *Deployer) rollback(completedSteps []int) {
-
-	/*
 	// Run the destroy command to clean up everything except the cluster
 	destroyer := NewDestroyer(*d.config, true)
 	if err := destroyer.Execute(); err != nil {
@@ -1295,7 +1300,6 @@ func (d *Deployer) rollback(completedSteps []int) {
 	} else {
 		color.Green("✅ Soft destroy completed - cluster preserved, ready for retry\n")
 	}
-	*/
 }
 
 // SaveState persists deployment state
