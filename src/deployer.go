@@ -1089,13 +1089,18 @@ func (d *Deployer) configureTLS() error {
 			"--entrypoints.websecure.address=:8443",
 			"--entrypoints.web.http.redirections.entryPoint.to=websecure",
 			"--entrypoints.web.http.redirections.entryPoint.scheme=https",
-			"--entrypoints.web.http.redirections.entrypoint.port=443",
 			fmt.Sprintf("--certificatesresolvers.le.acme.email=%s", d.config.Security.TLS.AcmeEmail),
 			"--certificatesresolvers.le.acme.storage=/data/acme.json",
 			"--certificatesresolvers.le.acme.tlschallenge=true",
 		},
 		"ports": map[string]interface{}{
 			"websecure": map[string]interface{}{
+				"port": 8443,
+				"exposedPort": 443,
+				"expose": map[string]interface{}{
+					"enabled": true,
+					"port": 443,
+				},
 				"tls": map[string]interface{}{
 					"enabled": true,
 					"certResolver": "le",
