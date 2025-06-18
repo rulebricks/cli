@@ -491,87 +491,173 @@ func (s *SupabaseOperations) PushDatabaseSchema(dryRun bool) error {
 	if dryRun {
 		fmt.Println("📊 Checking database migrations (dry run)...")
 	} else {
-		fmt.Println("📊 Pushing database schema...")
+		fmt.Println("📊 Running database migrations...")
 	}
 
-	// Change to supabase directory
-	if err := os.Chdir("supabase"); err != nil {
-		return fmt.Errorf("failed to change directory: %w", err)
+	// Check if migrations directory exists
+	if _, err := os.Stat("supabase/migrations"); os.IsNotExist(err) {
+		fmt.Println("No migrations directory found, skipping...")
+		return nil
 	}
-	defer os.Chdir("..")
-
-	var cmd *exec.Cmd
 
 	switch s.config.Database.Type {
 	case "managed":
-		// For managed Supabase, ensure we're linked first
+		// For managed Supabase, use the standard db push command
 		if err := s.ensureLinked(); err != nil {
 			return fmt.Errorf("failed to ensure Supabase link: %w", err)
 		}
+
+		// Change to supabase directory
+		if err := os.Chdir("supabase"); err != nil {
+			return fmt.Errorf("failed to change directory: %w", err)
+		}
+		defer os.Chdir("..")
+
+		var cmd *exec.Cmd
 		if dryRun {
 			cmd = exec.Command("supabase", "db", "push", "--include-all", "--dry-run")
 		} else {
 			cmd = exec.Command("supabase", "db", "push", "--include-all")
 		}
+		cmd.Stdin = strings.NewReader("Y\n")
+
+		if s.verbose {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			return cmd.Run()
+		}
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("supabase db push failed: %w\nOutput: %s", err, string(output))
+		}
+		return nil
 
 	case "self-hosted":
-		// For self-hosted, we need to port-forward to access the database
-		supabaseNamespace := s.getNamespace("supabase")
+		// For self-hosted, run migrations directly on the database pod
+		namespace := s.getNamespace("supabase")
 
-		// Start port-forward in the background
-		portForwardCmd := exec.Command("kubectl", "port-forward",
-			"-n", supabaseNamespace,
-			"svc/supabase-supabase-db",
-			"5433:5432")
-
-		if err := portForwardCmd.Start(); err != nil {
-			return fmt.Errorf("failed to start port-forward: %w", err)
+		// Get the database pod name
+		getDbPodCmd := exec.Command("kubectl", "get", "pod",
+			"-n", namespace,
+			"-l", "app.kubernetes.io/name=supabase-db,app.kubernetes.io/instance=supabase",
+			"-o", "jsonpath={.items[0].metadata.name}")
+		dbPodBytes, err := getDbPodCmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to get database pod: %w", err)
 		}
-		defer portForwardCmd.Process.Kill() // Ensure we clean up the port-forward
+		dbPod := strings.TrimSpace(string(dbPodBytes))
+		if dbPod == "" {
+			return fmt.Errorf("no database pod found")
+		}
 
-		// Give port-forward time to establish
-		time.Sleep(2 * time.Second)
+		// Copy migrations to the database pod
+		copyCmd := exec.Command("kubectl", "cp", "-n", namespace,
+			"./supabase/migrations", fmt.Sprintf("%s:/tmp/migrations", dbPod))
+		if err := copyCmd.Run(); err != nil {
+			return fmt.Errorf("failed to copy migrations: %w", err)
+		}
 
-		// Use localhost with the forwarded port
-		dbURL := fmt.Sprintf("postgresql://postgres:%s@localhost:5433/postgres?sslmode=disable", s.dbPassword)
+		// Create migrations tracking table if it doesn't exist
+		createTableCmd := fmt.Sprintf(`
+			PGPASSWORD=%s psql -U postgres -d postgres -c "
+			CREATE TABLE IF NOT EXISTS schema_migrations (
+				version VARCHAR(255) PRIMARY KEY,
+				applied_at TIMESTAMP DEFAULT NOW()
+			);"
+		`, s.dbPassword)
+
+		cmd := exec.Command("kubectl", "exec", "-n", namespace, dbPod, "--", "bash", "-c", createTableCmd)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to create migrations table: %w", err)
+		}
+
+		// Get list of already applied migrations
+		getAppliedCmd := fmt.Sprintf(`
+			PGPASSWORD=%s psql -U postgres -d postgres -t -c "
+			SELECT version FROM schema_migrations;"
+		`, s.dbPassword)
+
+		cmd = exec.Command("kubectl", "exec", "-n", namespace, dbPod, "--", "bash", "-c", getAppliedCmd)
+		appliedOutput, _ := cmd.Output()
+		appliedMigrations := make(map[string]bool)
+		for _, line := range strings.Split(string(appliedOutput), "\n") {
+			migration := strings.TrimSpace(line)
+			if migration != "" {
+				appliedMigrations[migration] = true
+			}
+		}
+
+		// Run migrations
+		migrationScript := fmt.Sprintf(`
+			cd /tmp/migrations
+			for f in *.sql; do
+				if [ -f "$f" ]; then
+					# Check if migration was already applied
+					applied=$(PGPASSWORD=%s psql -U postgres -d postgres -t -c "
+						SELECT COUNT(*) FROM schema_migrations WHERE version='$f';")
+					if [ "$(echo $applied | tr -d ' ')" = "0" ]; then
+						echo "Running migration: $f"
+						PGPASSWORD=%s psql -U postgres -d postgres -f "$f"
+						if [ $? -eq 0 ]; then
+							# Record successful migration
+							PGPASSWORD=%s psql -U postgres -d postgres -c "
+								INSERT INTO schema_migrations (version) VALUES ('$f');"
+						else
+							echo "Failed to run migration: $f"
+							exit 1
+						fi
+					else
+						echo "Skipping already applied migration: $f"
+					fi
+				fi
+			done
+		`, s.dbPassword, s.dbPassword, s.dbPassword)
 
 		if dryRun {
-			cmd = exec.Command("supabase", "db", "push", "--include-all", "--db-url", dbURL, "--dry-run")
+			fmt.Println("Would run the following migrations:")
+			// List migrations that would be run
+			listCmd := exec.Command("kubectl", "exec", "-n", namespace, dbPod, "--",
+				"bash", "-c", "ls -1 /tmp/migrations/*.sql 2>/dev/null | sort")
+			output, _ := listCmd.Output()
+			for _, file := range strings.Split(string(output), "\n") {
+				if file != "" {
+					filename := filepath.Base(file)
+					if !appliedMigrations[filename] {
+						fmt.Printf("  - %s\n", filename)
+					}
+				}
+			}
 		} else {
-			cmd = exec.Command("supabase", "db", "push", "--include-all", "--db-url", dbURL)
+			cmd = exec.Command("kubectl", "exec", "-n", namespace, dbPod, "--", "bash", "-c", migrationScript)
+			if s.verbose {
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+			}
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("failed to run migrations: %w", err)
+			}
 		}
+
+		// Clean up
+		cleanupCmd := exec.Command("kubectl", "exec", "-n", namespace, dbPod, "--",
+			"rm", "-rf", "/tmp/migrations")
+		cleanupCmd.Run()
+
+		fmt.Println("✅ Database migrations completed!")
+		return nil
 
 	case "external":
-		// For external database, use the configured connection URL
-		dbURL, err := s.getConnectionURL()
-		if err != nil {
-			return fmt.Errorf("failed to get database connection URL: %w", err)
-		}
+		// For external database, use RunMigrationsExternal
 		if dryRun {
-			cmd = exec.Command("supabase", "db", "push", "--include-all", "--db-url", dbURL, "--dry-run")
-		} else {
-			cmd = exec.Command("supabase", "db", "push", "--include-all", "--db-url", dbURL)
+			fmt.Println("Would run migrations on external database")
+			return nil
 		}
+		return s.RunMigrationsExternal()
 
 	default:
 		return fmt.Errorf("unsupported database type: %s", s.config.Database.Type)
 	}
-
-	cmd.Stdin = strings.NewReader("Y\n") // Auto-confirm
-
-	if s.verbose || dryRun {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
-	}
-
-	// For non-verbose, non-dry-run mode, capture output for error reporting
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("supabase db push failed: %w\nOutput: %s", err, string(output))
-	}
-
-	return nil
 }
 
 // getAPIKeys retrieves the API keys
@@ -1081,9 +1167,10 @@ func (s *SupabaseOperations) RunMigrations() error {
 func (s *SupabaseOperations) RunMigrationsExternal() error {
 	fmt.Println("🔄 Running database migrations on external database...")
 
-	// Ensure Supabase assets are available
-	if err := s.EnsureSupabaseAssets(); err != nil {
-		return fmt.Errorf("failed to ensure Supabase assets: %w", err)
+	// Check if migrations directory exists
+	if _, err := os.Stat("supabase/migrations"); os.IsNotExist(err) {
+		fmt.Println("No migrations directory found, skipping...")
+		return nil
 	}
 
 	// Create a temporary pod to run migrations
@@ -1137,23 +1224,68 @@ spec:
 		return fmt.Errorf("failed to copy migrations: %w", err)
 	}
 
-	// Run migrations
-	cmd = exec.Command("kubectl", "exec", "migration-runner",
-		"-n", supabaseNamespace,
-		"--",
-		"bash", "-c",
-		fmt.Sprintf("cd /tmp/migrations && psql -h %s -p %d -U %s -d %s -f init.sql",
-			s.config.Database.External.Host,
-			s.config.Database.External.Port,
-			s.config.Database.External.Username,
-			s.config.Database.External.Database))
+	// Create migrations tracking table if it doesn't exist
+	createTableCmd := fmt.Sprintf(`psql -h %s -p %d -U %s -d %s -c "
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version VARCHAR(255) PRIMARY KEY,
+			applied_at TIMESTAMP DEFAULT NOW()
+		);"`,
+		s.config.Database.External.Host,
+		s.config.Database.External.Port,
+		s.config.Database.External.Username,
+		s.config.Database.External.Database)
+
+	cmd = exec.Command("kubectl", "exec", "migration-runner", "-n", supabaseNamespace, "--", "bash", "-c", createTableCmd)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to create migrations table: %w", err)
+	}
+
+	// Run migrations with tracking
+	migrationScript := fmt.Sprintf(`
+		cd /tmp/migrations
+		for f in *.sql; do
+			if [ -f "$f" ]; then
+				# Check if migration was already applied
+				applied=$(psql -h %s -p %d -U %s -d %s -t -c "
+					SELECT COUNT(*) FROM schema_migrations WHERE version='$f';")
+				if [ "$(echo $applied | tr -d ' ')" = "0" ]; then
+					echo "Running migration: $f"
+					psql -h %s -p %d -U %s -d %s -f "$f"
+					if [ $? -eq 0 ]; then
+						# Record successful migration
+						psql -h %s -p %d -U %s -d %s -c "
+							INSERT INTO schema_migrations (version) VALUES ('$f');"
+					else
+						echo "Failed to run migration: $f"
+						exit 1
+					fi
+				else
+					echo "Skipping already applied migration: $f"
+				fi
+			fi
+		done
+	`,
+		s.config.Database.External.Host, s.config.Database.External.Port,
+		s.config.Database.External.Username, s.config.Database.External.Database,
+		s.config.Database.External.Host, s.config.Database.External.Port,
+		s.config.Database.External.Username, s.config.Database.External.Database,
+		s.config.Database.External.Host, s.config.Database.External.Port,
+		s.config.Database.External.Username, s.config.Database.External.Database)
+
+	cmd = exec.Command("kubectl", "exec", "migration-runner", "-n", supabaseNamespace,
+		"--", "bash", "-c", migrationScript)
 
 	if s.verbose {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	}
 
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	fmt.Println("✅ Database migrations completed!")
+	return nil
 }
 
 // validateExternalDatabase validates external database connection

@@ -1298,7 +1298,7 @@ func (d *Deployer) configureTLS() error {
 // rollback reverses completed steps
 func (d *Deployer) rollback(completedSteps []int) {
 	// Run the destroy command to clean up everything except the cluster
-	destroyer := NewDestroyer(*d.config, true)
+	destroyer := NewDestroyer(*d.config, false)
 	if err := destroyer.Execute(); err != nil {
 		color.Red("⚠️  Failed to perform soft destroy during rollback: %v\n", err)
 		color.Yellow("You may need to manually clean up resources before retrying\n")
