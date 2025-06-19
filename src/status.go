@@ -120,7 +120,6 @@ type ServiceInfo struct {
 type MonitoringStatus struct {
 	Enabled      bool
 	Provider     string
-	PrometheusURL string
 	GrafanaURL    string
 	AlertsActive  int
 }
@@ -518,7 +517,6 @@ func (s *StatusChecker) checkMonitoring() MonitoringStatus {
 	}
 
 	if s.config.Monitoring.Provider == "prometheus" {
-		mon.PrometheusURL = fmt.Sprintf("http://prometheus.%s", s.config.Project.Domain)
 		mon.GrafanaURL = fmt.Sprintf("https://grafana.%s", s.config.Project.Domain)
 
 		// Check if monitoring stack is running
@@ -870,7 +868,7 @@ func (u *Updater) CreateUpdatePlan() UpdatePlan {
 		plan.Changes = append(plan.Changes, Change{
 			Type:        "add",
 			Component:   "Monitoring",
-			Description: fmt.Sprintf("Deploy %s monitoring stack", u.config.Monitoring.Provider),
+			Description: "Deploy Prometheus and Grafana monitoring stack",
 			Impact:      "medium",
 		})
 	}

@@ -10,6 +10,9 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/fatih/color"
 	"golang.org/x/term"
+	"io"
+	"net/http"
+	"path/filepath"
 )
 
 // ConfigWizard guides users through creating a configuration
@@ -22,7 +25,7 @@ type ConfigWizard struct {
 func NewConfigWizard() *ConfigWizard {
 	return &ConfigWizard{
 		reader: bufio.NewReader(os.Stdin),
-		config: Config{Version: "1.0"},
+		config: Config{Version: version},
 	}
 }
 
@@ -47,6 +50,12 @@ func (w *ConfigWizard) Run() Config {
 
 	// Step 6: Optional advanced features
 	w.configureAdvanced()
+
+	// Step 7: AI features configuration
+	w.configureAI()
+
+	// Step 8: Logging configuration
+	w.configureLogging()
 
 	// Summary
 	w.showSummary()
@@ -712,27 +721,83 @@ func (w *ConfigWizard) configureEmail() {
 	if customTemplates {
 		templatePath := ""
 		pathPrompt := &survey.Input{
-			Message: "Template directory path:",
+			Message: "Directory to download template files:",
 			Default: "./email-templates",
-			Help:    "Directory containing HTML email templates",
+			Help:    "We'll download the default templates here for you to customize",
 		}
 		survey.AskOne(pathPrompt, &templatePath)
-		w.config.Email.Templates.Path = templatePath
 
-		// Template variables
-		fmt.Println("\nDefine template variables (press Enter to skip):")
-		w.config.Email.Templates.Variables = make(map[string]string)
+		// Create directory if it doesn't exist
+		if err := os.MkdirAll(templatePath, 0755); err != nil {
+			color.Red("Failed to create directory: %v\n", err)
+			return
+		}
 
-		vars := []string{"company_name", "support_email", "logo_url", "website_url"}
-		for _, v := range vars {
-			value := ""
-			varPrompt := &survey.Input{
-				Message: fmt.Sprintf("%s:", v),
+		// Download default templates
+		fmt.Println("\n📥 Downloading default templates...")
+		defaultTemplates := GetDefaultEmailTemplates()
+		templates := map[string]string{
+			"invite.html":        defaultTemplates.TemplateInvite,
+			"confirmation.html":  defaultTemplates.TemplateConfirmation,
+			"recovery.html":      defaultTemplates.TemplateRecovery,
+			"email_change.html":  defaultTemplates.TemplateEmailChange,
+		}
+
+		for filename, url := range templates {
+			filePath := filepath.Join(templatePath, filename)
+			if err := downloadFile(filePath, url); err != nil {
+				color.Red("Failed to download %s: %v\n", filename, err)
+			} else {
+				color.Green("✓ Downloaded %s\n", filename)
 			}
-			survey.AskOne(varPrompt, &value)
-			if value != "" {
-				w.config.Email.Templates.Variables[v] = value
-			}
+		}
+
+		fmt.Println("\n📝 Edit the templates in", templatePath, "then upload them to a publicly accessible location.")
+		fmt.Println("Press Enter when ready to provide the URLs for your customized templates.\n")
+		var ready string
+		fmt.Scanln(&ready)
+
+		// Prompt for custom template URLs
+		fmt.Println("Enter the URLs for your customized templates:")
+
+		inviteURL := ""
+		invitePrompt := &survey.Input{
+			Message: "Invite template URL:",
+			Help:    "URL for your customized invite.html template",
+		}
+		survey.AskOne(invitePrompt, &inviteURL)
+		if inviteURL != "" {
+			w.config.Email.Templates.CustomInviteURL = inviteURL
+		}
+
+		confirmationURL := ""
+		confirmPrompt := &survey.Input{
+			Message: "Email confirmation template URL:",
+			Help:    "URL for your customized confirmation.html template",
+		}
+		survey.AskOne(confirmPrompt, &confirmationURL)
+		if confirmationURL != "" {
+			w.config.Email.Templates.CustomConfirmationURL = confirmationURL
+		}
+
+		recoveryURL := ""
+		recoveryPrompt := &survey.Input{
+			Message: "Password recovery template URL:",
+			Help:    "URL for your customized recovery.html template",
+		}
+		survey.AskOne(recoveryPrompt, &recoveryURL)
+		if recoveryURL != "" {
+			w.config.Email.Templates.CustomRecoveryURL = recoveryURL
+		}
+
+		emailChangeURL := ""
+		changePrompt := &survey.Input{
+			Message: "Email change template URL:",
+			Help:    "URL for your customized email_change.html template",
+		}
+		survey.AskOne(changePrompt, &emailChangeURL)
+		if emailChangeURL != "" {
+			w.config.Email.Templates.CustomEmailChangeURL = emailChangeURL
 		}
 	}
 }
@@ -999,25 +1064,40 @@ func (w *ConfigWizard) configureAdvanced() {
 		fmt.Println("\nConfigure backend settings in the generated config file.")
 	}
 
+	// Chart version
+	fmt.Println("\n📦 Application Version")
+	specifyVersion := false
+	versionPrompt := &survey.Confirm{
+		Message: "Specify a particular Rulebricks version to deploy?",
+		Default: false,
+		Help:    "By default, the latest version will be used",
+	}
+	survey.AskOne(versionPrompt, &specifyVersion)
+
+	if specifyVersion {
+		chartVersion := ""
+		versionInput := &survey.Input{
+			Message: "Rulebricks version (e.g., v1.2.3):",
+			Help:    "The specific application version to deploy (`rulebricks upgrade list` to see available versions)",
+		}
+		survey.AskOne(versionInput, &chartVersion, survey.WithValidator(survey.Required))
+		w.config.Project.Version = chartVersion
+	}
+
 	// Monitoring
 	fmt.Println("\n📊 Monitoring & Observability")
 	monitoring := true
 	monPrompt := &survey.Confirm{
-		Message: "Enable monitoring?",
+		Message: "Enable monitoring with Prometheus and Grafana?",
 		Default: true,
+		Help:    "Sets up Prometheus for metrics collection and Grafana for visualization dashboards",
 	}
 	survey.AskOne(monPrompt, &monitoring)
 	w.config.Monitoring.Enabled = monitoring
 
 	if monitoring {
-		provider := ""
-		provPrompt := &survey.Select{
-			Message: "Monitoring provider:",
-			Options: []string{"prometheus", "datadog", "cloudwatch"},
-			Default: "prometheus",
-		}
-		survey.AskOne(provPrompt, &provider)
-		w.config.Monitoring.Provider = provider
+		// Always use Prometheus
+		w.config.Monitoring.Provider = "prometheus"
 
 		// Log level
 		logLevel := ""
@@ -1061,6 +1141,426 @@ func (w *ConfigWizard) configureAdvanced() {
 
 }
 
+func (w *ConfigWizard) configureAI() {
+	color.Yellow("\n🤖 AI Features Configuration\n")
+
+	// Ask if they want to enable AI features
+	enableAI := false
+	enablePrompt := &survey.Confirm{
+		Message: "Would you like to enable AI features in Rulebricks?",
+		Default: false,
+		Help:    "AI features include intelligent rule suggestions, natural language rule creation, and AI-powered data transformations",
+	}
+	survey.AskOne(enablePrompt, &enableAI)
+	w.config.AI.Enabled = enableAI
+
+	if enableAI {
+		fmt.Println("\n📝 To use AI features, you'll need an OpenAI API key.")
+		fmt.Println("You can get one from: https://platform.openai.com/api-keys")
+
+		// Ask for OpenAI API key
+		var apiKey string
+		keyPrompt := &survey.Password{
+			Message: "Enter your OpenAI API key:",
+			Help:    "This key will be securely stored and used for AI features",
+		}
+		survey.AskOne(keyPrompt, &apiKey)
+
+		// Store as environment variable reference
+		if apiKey != "" {
+			w.config.AI.OpenAIAPIKeyFrom = "env:OPENAI_API_KEY"
+			// Store in secrets for later use
+			os.Setenv("OPENAI_API_KEY", apiKey)
+		}
+	}
+}
+
+func (w *ConfigWizard) configureLogging() {
+	color.Yellow("\n📊 Rule Execution Logging Configuration\n")
+
+	// Ask if they want to enable logging
+	enableLogging := false
+	enablePrompt := &survey.Confirm{
+		Message: "Would you like to enable rule execution logging?",
+		Default: false,
+		Help:    "Logging allows you to track rule executions, debug issues, and monitor performance",
+	}
+	survey.AskOne(enablePrompt, &enableLogging)
+	w.config.Logging.Enabled = enableLogging
+
+	if enableLogging {
+		// Ask which logging provider to use
+		provider := ""
+		providerPrompt := &survey.Select{
+			Message: "Choose logging approach:",
+			Options: []string{
+				"Better Stack (built-in)",
+				"Vector (self-hosted)",
+			},
+			Help: "Better Stack uses our managed service. Vector allows you to send logs to any provider.",
+		}
+		survey.AskOne(providerPrompt, &provider)
+
+		if provider == "Better Stack (built-in)" {
+			w.config.Logging.Provider = "app"
+			fmt.Println("\n📝 To enable logging, you'll need a Better Stack account.")
+			fmt.Println("1. Sign up at: https://betterstack.com/telemetry")
+			fmt.Println("2. Create a new source in your Better Stack dashboard")
+			fmt.Println("3. Copy the Source Token and Source ID")
+			fmt.Println()
+
+			// Ask for Logtail Source Token
+			var sourceKey string
+			keyPrompt := &survey.Password{
+				Message: "Enter your Logtail Source Token:",
+				Help:    "This token authenticates log shipments to Better Stack",
+			}
+			survey.AskOne(keyPrompt, &sourceKey)
+
+			// Ask for Logtail Source ID
+			var sourceID string
+			idPrompt := &survey.Input{
+				Message: "Enter your Logtail Source ID:",
+				Help:    "The unique identifier for your log source in Better Stack",
+			}
+			survey.AskOne(idPrompt, &sourceID)
+
+			// Store as environment variable references
+			if sourceKey != "" {
+				w.config.Logging.LogtailSourceKeyFrom = "env:LOGTAIL_SOURCE_KEY"
+				os.Setenv("LOGTAIL_SOURCE_KEY", sourceKey)
+			}
+			if sourceID != "" {
+				w.config.Logging.LogtailSourceIDFrom = "env:LOGTAIL_SOURCE_ID"
+				os.Setenv("LOGTAIL_SOURCE_ID", sourceID)
+			}
+		} else {
+			w.config.Logging.Provider = "vector"
+			w.configureVectorLogging()
+		}
+	}
+}
+
+func (w *ConfigWizard) configureVectorLogging() {
+	fmt.Println("\n🚀 Vector will be deployed to collect and forward logs.")
+
+	// Ask for sink type
+	sinkType := ""
+	sinkPrompt := &survey.Select{
+		Message: "Where should Vector send the logs?",
+		Options: []string{
+			"Elasticsearch",
+			"Datadog",
+			"Grafana Loki",
+			"AWS S3",
+			"Azure Blob Storage",
+			"Google Cloud Storage",
+			"Splunk",
+			"New Relic",
+			"Custom HTTP endpoint",
+		},
+		Help: "Select your logging backend provider",
+	}
+	survey.AskOne(sinkPrompt, &sinkType)
+
+	// Map friendly names to Vector sink types
+	sinkTypeMap := map[string]string{
+		"Elasticsearch":       "elasticsearch",
+		"Datadog":            "datadog_logs",
+		"Grafana Loki":       "loki",
+		"AWS S3":             "aws_s3",
+		"Azure Blob Storage": "azure_blob",
+		"Google Cloud Storage": "gcp_cloud_storage",
+		"Splunk":             "splunk_hec",
+		"New Relic":          "new_relic_logs",
+		"Custom HTTP endpoint": "http",
+	}
+	w.config.Logging.Vector.Sink.Type = sinkTypeMap[sinkType]
+
+	// Configure sink-specific settings
+	switch sinkType {
+	case "Elasticsearch":
+		endpoint := ""
+		endpointPrompt := &survey.Input{
+			Message: "Elasticsearch endpoint (e.g., https://my-cluster.es.io:9200):",
+			Help:    "The URL of your Elasticsearch cluster",
+		}
+		survey.AskOne(endpointPrompt, &endpoint)
+		w.config.Logging.Vector.Sink.Endpoint = endpoint
+
+		// Ask for credentials
+		useAuth := false
+		authPrompt := &survey.Confirm{
+			Message: "Does your Elasticsearch require authentication?",
+			Default: true,
+		}
+		survey.AskOne(authPrompt, &useAuth)
+
+		if useAuth {
+			apiKey := ""
+			keyPrompt := &survey.Password{
+				Message: "Enter Elasticsearch API key:",
+				Help:    "API key for authentication",
+			}
+			survey.AskOne(keyPrompt, &apiKey)
+			if apiKey != "" {
+				w.config.Logging.Vector.Sink.APIKey = "env:VECTOR_ES_API_KEY"
+				os.Setenv("VECTOR_ES_API_KEY", apiKey)
+			}
+		}
+
+	case "Datadog":
+		site := ""
+		sitePrompt := &survey.Select{
+			Message: "Datadog site:",
+			Options: []string{"datadoghq.com", "datadoghq.eu", "us3.datadoghq.com", "us5.datadoghq.com", "ddog-gov.com"},
+			Default: "datadoghq.com",
+		}
+		survey.AskOne(sitePrompt, &site)
+
+		apiKey := ""
+		keyPrompt := &survey.Password{
+			Message: "Enter Datadog API key:",
+			Help:    "Your Datadog API key for log ingestion",
+		}
+		survey.AskOne(keyPrompt, &apiKey)
+
+		if apiKey != "" {
+			w.config.Logging.Vector.Sink.APIKey = "env:DATADOG_API_KEY"
+			os.Setenv("DATADOG_API_KEY", apiKey)
+			w.config.Logging.Vector.Sink.Config = map[string]string{
+				"site": site,
+			}
+		}
+
+	case "Grafana Loki":
+		endpoint := ""
+		endpointPrompt := &survey.Input{
+			Message: "Loki endpoint (e.g., http://loki:3100):",
+			Help:    "The URL of your Loki instance",
+		}
+		survey.AskOne(endpointPrompt, &endpoint)
+		w.config.Logging.Vector.Sink.Endpoint = endpoint
+
+	case "AWS S3":
+		bucket := ""
+		bucketPrompt := &survey.Input{
+			Message: "S3 bucket name:",
+			Help:    "The name of your S3 bucket for logs",
+		}
+		survey.AskOne(bucketPrompt, &bucket)
+
+		region := ""
+		regionPrompt := &survey.Input{
+			Message: "AWS region:",
+			Default: "us-east-1",
+		}
+		survey.AskOne(regionPrompt, &region)
+
+		// Ask for AWS credentials
+		useIAM := false
+		iamPrompt := &survey.Confirm{
+			Message: "Use IAM role for authentication?",
+			Default: false,
+			Help:    "If running on EC2/EKS with IAM roles, you can skip entering credentials",
+		}
+		survey.AskOne(iamPrompt, &useIAM)
+
+		w.config.Logging.Vector.Sink.Config = map[string]string{
+			"bucket": bucket,
+			"region": region,
+		}
+
+		if !useIAM {
+			accessKeyID := ""
+			keyPrompt := &survey.Input{
+				Message: "AWS Access Key ID:",
+				Help:    "Your AWS access key ID for S3 access",
+			}
+			survey.AskOne(keyPrompt, &accessKeyID)
+
+			secretKey := ""
+			secretPrompt := &survey.Password{
+				Message: "AWS Secret Access Key:",
+				Help:    "Your AWS secret access key",
+			}
+			survey.AskOne(secretPrompt, &secretKey)
+
+			if accessKeyID != "" && secretKey != "" {
+				// Store credentials as environment variables
+				os.Setenv("AWS_ACCESS_KEY_ID", accessKeyID)
+				os.Setenv("AWS_SECRET_ACCESS_KEY", secretKey)
+				w.config.Logging.Vector.Sink.Config["auth_type"] = "credentials"
+			}
+		} else {
+			w.config.Logging.Vector.Sink.Config["auth_type"] = "iam"
+		}
+
+	case "Azure Blob Storage":
+		containerName := ""
+		containerPrompt := &survey.Input{
+			Message: "Azure Storage container name:",
+			Help:    "The name of your Azure blob container for logs",
+		}
+		survey.AskOne(containerPrompt, &containerName)
+
+		storageAccount := ""
+		accountPrompt := &survey.Input{
+			Message: "Azure Storage account name:",
+			Help:    "Your Azure Storage account name",
+		}
+		survey.AskOne(accountPrompt, &storageAccount)
+
+		accessKey := ""
+		keyPrompt := &survey.Password{
+			Message: "Azure Storage access key:",
+			Help:    "Your Azure Storage account access key",
+		}
+		survey.AskOne(keyPrompt, &accessKey)
+
+		if accessKey != "" {
+			w.config.Logging.Vector.Sink.APIKey = "env:AZURE_STORAGE_KEY"
+			os.Setenv("AZURE_STORAGE_KEY", accessKey)
+			w.config.Logging.Vector.Sink.Config = map[string]string{
+				"container_name":  containerName,
+				"storage_account": storageAccount,
+			}
+		}
+
+	case "Google Cloud Storage":
+		bucket := ""
+		bucketPrompt := &survey.Input{
+			Message: "GCS bucket name:",
+			Help:    "The name of your GCS bucket for logs",
+		}
+		survey.AskOne(bucketPrompt, &bucket)
+
+		// Ask if they want to use service account key
+		useKey := false
+		keyPrompt := &survey.Confirm{
+			Message: "Use service account key file?",
+			Default: false,
+			Help:    "Otherwise, will use default credentials (GKE workload identity, etc.)",
+		}
+		survey.AskOne(keyPrompt, &useKey)
+
+		w.config.Logging.Vector.Sink.Config = map[string]string{
+			"bucket": bucket,
+		}
+
+		if useKey {
+			keyPath := ""
+			pathPrompt := &survey.Input{
+				Message: "Service account key file path:",
+				Help:    "Path to your GCP service account JSON key file",
+			}
+			survey.AskOne(pathPrompt, &keyPath)
+			if keyPath != "" {
+				w.config.Logging.Vector.Sink.Config["credentials_path"] = keyPath
+			}
+		}
+
+	case "Splunk":
+		endpoint := ""
+		endpointPrompt := &survey.Input{
+			Message: "Splunk HEC endpoint (e.g., https://splunk.example.com:8088):",
+			Help:    "Your Splunk HTTP Event Collector endpoint",
+		}
+		survey.AskOne(endpointPrompt, &endpoint)
+		w.config.Logging.Vector.Sink.Endpoint = endpoint
+
+		token := ""
+		tokenPrompt := &survey.Password{
+			Message: "Splunk HEC token:",
+			Help:    "Your Splunk HTTP Event Collector token",
+		}
+		survey.AskOne(tokenPrompt, &token)
+
+		if token != "" {
+			w.config.Logging.Vector.Sink.APIKey = "env:SPLUNK_HEC_TOKEN"
+			os.Setenv("SPLUNK_HEC_TOKEN", token)
+		}
+
+		// Ask about index
+		index := ""
+		indexPrompt := &survey.Input{
+			Message: "Splunk index (optional):",
+			Default: "main",
+			Help:    "The Splunk index to send logs to",
+		}
+		survey.AskOne(indexPrompt, &index)
+		if index != "" {
+			w.config.Logging.Vector.Sink.Config = map[string]string{
+				"index": index,
+			}
+		}
+
+	case "New Relic":
+		// Ask for region
+		region := ""
+		regionPrompt := &survey.Select{
+			Message: "New Relic region:",
+			Options: []string{"US", "EU"},
+			Default: "US",
+		}
+		survey.AskOne(regionPrompt, &region)
+
+		apiKey := ""
+		keyPrompt := &survey.Password{
+			Message: "New Relic License Key:",
+			Help:    "Your New Relic license key for log ingestion",
+		}
+		survey.AskOne(keyPrompt, &apiKey)
+
+		if apiKey != "" {
+			w.config.Logging.Vector.Sink.APIKey = "env:NEW_RELIC_LICENSE_KEY"
+			os.Setenv("NEW_RELIC_LICENSE_KEY", apiKey)
+
+			// Set endpoint based on region
+			endpoint := "https://log-api.newrelic.com/log/v1"
+			if region == "EU" {
+				endpoint = "https://log-api.eu.newrelic.com/log/v1"
+			}
+			w.config.Logging.Vector.Sink.Endpoint = endpoint
+		}
+
+	case "Custom HTTP endpoint":
+		endpoint := ""
+		endpointPrompt := &survey.Input{
+			Message: "HTTP endpoint URL:",
+			Help:    "The URL where Vector should POST logs",
+		}
+		survey.AskOne(endpointPrompt, &endpoint)
+		w.config.Logging.Vector.Sink.Endpoint = endpoint
+
+		// Ask for auth header
+		useAuth := false
+		authPrompt := &survey.Confirm{
+			Message: "Does the endpoint require authentication?",
+			Default: false,
+		}
+		survey.AskOne(authPrompt, &useAuth)
+
+		if useAuth {
+			authHeader := ""
+			headerPrompt := &survey.Input{
+				Message: "Authorization header value:",
+				Help:    "e.g., Bearer <token>",
+			}
+			survey.AskOne(headerPrompt, &authHeader)
+			if authHeader != "" {
+				w.config.Logging.Vector.Sink.Config = map[string]string{
+					"auth_header": authHeader,
+				}
+			}
+		}
+
+	default:
+		// For other providers, just collect the basic endpoint/config
+		fmt.Printf("\nPlease configure %s-specific settings in the generated config file.\n", sinkType)
+	}
+}
+
 func (w *ConfigWizard) showSummary() {
 	color.Green("\n✅ Configuration Summary\n")
 
@@ -1070,10 +1570,30 @@ func (w *ConfigWizard) showSummary() {
 	fmt.Printf("Database:    %s %s\n", w.config.Database.Type, w.config.Database.Provider)
 	fmt.Printf("Email:       %s\n", w.config.Email.Provider)
 	fmt.Printf("Monitoring:  %v\n", w.config.Monitoring.Enabled)
+	fmt.Printf("AI Features: %v\n", w.config.AI.Enabled)
+	fmt.Printf("Logging:     %v\n", w.config.Logging.Enabled)
 	fmt.Printf("Backups:     %v\n", w.config.Advanced.Backup.Enabled)
 
 	fmt.Println("\n📝 Your configuration will be saved to: rulebricks.yaml")
 	fmt.Println("📚 You can edit this file manually before deployment.")
+}
+
+// downloadFile downloads a file from URL to the specified path
+func downloadFile(filepath string, url string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	out, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
 }
 
 // Helper function to read password securely

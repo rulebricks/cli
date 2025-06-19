@@ -114,17 +114,27 @@ func (p *DeploymentPlanner) CreatePlan() DeploymentPlan {
 		Required:    true,
 	})
 
-	// Step 5: Monitoring (if enabled)
-	if p.config.Monitoring.Enabled {
+	// Step 5: Logging Stack (optional) - must be before app deployment
+	if p.config.Logging.Enabled && p.config.Logging.Provider == "vector" {
 		plan.Steps = append(plan.Steps, DeploymentStep{
-			Name:        "Monitoring Stack",
+			Name:        "Logging Stack",
 			Type:        "helm",
-			Description: fmt.Sprintf("Deploy %s monitoring", p.config.Monitoring.Provider),
+			Description: "Deploy Vector for log aggregation",
 			Required:    false,
 		})
 	}
 
-	// Step 6: DNS Configuration
+	// Step 6: Monitoring Stack (optional)
+	if p.config.Monitoring.Enabled {
+		plan.Steps = append(plan.Steps, DeploymentStep{
+			Name:        "Monitoring Stack",
+			Type:        "helm",
+			Description: "Deploy Prometheus and Grafana monitoring",
+			Required:    false,
+		})
+	}
+
+	// Step 7: DNS Configuration
 	plan.Steps = append(plan.Steps, DeploymentStep{
 		Name:        "DNS Setup",
 		Type:        "script",
@@ -218,6 +228,10 @@ func (d *Deployer) Execute() error {
 	if err != nil {
 		return fmt.Errorf("failed to get chart: %w", err)
 	}
+	d.extractedChartPath = chartInfo.CachedPath
+
+	// Update state with actual resolved version
+	d.state.Version = chartInfo.Version
 
 	extractedPath, err := d.chartManager.ExtractChart(chartInfo.CachedPath)
 	if err != nil {
@@ -353,6 +367,33 @@ func (d *Deployer) loadSecrets() error {
 		d.sharedSecrets.EmailAPIKey = apiKey
 	}
 
+	// AI credentials
+	if d.config.AI.Enabled && d.config.AI.OpenAIAPIKeyFrom != "" {
+		apiKey, err := resolveSecretValue(d.config.AI.OpenAIAPIKeyFrom)
+		if err != nil {
+			return fmt.Errorf("failed to load OpenAI API key: %w", err)
+		}
+		d.secrets["openai_api_key"] = apiKey
+	}
+
+	// Logging credentials
+	if d.config.Logging.Enabled {
+		if d.config.Logging.LogtailSourceKeyFrom != "" {
+			sourceKey, err := resolveSecretValue(d.config.Logging.LogtailSourceKeyFrom)
+			if err != nil {
+				return fmt.Errorf("failed to load Logtail source key: %w", err)
+			}
+			d.secrets["logtail_source_key"] = sourceKey
+		}
+		if d.config.Logging.LogtailSourceIDFrom != "" {
+			sourceID, err := resolveSecretValue(d.config.Logging.LogtailSourceIDFrom)
+			if err != nil {
+				return fmt.Errorf("failed to load Logtail source ID: %w", err)
+			}
+			d.secrets["logtail_source_id"] = sourceID
+		}
+	}
+
 	// Pass secrets to operations handlers
 	d.supabaseOps.secrets = d.secrets
 	d.supabaseOps.sharedSecrets = &d.sharedSecrets
@@ -423,6 +464,8 @@ func (d *Deployer) executeHelm(stepName string) error {
 		return d.deployRulebricksApp()
 	case "Monitoring Stack":
 		return d.deployMonitoring()
+	case "Logging Stack":
+		return d.deployVector()
 	default:
 		return fmt.Errorf("unknown helm deployment: %s", stepName)
 	}
@@ -640,6 +683,20 @@ func (d *Deployer) deployRulebricksApp() error {
 	// Configure email settings
 	emailTemplates := GetDefaultEmailTemplates()
 
+	// Override with custom template URLs if configured
+	if d.config.Email.Templates.CustomInviteURL != "" {
+		emailTemplates.TemplateInvite = d.config.Email.Templates.CustomInviteURL
+	}
+	if d.config.Email.Templates.CustomConfirmationURL != "" {
+		emailTemplates.TemplateConfirmation = d.config.Email.Templates.CustomConfirmationURL
+	}
+	if d.config.Email.Templates.CustomRecoveryURL != "" {
+		emailTemplates.TemplateRecovery = d.config.Email.Templates.CustomRecoveryURL
+	}
+	if d.config.Email.Templates.CustomEmailChangeURL != "" {
+		emailTemplates.TemplateEmailChange = d.config.Email.Templates.CustomEmailChangeURL
+	}
+
 	switch d.config.Email.Provider {
 	case "smtp":
 		rulebricksValues["app"].(map[string]interface{})["smtp"] = map[string]interface{}{
@@ -660,6 +717,39 @@ func (d *Deployer) deployRulebricksApp() error {
 
 	// Add email template configuration
 	rulebricksValues["app"].(map[string]interface{})["emailTemplates"] = emailTemplates
+
+	// Configure AI features
+	if d.config.AI.Enabled {
+		rulebricksValues["app"].(map[string]interface{})["ai"] = map[string]interface{}{
+			"enabled": true,
+			"openaiApiKey": d.secrets["openai_api_key"],
+		}
+	}
+
+	// Configure logging
+	if d.config.Logging.Enabled {
+		if d.config.Logging.Provider == "app" {
+			// Built-in Better Stack logging
+			rulebricksValues["app"].(map[string]interface{})["logging"] = map[string]interface{}{
+				"enabled": true,
+				"provider": "betterstack",
+				"logtailSourceKey": d.secrets["logtail_source_key"],
+				"logtailSourceId": d.secrets["logtail_source_id"],
+			}
+		} else if d.config.Logging.Provider == "vector" {
+			// Vector logging - use the endpoint from deployed Vector
+			vectorEndpoint := d.state.Application.VectorEndpoint
+			if vectorEndpoint == "" {
+				// Fallback to internal service if external endpoint not available yet
+				vectorEndpoint = fmt.Sprintf("http://vector.%s:8080", d.getNamespace("logging"))
+			}
+			rulebricksValues["app"].(map[string]interface{})["logging"] = map[string]interface{}{
+				"enabled": true,
+				"provider": "vector",
+				"vectorEndpoint": vectorEndpoint,
+			}
+		}
+	}
 
 	// Create namespace if it doesn't exist
 	namespace := d.config.Project.Namespace
@@ -700,7 +790,7 @@ func (d *Deployer) deployRulebricksApp() error {
 
 	d.state.Application = ApplicationState{
 		Deployed: true,
-		Version:  d.chartVersion,
+		Version:  chartInfo.Version,
 		URL:      fmt.Sprintf("https://%s", d.config.Project.Domain),
 		Replicas: 2, // Default replicas, could be from config
 	}
@@ -710,12 +800,246 @@ func (d *Deployer) deployRulebricksApp() error {
 
 // deployMonitoring installs monitoring stack
 func (d *Deployer) deployMonitoring() error {
-	switch d.config.Monitoring.Provider {
-	case "prometheus":
-		return d.deployPrometheus()
-	default:
-		return fmt.Errorf("monitoring provider %s not yet implemented", d.config.Monitoring.Provider)
+	// Always use Prometheus for monitoring
+	return d.deployPrometheus()
+}
+
+// deployVector installs Vector for log aggregation
+func (d *Deployer) deployVector() error {
+	color.Blue("🚀 Deploying Vector logging stack...\n")
+
+	// Add Vector Helm repository
+	cmd := exec.Command("helm", "repo", "add", "vector", "https://helm.vector.dev")
+	if err := cmd.Run(); err != nil {
+		// Ignore error if repo already exists
 	}
+
+	cmd = exec.Command("helm", "repo", "update")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to update Helm repositories: %w", err)
+	}
+
+	// Load Vector sink API key if configured
+	vectorAPIKey := ""
+	if d.config.Logging.Vector.Sink.APIKey != "" {
+		key, err := resolveSecretValue(d.config.Logging.Vector.Sink.APIKey)
+		if err != nil {
+			return fmt.Errorf("failed to load Vector sink API key: %w", err)
+		}
+		vectorAPIKey = key
+	}
+
+	// Create Vector configuration based on sink type
+	vectorConfig := d.createVectorConfig(vectorAPIKey)
+
+	vectorValues := map[string]interface{}{
+		"role": "Agent",
+		"customConfig": vectorConfig,
+		"service": map[string]interface{}{
+			"type": "LoadBalancer",
+			"ports": []map[string]interface{}{
+				{
+					"port":       8080,
+					"targetPort": 8080,
+					"protocol":   "TCP",
+					"name":       "http",
+				},
+			},
+		},
+		"resources": map[string]interface{}{
+			"requests": map[string]interface{}{
+				"cpu":    "200m",
+				"memory": "256Mi",
+			},
+			"limits": map[string]interface{}{
+				"cpu":    "1000m",
+				"memory": "512Mi",
+			},
+		},
+	}
+
+	valuesFile, err := createTempValuesFile("vector", vectorValues)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(valuesFile)
+
+	namespace := d.getNamespace("logging")
+	cmd = exec.Command("helm", "upgrade", "--install", "vector",
+		"vector/vector",
+		"--namespace", namespace,
+		"--create-namespace",
+		"--values", valuesFile,
+		"--wait",
+		"--timeout", "5m")
+
+	if d.Verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to deploy Vector: %w", err)
+	}
+
+	// Get Vector service endpoint
+	time.Sleep(5 * time.Second) // Wait for service to be ready
+	cmd = exec.Command("kubectl", "get", "service", "vector",
+		"-n", namespace,
+		"-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}")
+	output, err := cmd.Output()
+	if err != nil {
+		// Try IP if hostname is not available
+		cmd = exec.Command("kubectl", "get", "service", "vector",
+			"-n", namespace,
+			"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}")
+		output, err = cmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to get Vector endpoint: %w", err)
+		}
+	}
+
+	vectorEndpoint := string(output)
+	if vectorEndpoint != "" {
+		d.state.Application.VectorEndpoint = fmt.Sprintf("http://%s:8080", vectorEndpoint)
+		color.Green("✅ Vector deployed successfully\n")
+		fmt.Printf("   Endpoint: %s\n", d.state.Application.VectorEndpoint)
+	}
+
+	return nil
+}
+
+// createVectorConfig creates Vector configuration based on sink type
+func (d *Deployer) createVectorConfig(apiKey string) map[string]interface{} {
+	config := map[string]interface{}{
+		"sources": map[string]interface{}{
+			"http": map[string]interface{}{
+				"type":    "http",
+				"address": "0.0.0.0:8080",
+			},
+		},
+		"sinks": map[string]interface{}{},
+	}
+
+	sinkConfig := map[string]interface{}{
+		"type":   d.config.Logging.Vector.Sink.Type,
+		"inputs": []string{"http"},
+	}
+
+	// Configure sink based on type
+	switch d.config.Logging.Vector.Sink.Type {
+	case "elasticsearch":
+		sinkConfig["endpoint"] = d.config.Logging.Vector.Sink.Endpoint
+		if apiKey != "" {
+			sinkConfig["auth"] = map[string]interface{}{
+				"strategy": "bearer",
+				"token":    apiKey,
+			}
+		}
+
+	case "datadog_logs":
+		sinkConfig["default_api_key"] = apiKey
+		if site, ok := d.config.Logging.Vector.Sink.Config["site"]; ok {
+			sinkConfig["site"] = site
+		}
+
+	case "loki":
+		sinkConfig["endpoint"] = d.config.Logging.Vector.Sink.Endpoint
+		sinkConfig["encoding"] = map[string]interface{}{
+			"codec": "json",
+		}
+
+	case "aws_s3":
+		if bucket, ok := d.config.Logging.Vector.Sink.Config["bucket"]; ok {
+			sinkConfig["bucket"] = bucket
+		}
+		if region, ok := d.config.Logging.Vector.Sink.Config["region"]; ok {
+			sinkConfig["region"] = region
+		}
+
+		// Handle AWS authentication
+		if authType, ok := d.config.Logging.Vector.Sink.Config["auth_type"]; ok {
+			if authType == "credentials" {
+				// Vector will automatically use AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from environment
+				// We need to ensure these are passed to the Vector pod
+				sinkConfig["auth"] = map[string]interface{}{
+					"access_key_id":     os.Getenv("AWS_ACCESS_KEY_ID"),
+					"secret_access_key": os.Getenv("AWS_SECRET_ACCESS_KEY"),
+				}
+			}
+			// If auth_type is "iam", Vector will use IAM role (default behavior)
+		}
+
+		sinkConfig["compression"] = "gzip"
+		sinkConfig["encoding"] = map[string]interface{}{
+			"codec": "ndjson",
+		}
+
+	case "http":
+		sinkConfig["uri"] = d.config.Logging.Vector.Sink.Endpoint
+		sinkConfig["encoding"] = map[string]interface{}{
+			"codec": "json",
+		}
+		if authHeader, ok := d.config.Logging.Vector.Sink.Config["auth_header"]; ok {
+			sinkConfig["headers"] = map[string]string{
+				"Authorization": authHeader,
+			}
+		}
+
+	case "azure_blob":
+		if containerName, ok := d.config.Logging.Vector.Sink.Config["container_name"]; ok {
+			sinkConfig["container_name"] = containerName
+		}
+		if storageAccount, ok := d.config.Logging.Vector.Sink.Config["storage_account"]; ok {
+			sinkConfig["storage_account"] = storageAccount
+		}
+		sinkConfig["storage_account_key"] = apiKey
+		sinkConfig["compression"] = "gzip"
+		sinkConfig["encoding"] = map[string]interface{}{
+			"codec": "ndjson",
+		}
+
+	case "gcp_cloud_storage":
+		if bucket, ok := d.config.Logging.Vector.Sink.Config["bucket"]; ok {
+			sinkConfig["bucket"] = bucket
+		}
+		if credentialsPath, ok := d.config.Logging.Vector.Sink.Config["credentials_path"]; ok {
+			sinkConfig["credentials_path"] = credentialsPath
+		}
+		sinkConfig["compression"] = "gzip"
+		sinkConfig["encoding"] = map[string]interface{}{
+			"codec": "ndjson",
+		}
+
+	case "splunk_hec":
+		sinkConfig["endpoint"] = d.config.Logging.Vector.Sink.Endpoint
+		sinkConfig["token"] = apiKey
+		if index, ok := d.config.Logging.Vector.Sink.Config["index"]; ok {
+			sinkConfig["index"] = index
+		}
+		sinkConfig["encoding"] = map[string]interface{}{
+			"codec": "json",
+		}
+
+	case "new_relic_logs":
+		sinkConfig["endpoint"] = d.config.Logging.Vector.Sink.Endpoint
+		sinkConfig["license_key"] = apiKey
+		sinkConfig["encoding"] = map[string]interface{}{
+			"codec": "json",
+		}
+
+	default:
+		// Generic configuration for other sinks
+		if d.config.Logging.Vector.Sink.Endpoint != "" {
+			sinkConfig["endpoint"] = d.config.Logging.Vector.Sink.Endpoint
+		}
+		if apiKey != "" {
+			sinkConfig["api_key"] = apiKey
+		}
+	}
+
+	config["sinks"].(map[string]interface{})["output"] = sinkConfig
+	return config
 }
 
 // deployPrometheus installs Prometheus stack
@@ -812,8 +1136,8 @@ func (d *Deployer) deployPrometheus() error {
 	d.state.Monitoring = MonitoringState{
 		Enabled:         true,
 		Provider:        "prometheus",
-		PrometheusURL:   fmt.Sprintf("https://prometheus.%s", d.config.Project.Domain),
 		GrafanaURL:      fmt.Sprintf("https://grafana.%s", d.config.Project.Domain),
+		GrafanaUsername: "admin",
 		GrafanaPassword: grafanaPassword,
 	}
 
@@ -1359,6 +1683,28 @@ func (d *Deployer) DisplayConnectionInfo() {
 		color.Yellow("\n⚠️  Email not configured. Configure email to enable notifications.\n")
 	}
 
+	if d.config.AI.Enabled {
+		color.Green("\n✅ AI Features: Enabled")
+		fmt.Println("   - Natural language rule creation")
+		fmt.Println("   - Intelligent rule suggestions")
+		fmt.Println("   - AI-powered data transformations")
+	}
+
+	if d.config.Logging.Enabled {
+		if d.config.Logging.Provider == "app" {
+			color.Green("\n✅ Rule Execution Logging: Enabled (Better Stack)")
+			fmt.Println("   - Logs will be sent to Better Stack")
+			fmt.Println("   - Monitor rule executions and debug issues")
+		} else if d.config.Logging.Provider == "vector" {
+			color.Green("\n✅ Rule Execution Logging: Enabled (Vector)")
+			fmt.Printf("   - Vector endpoint: %s\n", d.state.Application.VectorEndpoint)
+			fmt.Printf("   - Sink type: %s\n", d.config.Logging.Vector.Sink.Type)
+			if d.config.Logging.Vector.Sink.Endpoint != "" {
+				fmt.Printf("   - Sink endpoint: %s\n", d.config.Logging.Vector.Sink.Endpoint)
+			}
+		}
+	}
+
 	fmt.Println("\n" + strings.Repeat("=", 60))
 }
 
@@ -1454,16 +1800,17 @@ type DatabaseState struct {
 }
 
 type ApplicationState struct {
-	Deployed  bool   `yaml:"deployed"`
-	Version   string `yaml:"version"`
-	URL       string `yaml:"url"`
-	Replicas  int    `yaml:"replicas"`
+	Deployed       bool   `yaml:"deployed"`
+	Version        string `yaml:"version"`
+	URL            string `yaml:"url"`
+	Replicas       int    `yaml:"replicas"`
+	VectorEndpoint string `yaml:"vector_endpoint,omitempty"`
 }
 
 type MonitoringState struct {
-	Enabled        bool   `yaml:"enabled"`
-	Provider       string `yaml:"provider"`
-	PrometheusURL  string `yaml:"prometheus_url,omitempty"`
-	GrafanaURL     string `yaml:"grafana_url,omitempty"`
+	Enabled         bool   `yaml:"enabled"`
+	Provider        string `yaml:"provider"`
+	GrafanaURL      string `yaml:"grafana_url,omitempty"`
+	GrafanaUsername string `yaml:"grafana_username,omitempty"`
 	GrafanaPassword string `yaml:"grafana_password,omitempty"`
 }

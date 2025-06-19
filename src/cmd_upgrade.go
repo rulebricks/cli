@@ -258,8 +258,26 @@ func (um *UpgradeManager) runUpgrade(cmd *cobra.Command, args []string) error {
 	}
 	defer os.Remove(valuesPath)
 
+	// Load secrets to get license key
+	var licenseKey string
+	if d, err := NewDeployer(*um.config, DeploymentPlan{}, "", false); err == nil {
+		if err := d.loadSecrets(); err != nil {
+			return fmt.Errorf("failed to load secrets: %w", err)
+		}
+		if key, ok := d.secrets["license_key"]; ok {
+			licenseKey = key
+		}
+	} else {
+		return fmt.Errorf("failed to create deployer: %w", err)
+	}
+
 	// Perform upgrade
 	if !um.dryRun {
+		// Update Docker registry secret first
+		if err := um.updateDockerRegistrySecret(licenseKey); err != nil {
+			return fmt.Errorf("failed to update Docker registry secret: %w", err)
+		}
+
 		if err := um.performUpgrade(chartPath, valuesPath); err != nil {
 			return fmt.Errorf("upgrade failed: %w", err)
 		}
@@ -372,9 +390,53 @@ func (um *UpgradeManager) getCurrentVersion() (string, error) {
 
 	for _, release := range releases {
 		if name, ok := release["name"].(string); ok && name == "rulebricks" {
+			// Check if the release status is deployed (not failed)
+			status, _ := release["status"].(string)
+
+			// Get the chart version
 			if version, ok := release["chart"].(string); ok {
 				// Extract version from chart name (e.g., "rulebricks-1.2.3" -> "1.2.3")
 				parts := strings.Split(version, "-")
+				if len(parts) >= 2 {
+					currentVersion := parts[len(parts)-1]
+
+					// If current release is failed, try to get the last successful deployment
+					if status == "failed" {
+						if deployedVersion, err := um.getLastDeployedVersion(); err == nil && deployedVersion != "" {
+							return deployedVersion, nil
+						}
+					}
+
+					return currentVersion, nil
+				}
+			}
+		}
+	}
+
+	return "", nil
+}
+
+// getLastDeployedVersion gets the version from the last successful deployment
+func (um *UpgradeManager) getLastDeployedVersion() (string, error) {
+	// Use helm history to find the last deployed release
+	cmd := exec.Command("helm", "history", "rulebricks", "-n", um.namespace, "-o", "json")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	var history []map[string]interface{}
+	if err := json.Unmarshal(output, &history); err != nil {
+		return "", err
+	}
+
+	// Find the most recent deployed status (going backwards)
+	for i := len(history) - 1; i >= 0; i-- {
+		release := history[i]
+		if status, ok := release["status"].(string); ok && status == "deployed" {
+			if chart, ok := release["chart"].(string); ok {
+				// Extract version from chart name
+				parts := strings.Split(chart, "-")
 				if len(parts) >= 2 {
 					return parts[len(parts)-1], nil
 				}
@@ -382,7 +444,7 @@ func (um *UpgradeManager) getCurrentVersion() (string, error) {
 		}
 	}
 
-	return "", nil
+	return "", fmt.Errorf("no deployed release found")
 }
 
 func (um *UpgradeManager) fetchReleases() ([]ChartRelease, error) {
@@ -510,8 +572,20 @@ func (um *UpgradeManager) generateValues() (string, error) {
 	// Load secrets
 	secrets := make(map[string]string)
 	if d, err := NewDeployer(*um.config, DeploymentPlan{}, "", false); err == nil {
-		d.loadSecrets()
+		if err := d.loadSecrets(); err != nil {
+			return "", fmt.Errorf("failed to load secrets: %w", err)
+		}
 		secrets = d.secrets
+		if um.verbose {
+			fmt.Printf("   Loaded %d secrets\n", len(secrets))
+			if licenseKey, ok := secrets["license_key"]; ok && licenseKey != "" {
+				fmt.Printf("   License key found: %s...\n", licenseKey[:min(8, len(licenseKey))])
+			} else {
+				fmt.Println("   WARNING: License key not found or empty in secrets!")
+			}
+		}
+	} else {
+		return "", fmt.Errorf("failed to create deployer: %w", err)
 	}
 
 	// Build values based on configuration
@@ -536,7 +610,24 @@ func (um *UpgradeManager) generateValues() (string, error) {
 			"replicas":   2,
 		},
 		"imageCredentials": map[string]interface{}{
+			"name":     "regcred",
+			"registry": "index.docker.io",
+			"username": "rulebricks",
 			"password": fmt.Sprintf("dckr_pat_%s", secrets["license_key"]),
+		},
+		"ingress": map[string]interface{}{
+			"enabled": true,
+			"hosts": []map[string]interface{}{
+				{
+					"host": um.config.Project.Domain,
+					"paths": []map[string]interface{}{
+						{
+							"path":     "/",
+							"pathType": "Prefix",
+						},
+					},
+				},
+			},
 		},
 	}
 
@@ -623,10 +714,10 @@ func (um *UpgradeManager) generateValues() (string, error) {
 		values["monitoring"] = map[string]interface{}{
 			"enabled": true,
 			"prometheus": map[string]interface{}{
-				"enabled": um.config.Monitoring.Provider == "prometheus" || um.config.Monitoring.Provider == "all",
+				"enabled": um.config.Monitoring.Enabled,
 			},
 			"grafana": map[string]interface{}{
-				"enabled": um.config.Monitoring.Provider == "prometheus" || um.config.Monitoring.Provider == "all",
+				"enabled": um.config.Monitoring.Enabled,
 			},
 		}
 	}
@@ -656,6 +747,46 @@ func (um *UpgradeManager) generateValues() (string, error) {
 	return valuesFile.Name(), nil
 }
 
+// updateDockerRegistrySecret ensures the Docker registry secret is up to date
+func (um *UpgradeManager) updateDockerRegistrySecret(licenseKey string) error {
+	if um.verbose {
+		fmt.Println("🔐 Updating Docker registry secret...")
+	}
+
+	// Create the secret using kubectl
+	args := []string{
+		"create", "secret", "docker-registry", "regcred",
+		"--docker-server=index.docker.io",
+		"--docker-username=rulebricks",
+		fmt.Sprintf("--docker-password=dckr_pat_%s", licenseKey),
+		fmt.Sprintf("--namespace=%s", um.namespace),
+		"--dry-run=client",
+		"-o", "yaml",
+	}
+
+	createCmd := exec.Command("kubectl", args...)
+	yamlOutput, err := createCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to generate secret yaml: %w", err)
+	}
+
+	// Apply the secret
+	applyCmd := exec.Command("kubectl", "apply", "-f", "-")
+	applyCmd.Stdin = strings.NewReader(string(yamlOutput))
+	applyCmd.Stdout = os.Stdout
+	applyCmd.Stderr = os.Stderr
+
+	if err := applyCmd.Run(); err != nil {
+		return fmt.Errorf("failed to apply registry secret: %w", err)
+	}
+
+	if um.verbose {
+		fmt.Println("✅ Docker registry secret updated")
+	}
+
+	return nil
+}
+
 func (um *UpgradeManager) performUpgrade(chartPath, valuesPath string) error {
 	fmt.Println("\n⚙️  Performing Helm upgrade...")
 
@@ -664,6 +795,7 @@ func (um *UpgradeManager) performUpgrade(chartPath, valuesPath string) error {
 		chartPath,
 		"--namespace", um.namespace,
 		"--create-namespace",
+		"--reuse-values",
 		"--values", valuesPath,
 		"--wait",
 		"--timeout", "10m",
@@ -678,4 +810,12 @@ func (um *UpgradeManager) performUpgrade(chartPath, valuesPath string) error {
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

@@ -28,6 +28,7 @@ type Config struct {
 		Domain    string `yaml:"domain"`
 		Email     string `yaml:"email"`
 		License   string `yaml:"license"`
+		Version   string `yaml:"version,omitempty"`
 		Namespace string `yaml:"namespace,omitempty"`
 	} `yaml:"project"`
 
@@ -119,9 +120,10 @@ type Config struct {
 
 		// Template customization
 		Templates struct {
-			Path      string            `yaml:"path,omitempty"` // Local directory path
-			Remote    string            `yaml:"remote,omitempty"` // S3/GCS URL
-			Variables map[string]string `yaml:"variables,omitempty"`
+			CustomInviteURL       string `yaml:"custom_invite_url,omitempty"`
+			CustomConfirmationURL string `yaml:"custom_confirmation_url,omitempty"`
+			CustomRecoveryURL     string `yaml:"custom_recovery_url,omitempty"`
+			CustomEmailChangeURL  string `yaml:"custom_email_change_url,omitempty"`
 		} `yaml:"templates,omitempty"`
 	} `yaml:"email"`
 
@@ -149,7 +151,7 @@ type Config struct {
 
 	Monitoring struct {
 		Enabled   bool   `yaml:"enabled"`
-		Provider  string `yaml:"provider,omitempty"` // prometheus, datadog, cloudwatch
+		Provider  string `yaml:"provider,omitempty"` // prometheus only
 
 		Metrics struct {
 			Retention string `yaml:"retention,omitempty"`
@@ -187,6 +189,27 @@ type Config struct {
 
 		CustomValues map[string]interface{} `yaml:"custom_values,omitempty"`
 	} `yaml:"advanced,omitempty"`
+
+	AI struct {
+		Enabled           bool   `yaml:"enabled"`
+		OpenAIAPIKeyFrom  string `yaml:"openai_api_key_from,omitempty"` // env:VAR_NAME or file:/path
+	} `yaml:"ai,omitempty"`
+
+	Logging struct {
+		Enabled               bool   `yaml:"enabled"`
+		Provider              string `yaml:"provider,omitempty"` // app or vector
+		LogtailSourceKeyFrom  string `yaml:"logtail_source_key_from,omitempty"` // env:VAR_NAME or file:/path
+		LogtailSourceIDFrom   string `yaml:"logtail_source_id_from,omitempty"`  // env:VAR_NAME or file:/path
+
+		Vector struct {
+			Sink struct {
+				Type     string            `yaml:"type,omitempty"` // elasticsearch, datadog, loki, s3, etc.
+				Endpoint string            `yaml:"endpoint,omitempty"`
+				APIKey   string            `yaml:"api_key_from,omitempty"` // env:VAR_NAME or file:/path
+				Config   map[string]string `yaml:"config,omitempty"` // Additional sink-specific config
+			} `yaml:"sink,omitempty"`
+		} `yaml:"vector,omitempty"`
+	} `yaml:"logging,omitempty"`
 }
 
 var (
@@ -219,7 +242,7 @@ var initCmd = &cobra.Command{
 			return
 		}
 
-		config := Config{Version: "1.0"}
+		config := Config{Version: version}
 		wizard := NewConfigWizard()
 
 		if nonInteractive {
@@ -314,8 +337,16 @@ var deployCmd = &cobra.Command{
 			return
 		}
 
+		// Determine chart version to use
+		deployVersion := chartVersion
+		// If project.version is specified in config and user didn't explicitly set a version flag
+		if config.Project.Version != "" && chartVersion == "latest" {
+			deployVersion = config.Project.Version
+			fmt.Printf("📌 Using chart version from config: %s\n", deployVersion)
+		}
+
 		// Execute deployment
-		deployer, err := NewDeployer(config, plan, chartVersion, verbose)
+		deployer, err := NewDeployer(config, plan, deployVersion, verbose)
 		if err != nil {
 			log.Fatalf("Failed to initialize deployer: %v", err)
 		}
@@ -643,7 +674,7 @@ func confirmDeployment() bool {
 
 func generateMinimalConfig() Config {
 	config := Config{
-		Version: "1.0",
+		Version: version,
 	}
 
 	// Project settings

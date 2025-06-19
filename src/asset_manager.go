@@ -126,7 +126,6 @@ func (am *AssetManager) EnsureTerraformAssets(targetDir string) error {
 func (am *AssetManager) pullDockerImage(ctx context.Context, imageName string) error {
 	if am.verbose {
 		fmt.Printf("🐳 Pulling Docker image: %s\n", imageName)
-		fmt.Printf("   Using username: rulebricks\n")
 	}
 
 	// Create auth config with username and password for standard Docker registry auth

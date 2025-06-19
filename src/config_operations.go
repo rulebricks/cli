@@ -317,6 +317,7 @@ var configKeys = []string{
 	"project.domain",
 	"project.email",
 	"project.license",
+	"project.version",
 	"project.namespace",
 
 	// Cloud

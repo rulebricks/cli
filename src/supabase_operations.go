@@ -1046,21 +1046,19 @@ func (s *SupabaseOperations) createAuthEnv() map[string]interface{} {
 		"GOTRUE_MAILER_SUBJECTS_CONFIRMATION":  "Confirm Your Email",
 		"GOTRUE_MAILER_SUBJECTS_RECOVERY":      "Reset Your Password",
 		"GOTRUE_MAILER_SUBJECTS_EMAIL_CHANGE":  "Confirm Email Change",
-		"GOTRUE_MAILER_TEMPLATES_INVITE":       "https://prefix-files.s3.us-west-2.amazonaws.com/templates/invite.html",
-		"GOTRUE_MAILER_TEMPLATES_CONFIRMATION": "https://prefix-files.s3.us-west-2.amazonaws.com/templates/verify.html",
-		"GOTRUE_MAILER_TEMPLATES_RECOVERY":     "https://prefix-files.s3.us-west-2.amazonaws.com/templates/password_change.html",
-		"GOTRUE_MAILER_TEMPLATES_EMAIL_CHANGE": "https://prefix-files.s3.us-west-2.amazonaws.com/templates/email_change.html",
+		"GOTRUE_MAILER_TEMPLATES_INVITE":       s.getTemplateURL("invite", "https://prefix-files.s3.us-west-2.amazonaws.com/templates/invite.html"),
+		"GOTRUE_MAILER_TEMPLATES_CONFIRMATION": s.getTemplateURL("confirmation", "https://prefix-files.s3.us-west-2.amazonaws.com/templates/verify.html"),
+		"GOTRUE_MAILER_TEMPLATES_RECOVERY":     s.getTemplateURL("recovery", "https://prefix-files.s3.us-west-2.amazonaws.com/templates/password_change.html"),
+		"GOTRUE_MAILER_TEMPLATES_EMAIL_CHANGE": s.getTemplateURL("emailChange", "https://prefix-files.s3.us-west-2.amazonaws.com/templates/email_change.html"),
 	}
 
-	// Add SMTP configuration if configured
-	if s.config.Email.Provider == "smtp" {
-		env["GOTRUE_SMTP_HOST"] = s.config.Email.SMTP.Host
-		env["GOTRUE_SMTP_PORT"] = fmt.Sprintf("%d", s.config.Email.SMTP.Port)
-		env["GOTRUE_SMTP_USER"] = s.config.Email.SMTP.Username
-		env["GOTRUE_SMTP_PASS"] = s.secrets["smtp_password"]
-		env["GOTRUE_SMTP_ADMIN_EMAIL"] = s.config.Email.SMTP.AdminEmail
-		env["GOTRUE_SMTP_SENDER_NAME"] = s.config.Email.FromName
-	}
+	// Add SMTP configuration (provider is always SMTP)
+	env["GOTRUE_SMTP_HOST"] = s.config.Email.SMTP.Host
+	env["GOTRUE_SMTP_PORT"] = fmt.Sprintf("%d", s.config.Email.SMTP.Port)
+	env["GOTRUE_SMTP_USER"] = s.config.Email.SMTP.Username
+	env["GOTRUE_SMTP_PASS"] = s.secrets["smtp_password"]
+	env["GOTRUE_SMTP_ADMIN_EMAIL"] = s.config.Email.SMTP.AdminEmail
+	env["GOTRUE_SMTP_SENDER_NAME"] = s.config.Email.FromName
 
 	return env
 }
@@ -1453,4 +1451,27 @@ func (s *SupabaseOperations) Close() error {
 // getNamespace returns the namespace for a component with project prefix
 func (s *SupabaseOperations) getNamespace(component string) string {
 	return GetDefaultNamespace(s.config.Project.Name, component)
+}
+
+// getTemplateURL returns custom template URL if configured, otherwise returns default
+func (s *SupabaseOperations) getTemplateURL(templateType string, defaultURL string) string {
+	switch templateType {
+	case "invite":
+		if s.config.Email.Templates.CustomInviteURL != "" {
+			return s.config.Email.Templates.CustomInviteURL
+		}
+	case "confirmation":
+		if s.config.Email.Templates.CustomConfirmationURL != "" {
+			return s.config.Email.Templates.CustomConfirmationURL
+		}
+	case "recovery":
+		if s.config.Email.Templates.CustomRecoveryURL != "" {
+			return s.config.Email.Templates.CustomRecoveryURL
+		}
+	case "emailChange":
+		if s.config.Email.Templates.CustomEmailChangeURL != "" {
+			return s.config.Email.Templates.CustomEmailChangeURL
+		}
+	}
+	return defaultURL
 }

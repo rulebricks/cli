@@ -4,7 +4,6 @@ package main
 import (
 	"fmt"
 	"net"
-	"os"
 	"regexp"
 	"strings"
 	"github.com/fatih/color"
@@ -449,13 +448,22 @@ func (v *Validator) validateEmail(results *ValidationResults) {
 		v.validateAPIEmailSettings(results)
 	}
 
-	// Templates
-	if v.config.Email.Templates.Path != "" {
-		if _, err := os.Stat(v.config.Email.Templates.Path); os.IsNotExist(err) {
-			results.Warnings = append(results.Warnings, ValidationWarning{
-				Field:   "email.templates.path",
-				Message: fmt.Sprintf("Template directory '%s' does not exist", v.config.Email.Templates.Path),
-			})
+	// Custom template URLs
+	customURLs := map[string]string{
+		"email.templates.custom_invite_url":       v.config.Email.Templates.CustomInviteURL,
+		"email.templates.custom_confirmation_url": v.config.Email.Templates.CustomConfirmationURL,
+		"email.templates.custom_recovery_url":     v.config.Email.Templates.CustomRecoveryURL,
+		"email.templates.custom_email_change_url": v.config.Email.Templates.CustomEmailChangeURL,
+	}
+
+	for field, url := range customURLs {
+		if url != "" {
+			if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+				results.Errors = append(results.Errors, ValidationError{
+					Field:   field,
+					Message: "Template URL must start with http:// or https://",
+				})
+			}
 		}
 	}
 }
@@ -564,11 +572,11 @@ func (v *Validator) validateSecurity(results *ValidationResults) {
 }
 
 func (v *Validator) validateMonitoring(results *ValidationResults) {
-	validProviders := []string{"prometheus", "datadog", "cloudwatch"}
-	if !contains(validProviders, v.config.Monitoring.Provider) {
+	// Only Prometheus is supported for monitoring
+	if v.config.Monitoring.Enabled && v.config.Monitoring.Provider != "prometheus" {
 		results.Errors = append(results.Errors, ValidationError{
 			Field:   "monitoring.provider",
-			Message: fmt.Sprintf("Invalid monitoring provider. Must be one of: %s", strings.Join(validProviders, ", ")),
+			Message: "Only 'prometheus' is supported as the monitoring provider",
 		})
 	}
 
