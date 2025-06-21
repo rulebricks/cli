@@ -295,43 +295,11 @@ var initCmd = &cobra.Command{
 		fmt.Println("✅ Configuration saved to rulebricks.yaml")
 		fmt.Println("\nNext steps:")
 		fmt.Println("1. Review and edit rulebricks.yaml as needed")
-		fmt.Println("2. Run 'rulebricks validate' to check your configuration")
-		fmt.Println("3. Run 'rulebricks deploy' to start deployment")
+		fmt.Println("2. Run 'rulebricks deploy' to start deployment")
 	},
 }
 
-var validateCmd = &cobra.Command{
-	Use:   "validate",
-	Short: "Validate deployment configuration",
-	Long:  `Validates the configuration file and checks prerequisites`,
-	Run: func(cmd *cobra.Command, args []string) {
-		config, err := loadConfig(cfgFile)
-		if err != nil {
-			log.Fatalf("Error loading config: %v", err)
-		}
 
-		validator := NewValidator(config)
-		results := validator.ValidateAll()
-
-		// Display validation results
-		displayValidationResults(results)
-
-		if !results.IsValid() {
-			os.Exit(1)
-		}
-
-		fmt.Println("\n✅ Configuration is valid!")
-
-		// Check prerequisites
-		prereqChecker := NewPrerequisiteChecker(config)
-		if err := prereqChecker.CheckAll(); err != nil {
-			fmt.Printf("\n❌ Prerequisites check failed: %v\n", err)
-			os.Exit(1)
-		}
-
-		fmt.Println("✅ All prerequisites met!")
-	},
-}
 
 var (
 	chartVersion string
@@ -347,12 +315,7 @@ var deployCmd = &cobra.Command{
 			log.Fatalf("Error loading config: %v", err)
 		}
 
-		// Validate first
-		validator := NewValidator(config)
-		if results := validator.ValidateAll(); !results.IsValid() {
-			displayValidationResults(results)
-			os.Exit(1)
-		}
+
 
 		// Create deployment plan
 		planner := NewDeploymentPlanner(config)
@@ -567,7 +530,6 @@ func init() {
 
 	// Add commands in logical order of usage
 	rootCmd.AddCommand(initCmd)
-	rootCmd.AddCommand(validateCmd)
 	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(logsCmd)
