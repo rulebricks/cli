@@ -1153,6 +1153,7 @@ func (d *Destroyer) deleteNamespaces() error {
 		d.getNamespace("supabase"),
 		d.getNamespace("monitoring"),
 		d.getNamespace("traefik"),
+		d.getNamespace("logging"),
 	}
 
 	// Also add the custom namespace if specified

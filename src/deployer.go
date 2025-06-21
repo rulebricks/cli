@@ -106,19 +106,19 @@ func (p *DeploymentPlanner) CreatePlan() DeploymentPlan {
 		})
 	}
 
-	// Step 4: Application
-	plan.Steps = append(plan.Steps, DeploymentStep{
-		Name:        "Rulebricks Application",
-		Type:        "helm",
-		Description: "Deploy Rulebricks application and services",
-		Required:    true,
-	})
-
-	// Step 5: Kafka (mandatory) - required for HPS high-volume request processing
+	// Step 4: Kafka (mandatory) - required for HPS high-volume request processing
 	plan.Steps = append(plan.Steps, DeploymentStep{
 		Name:        "Kafka",
 		Type:        "helm",
 		Description: "Deploy Kafka for high-volume request processing and log buffering",
+		Required:    true,
+	})
+
+	// Step 5: Application
+	plan.Steps = append(plan.Steps, DeploymentStep{
+		Name:        "Rulebricks Application",
+		Type:        "helm",
+		Description: "Deploy Rulebricks application and services",
 		Required:    true,
 	})
 
@@ -131,7 +131,7 @@ func (p *DeploymentPlanner) CreatePlan() DeploymentPlan {
 		Required:    true,
 	})
 
-	// Step 6: Monitoring Stack (optional)
+	// Step 7: Monitoring Stack (optional)
 	if p.config.Monitoring.Enabled {
 		plan.Steps = append(plan.Steps, DeploymentStep{
 			Name:        "Monitoring Stack",
@@ -141,7 +141,7 @@ func (p *DeploymentPlanner) CreatePlan() DeploymentPlan {
 		})
 	}
 
-	// Step 7: DNS Configuration
+	// Step 8: DNS Configuration
 	plan.Steps = append(plan.Steps, DeploymentStep{
 		Name:        "DNS Setup",
 		Type:        "script",
@@ -149,7 +149,7 @@ func (p *DeploymentPlanner) CreatePlan() DeploymentPlan {
 		Required:    true,
 	})
 
-	// Step 7: TLS Certificates
+	// Step 9: TLS Certificates
 	plan.Steps = append(plan.Steps, DeploymentStep{
 		Name:        "TLS Certificates",
 		Type:        "script",
@@ -533,6 +533,59 @@ func (d *Deployer) deployCoreServices() error {
 	if err := cmd.Run(); err != nil {
 		// Non-fatal, just warn
 		color.Yellow("⚠️  Failed to install metrics server: %v\n", err)
+	}
+
+	// Install KEDA for autoscaling
+	fmt.Println("📈 Installing KEDA for worker autoscaling...")
+
+	// Add KEDA Helm repository
+	cmd = exec.Command("helm", "repo", "add", "kedacore", "https://kedacore.github.io/charts", "--force-update")
+	if d.Verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to add KEDA helm repository: %w", err)
+	}
+
+	cmd = exec.Command("helm", "repo", "update")
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	// Create keda namespace
+	kedaNamespace := "keda"
+	cmd = exec.Command("kubectl", "create", "namespace", kedaNamespace, "--dry-run=client", "-o", "yaml")
+	output, _ = cmd.Output()
+	cmd = exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(string(output))
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to create keda namespace: %w", err)
+	}
+
+	// Install KEDA
+	cmd = exec.Command("helm", "upgrade", "--install", "keda", "kedacore/keda",
+		"--namespace", kedaNamespace,
+		"--wait")
+
+	if d.Verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to install KEDA: %w", err)
+	}
+
+	// Wait for KEDA to be ready
+	fmt.Println("⏳ Waiting for KEDA to be ready...")
+	cmd = exec.Command("kubectl", "wait", "--for=condition=ready", "pod",
+		"-l", "app.kubernetes.io/name=keda-operator",
+		"-n", kedaNamespace,
+		"--timeout=300s")
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("KEDA operator pod failed to become ready: %w", err)
 	}
 
 	return nil
@@ -978,22 +1031,33 @@ func (d *Deployer) deployKafka() error {
 				"client": 9092,
 			},
 		},
-		"resources": map[string]interface{}{
-			"requests": map[string]interface{}{
-				"cpu":    "250m",
-				"memory": "512Mi",
-			},
-			"limits": map[string]interface{}{
-				"cpu":    "1000m",
-				"memory": "2Gi",
+		"controller": map[string]interface{}{
+			"resources": map[string]interface{}{
+				"requests": map[string]interface{}{
+					"cpu":    "250m",
+					"memory": "512Mi",
+				},
+				"limits": map[string]interface{}{
+					"cpu":    "500m",
+					"memory": "2Gi",
+				},
 			},
 		},
-		"zookeeper": map[string]interface{}{
+		"kraft": map[string]interface{}{
 			"enabled": true,
-			"replicaCount": 3,
-			"persistence": map[string]interface{}{
-				"enabled": true,
-				"size":    "8Gi",
+		},
+		"zookeeper": map[string]interface{}{
+			"enabled": false,
+		},
+		"listeners": map[string]interface{}{
+			"client": map[string]interface{}{
+				"protocol": "PLAINTEXT",
+			},
+			"controller": map[string]interface{}{
+				"protocol": "PLAINTEXT",
+			},
+			"interbroker": map[string]interface{}{
+				"protocol": "PLAINTEXT",
 			},
 		},
 	}
@@ -1130,11 +1194,11 @@ func (d *Deployer) deployVector() error {
 		},
 		"resources": map[string]interface{}{
 			"requests": map[string]interface{}{
-				"cpu":    "200m",
+				"cpu":    "100m",
 				"memory": "256Mi",
 			},
 			"limits": map[string]interface{}{
-				"cpu":    "1000m",
+				"cpu":    "500m",
 				"memory": "512Mi",
 			},
 		},
