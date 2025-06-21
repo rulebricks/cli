@@ -114,15 +114,22 @@ func (p *DeploymentPlanner) CreatePlan() DeploymentPlan {
 		Required:    true,
 	})
 
-	// Step 5: Logging Stack (optional) - must be before app deployment
-	if p.config.Logging.Enabled && p.config.Logging.Provider == "vector" {
-		plan.Steps = append(plan.Steps, DeploymentStep{
-			Name:        "Logging Stack",
-			Type:        "helm",
-			Description: "Deploy Vector for log aggregation",
-			Required:    false,
-		})
-	}
+	// Step 5: Kafka (mandatory) - required for HPS high-volume request processing
+	plan.Steps = append(plan.Steps, DeploymentStep{
+		Name:        "Kafka",
+		Type:        "helm",
+		Description: "Deploy Kafka for high-volume request processing and log buffering",
+		Required:    true,
+	})
+
+	// Step 6: Logging Stack (mandatory) - must be after Kafka
+	// Deploy Vector to consume from Kafka
+	plan.Steps = append(plan.Steps, DeploymentStep{
+		Name:        "Logging Stack",
+		Type:        "helm",
+		Description: "Deploy Vector for log aggregation",
+		Required:    true,
+	})
 
 	// Step 6: Monitoring Stack (optional)
 	if p.config.Monitoring.Enabled {
@@ -377,22 +384,8 @@ func (d *Deployer) loadSecrets() error {
 	}
 
 	// Logging credentials
-	if d.config.Logging.Enabled {
-		if d.config.Logging.LogtailSourceKeyFrom != "" {
-			sourceKey, err := resolveSecretValue(d.config.Logging.LogtailSourceKeyFrom)
-			if err != nil {
-				return fmt.Errorf("failed to load Logtail source key: %w", err)
-			}
-			d.secrets["logtail_source_key"] = sourceKey
-		}
-		if d.config.Logging.LogtailSourceIDFrom != "" {
-			sourceID, err := resolveSecretValue(d.config.Logging.LogtailSourceIDFrom)
-			if err != nil {
-				return fmt.Errorf("failed to load Logtail source ID: %w", err)
-			}
-			d.secrets["logtail_source_id"] = sourceID
-		}
-	}
+	// Logging is now mandatory with Vector + Kafka
+	// BetterStack/Logtail support has been removed
 
 	// Pass secrets to operations handlers
 	d.supabaseOps.secrets = d.secrets
@@ -464,6 +457,8 @@ func (d *Deployer) executeHelm(stepName string) error {
 		return d.deployRulebricksApp()
 	case "Monitoring Stack":
 		return d.deployMonitoring()
+	case "Kafka":
+		return d.deployKafka()
 	case "Logging Stack":
 		return d.deployVector()
 	default:
@@ -619,7 +614,12 @@ func (d *Deployer) deployRulebricksApp() error {
 			"supabaseUrl": supabaseURL,
 			"supabaseAnonKey": anonKey,
 			"supabaseServiceKey": serviceKey,
-			"replicas": 2,
+			"replicas": func() int {
+				if d.config.Performance.HPSReplicas > 0 {
+					return d.config.Performance.HPSReplicas
+				}
+				return 2 // Default replicas
+			}(),
 		},
 		"imageCredentials": map[string]interface{}{
 			"password": fmt.Sprintf("dckr_pat_%s", d.secrets["license_key"]),
@@ -662,6 +662,120 @@ func (d *Deployer) deployRulebricksApp() error {
 	// Configure HPS
 	hpsConfig := map[string]interface{}{
 		"enabled": true,
+		"autoscaling": map[string]interface{}{
+			"enabled": true,
+			"minReplicas": func() int {
+				if d.config.Performance.HPSReplicas > 0 {
+					return d.config.Performance.HPSReplicas
+				}
+				return 1 // Default min replicas
+			}(),
+			"maxReplicas": func() int {
+				if d.config.Performance.HPSMaxReplicas > 0 {
+					return d.config.Performance.HPSMaxReplicas
+				}
+				return 6 // Default max replicas
+			}(),
+			"targetCPUUtilizationPercentage": 50,
+			"targetMemoryUtilizationPercentage": 80,
+			"behavior": map[string]interface{}{
+				"scaleUp": map[string]interface{}{
+					"stabilizationWindowSeconds": func() int {
+						if d.config.Performance.ScaleUpStabilization > 0 {
+							return d.config.Performance.ScaleUpStabilization
+						}
+						return 30 // Default: 30 seconds
+					}(),
+					"policies": []map[string]interface{}{
+						{
+							"type": "Percent",
+							"value": 100,
+							"periodSeconds": 10,
+						},
+					},
+				},
+				"scaleDown": map[string]interface{}{
+					"stabilizationWindowSeconds": func() int {
+						if d.config.Performance.ScaleDownStabilization > 0 {
+							return d.config.Performance.ScaleDownStabilization
+						}
+						return 180 // Default: 3 minutes
+					}(),
+					"policies": []map[string]interface{}{
+						{
+							"type": "Pods",
+							"value": 1,
+							"periodSeconds": 5,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Set HPS replicas if configured
+	if d.config.Performance.HPSReplicas > 0 {
+		hpsConfig["replicas"] = d.config.Performance.HPSReplicas
+	}
+
+	// Configure workers if performance settings are defined
+	if d.config.Performance.HPSWorkerReplicas > 0 {
+		hpsConfig["workers"] = map[string]interface{}{
+			"enabled": true,
+			"replicas": d.config.Performance.HPSWorkerReplicas,
+			"topics": "bulk-solve,flows,parallel-solve",
+			"keda": map[string]interface{}{
+				"enabled": true,
+				"minReplicaCount": d.config.Performance.HPSWorkerReplicas,
+				"maxReplicaCount": d.config.Performance.HPSWorkerMaxReplicas,
+				"lagThreshold": d.config.Performance.KafkaLagThreshold,
+				"pollingInterval": d.config.Performance.KedaPollingInterval,
+				"cooldownPeriod": d.config.Performance.ScaleDownStabilization,
+			},
+		}
+
+		// Add worker resources if configured
+		if d.config.Performance.WorkerResources.Requests.CPU != "" {
+			hpsConfig["workers"].(map[string]interface{})["resources"] = map[string]interface{}{
+				"requests": map[string]interface{}{
+					"cpu":    d.config.Performance.WorkerResources.Requests.CPU,
+					"memory": d.config.Performance.WorkerResources.Requests.Memory,
+				},
+				"limits": map[string]interface{}{
+					"cpu":    d.config.Performance.WorkerResources.Limits.CPU,
+					"memory": d.config.Performance.WorkerResources.Limits.Memory,
+				},
+			}
+		}
+	} else {
+		// Default configuration if not specified
+		hpsConfig["workers"] = map[string]interface{}{
+			"enabled": true,
+			"replicas": 3,
+			"topics": "bulk-solve,flows,parallel-solve",
+			"keda": map[string]interface{}{
+				"enabled": true,
+				"minReplicaCount": 3,
+				"maxReplicaCount": 50,
+				"lagThreshold": 100,
+				"pollingInterval": 15,
+				"cooldownPeriod": 300,
+			},
+		}
+	}
+
+	// Configure HPS resources if performance settings are defined
+	if d.config.Performance.HPSResources.Requests.CPU != "" {
+		hpsConfig["resources"] = map[string]interface{}{
+			"requests": map[string]interface{}{
+				"cpu":    d.config.Performance.HPSResources.Requests.CPU,
+				"memory": d.config.Performance.HPSResources.Requests.Memory,
+			},
+			"limits": map[string]interface{}{
+				"cpu":    d.config.Performance.HPSResources.Limits.CPU,
+				"memory": d.config.Performance.HPSResources.Limits.Memory,
+			},
+		}
 	}
 
 	// Configure HPS image if custom registry is specified
@@ -726,28 +840,38 @@ func (d *Deployer) deployRulebricksApp() error {
 		}
 	}
 
-	// Configure logging
+	// Configure logging with Vector and Kafka (mandatory)
 	if d.config.Logging.Enabled {
-		if d.config.Logging.Provider == "app" {
-			// Built-in Better Stack logging
-			rulebricksValues["app"].(map[string]interface{})["logging"] = map[string]interface{}{
-				"enabled": true,
-				"provider": "betterstack",
-				"logtailSourceKey": d.secrets["logtail_source_key"],
-				"logtailSourceId": d.secrets["logtail_source_id"],
-			}
-		} else if d.config.Logging.Provider == "vector" {
-			// Vector logging - use the endpoint from deployed Vector
-			vectorEndpoint := d.state.Application.VectorEndpoint
-			if vectorEndpoint == "" {
-				// Fallback to internal service if external endpoint not available yet
-				vectorEndpoint = fmt.Sprintf("http://vector.%s:8080", d.getNamespace("logging"))
-			}
-			rulebricksValues["app"].(map[string]interface{})["logging"] = map[string]interface{}{
-				"enabled": true,
-				"provider": "vector",
-				"vectorEndpoint": vectorEndpoint,
-			}
+		// Vector logging with Kafka - use Kafka brokers
+		kafkaBrokers := d.state.Application.KafkaBrokers
+		if kafkaBrokers == "" {
+			// Fallback to internal service if external endpoint not available yet
+			kafkaBrokers = fmt.Sprintf("kafka.%s:9092", d.getNamespace("logging"))
+		}
+
+		// Map sink types to friendly names
+		sinkFriendlyNames := map[string]string{
+			"elasticsearch":       "Elasticsearch",
+			"datadog_logs":       "Datadog",
+			"loki":               "Grafana Loki",
+			"aws_s3":             "AWS S3",
+			"azure_blob":         "Azure Blob Storage",
+			"gcp_cloud_storage":  "Google Cloud Storage",
+			"splunk_hec":         "Splunk",
+			"new_relic_logs":     "New Relic",
+			"http":               "Custom HTTP endpoint",
+		}
+
+		loggingDestination := sinkFriendlyNames[d.config.Logging.Vector.Sink.Type]
+		if loggingDestination == "" {
+			loggingDestination = d.config.Logging.Vector.Sink.Type
+		}
+
+		rulebricksValues["app"].(map[string]interface{})["logging"] = map[string]interface{}{
+			"enabled": true,
+			"kafkaBrokers": kafkaBrokers,
+			"kafkaTopic": "logs",
+			"loggingDestination": loggingDestination,
 		}
 	}
 
@@ -804,6 +928,130 @@ func (d *Deployer) deployMonitoring() error {
 	return d.deployPrometheus()
 }
 
+// deployKafka installs Kafka for log buffering and high-volume request processing
+func (d *Deployer) deployKafka() error {
+	color.Blue("☕ Deploying Kafka for log buffering and request processing...\n")
+
+	// Add Bitnami Helm repository
+	cmd := exec.Command("helm", "repo", "add", "bitnami", "https://charts.bitnami.com/bitnami")
+	if err := cmd.Run(); err != nil {
+		// Ignore error if repo already exists
+	}
+
+	cmd = exec.Command("helm", "repo", "update")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to update Helm repositories: %w", err)
+	}
+
+	// Set default values if not configured
+	retentionHours := d.config.Performance.KafkaRetentionHours
+	if retentionHours == 0 {
+		retentionHours = 24
+	}
+	partitionCount := d.config.Performance.KafkaPartitions
+	if partitionCount == 0 {
+		partitionCount = 3
+	}
+	replicationFactor := d.config.Performance.KafkaReplicationFactor
+	if replicationFactor == 0 {
+		replicationFactor = 2
+	}
+	storageSize := d.config.Performance.KafkaStorageSize
+	if storageSize == "" {
+		storageSize = "50Gi"
+	}
+
+	kafkaValues := map[string]interface{}{
+		"replicaCount": replicationFactor,
+		"persistence": map[string]interface{}{
+			"enabled": true,
+			"size":    storageSize,
+		},
+		"logRetentionHours": retentionHours,
+		"autoCreateTopicsEnable": true,
+		"defaultReplicationFactor": replicationFactor,
+		"offsetsTopicReplicationFactor": replicationFactor,
+		"numPartitions": partitionCount,
+		"service": map[string]interface{}{
+			"type": "LoadBalancer",
+			"ports": map[string]interface{}{
+				"client": 9092,
+			},
+		},
+		"resources": map[string]interface{}{
+			"requests": map[string]interface{}{
+				"cpu":    "250m",
+				"memory": "512Mi",
+			},
+			"limits": map[string]interface{}{
+				"cpu":    "1000m",
+				"memory": "2Gi",
+			},
+		},
+		"zookeeper": map[string]interface{}{
+			"enabled": true,
+			"replicaCount": 3,
+			"persistence": map[string]interface{}{
+				"enabled": true,
+				"size":    "8Gi",
+			},
+		},
+	}
+
+	valuesFile, err := createTempValuesFile("kafka", kafkaValues)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(valuesFile)
+
+	namespace := d.getNamespace("logging")
+	cmd = exec.Command("helm", "upgrade", "--install", "kafka",
+		"bitnami/kafka",
+		"--namespace", namespace,
+		"--create-namespace",
+		"--values", valuesFile,
+		"--wait",
+		"--timeout", "10m")
+
+	if d.Verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to deploy Kafka: %w", err)
+	}
+
+	// Get Kafka service endpoint
+	time.Sleep(10 * time.Second) // Wait for service to be ready
+	cmd = exec.Command("kubectl", "get", "service", "kafka",
+		"-n", namespace,
+		"-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}")
+	output, err := cmd.Output()
+	if err != nil {
+		// Try IP if hostname is not available
+		cmd = exec.Command("kubectl", "get", "service", "kafka",
+			"-n", namespace,
+			"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}")
+		output, err = cmd.Output()
+		if err != nil {
+			// Use internal service name as fallback
+			d.state.Application.KafkaBrokers = fmt.Sprintf("kafka.%s:9092", namespace)
+			color.Yellow("⚠️  Using internal Kafka service (external endpoint not available)\n")
+			return nil
+		}
+	}
+
+	kafkaEndpoint := string(output)
+	if kafkaEndpoint != "" {
+		d.state.Application.KafkaBrokers = fmt.Sprintf("%s:9092", kafkaEndpoint)
+		color.Green("✅ Kafka deployed successfully\n")
+		fmt.Printf("   Brokers: %s\n", d.state.Application.KafkaBrokers)
+	}
+
+	return nil
+}
+
 // deployVector installs Vector for log aggregation
 func (d *Deployer) deployVector() error {
 	color.Blue("🚀 Deploying Vector logging stack...\n")
@@ -829,20 +1077,54 @@ func (d *Deployer) deployVector() error {
 		vectorAPIKey = key
 	}
 
-	// Create Vector configuration based on sink type
+	// Create Vector configuration based on sink type with Kafka source
 	vectorConfig := d.createVectorConfig(vectorAPIKey)
+
+	// Get Kafka brokers from state or use internal service
+	kafkaBrokers := d.state.Application.KafkaBrokers
+	if kafkaBrokers == "" {
+		kafkaBrokers = fmt.Sprintf("kafka.%s:9092", d.getNamespace("logging"))
+	}
+
+	// Update Vector config to use Kafka as source
+	vectorConfig["sources"] = map[string]interface{}{
+		"kafka": map[string]interface{}{
+			"type":               "kafka",
+			"bootstrap_servers":  kafkaBrokers,
+			"topics":            []string{"logs"},
+			"group_id":          "vector-consumers",
+			"auto_offset_reset": "latest",
+		},
+	}
+
+	// Update sinks to use kafka source
+	if sinks, ok := vectorConfig["sinks"].(map[string]interface{}); ok {
+		for _, sink := range sinks {
+			if sinkConfig, ok := sink.(map[string]interface{}); ok {
+				sinkConfig["inputs"] = []string{"kafka"}
+			}
+		}
+	}
+
+	// Use project-specific release name to avoid ClusterRole conflicts
+	releaseName := fmt.Sprintf("vector-%s", d.config.Project.Name)
 
 	vectorValues := map[string]interface{}{
 		"role": "Agent",
 		"customConfig": vectorConfig,
+		"fullnameOverride": releaseName, // Make all resources project-specific
+		"rbac": map[string]interface{}{
+			"create": true,
+			"serviceAccountName": releaseName, // Project-specific service account
+		},
 		"service": map[string]interface{}{
-			"type": "LoadBalancer",
+			"type": "ClusterIP",  // Internal only, not exposed
 			"ports": []map[string]interface{}{
 				{
-					"port":       8080,
-					"targetPort": 8080,
+					"port":       9090,
+					"targetPort": 9090,
 					"protocol":   "TCP",
-					"name":       "http",
+					"name":       "metrics",  // For Prometheus metrics
 				},
 			},
 		},
@@ -865,7 +1147,7 @@ func (d *Deployer) deployVector() error {
 	defer os.Remove(valuesFile)
 
 	namespace := d.getNamespace("logging")
-	cmd = exec.Command("helm", "upgrade", "--install", "vector",
+	cmd = exec.Command("helm", "upgrade", "--install", releaseName,
 		"vector/vector",
 		"--namespace", namespace,
 		"--create-namespace",
@@ -882,48 +1164,24 @@ func (d *Deployer) deployVector() error {
 		return fmt.Errorf("failed to deploy Vector: %w", err)
 	}
 
-	// Get Vector service endpoint
-	time.Sleep(5 * time.Second) // Wait for service to be ready
-	cmd = exec.Command("kubectl", "get", "service", "vector",
-		"-n", namespace,
-		"-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}")
-	output, err := cmd.Output()
-	if err != nil {
-		// Try IP if hostname is not available
-		cmd = exec.Command("kubectl", "get", "service", "vector",
-			"-n", namespace,
-			"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}")
-		output, err = cmd.Output()
-		if err != nil {
-			return fmt.Errorf("failed to get Vector endpoint: %w", err)
-		}
-	}
-
-	vectorEndpoint := string(output)
-	if vectorEndpoint != "" {
-		d.state.Application.VectorEndpoint = fmt.Sprintf("http://%s:8080", vectorEndpoint)
-		color.Green("✅ Vector deployed successfully\n")
-		fmt.Printf("   Endpoint: %s\n", d.state.Application.VectorEndpoint)
-	}
+	color.Green("✅ Vector deployed successfully\n")
+	fmt.Printf("   Source: Kafka (%s)\n", kafkaBrokers)
+	fmt.Printf("   Sink: %s\n", d.config.Logging.Vector.Sink.Type)
 
 	return nil
 }
 
 // createVectorConfig creates Vector configuration based on sink type
 func (d *Deployer) createVectorConfig(apiKey string) map[string]interface{} {
+	// Note: sources will be overridden in deployVector to use Kafka
 	config := map[string]interface{}{
-		"sources": map[string]interface{}{
-			"http": map[string]interface{}{
-				"type":    "http",
-				"address": "0.0.0.0:8080",
-			},
-		},
+		"sources": map[string]interface{}{},
 		"sinks": map[string]interface{}{},
 	}
 
 	sinkConfig := map[string]interface{}{
 		"type":   d.config.Logging.Vector.Sink.Type,
-		"inputs": []string{"http"},
+		"inputs": []string{"kafka"}, // Will consume from Kafka source
 	}
 
 	// Configure sink based on type
@@ -931,10 +1189,18 @@ func (d *Deployer) createVectorConfig(apiKey string) map[string]interface{} {
 	case "elasticsearch":
 		sinkConfig["endpoint"] = d.config.Logging.Vector.Sink.Endpoint
 		if apiKey != "" {
-			sinkConfig["auth"] = map[string]interface{}{
-				"strategy": "bearer",
-				"token":    apiKey,
+			// For Elasticsearch, we'll use basic auth with the API key as password
+			authConfig := map[string]interface{}{
+				"strategy": "basic",
+				"password": apiKey,
 			}
+			// Use username from config if provided, otherwise default to "elastic"
+			if username, ok := d.config.Logging.Vector.Sink.Config["auth_user"]; ok {
+				authConfig["user"] = username
+			} else {
+				authConfig["user"] = "elastic"
+			}
+			sinkConfig["auth"] = authConfig
 		}
 
 	case "datadog_logs":
@@ -957,22 +1223,9 @@ func (d *Deployer) createVectorConfig(apiKey string) map[string]interface{} {
 			sinkConfig["region"] = region
 		}
 
-		// Handle AWS authentication
-		if authType, ok := d.config.Logging.Vector.Sink.Config["auth_type"]; ok {
-			if authType == "credentials" {
-				// Vector will automatically use AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY from environment
-				// We need to ensure these are passed to the Vector pod
-				sinkConfig["auth"] = map[string]interface{}{
-					"access_key_id":     os.Getenv("AWS_ACCESS_KEY_ID"),
-					"secret_access_key": os.Getenv("AWS_SECRET_ACCESS_KEY"),
-				}
-			}
-			// If auth_type is "iam", Vector will use IAM role (default behavior)
-		}
-
 		sinkConfig["compression"] = "gzip"
 		sinkConfig["encoding"] = map[string]interface{}{
-			"codec": "ndjson",
+			"codec": "json",
 		}
 
 	case "http":
@@ -990,13 +1243,13 @@ func (d *Deployer) createVectorConfig(apiKey string) map[string]interface{} {
 		if containerName, ok := d.config.Logging.Vector.Sink.Config["container_name"]; ok {
 			sinkConfig["container_name"] = containerName
 		}
-		if storageAccount, ok := d.config.Logging.Vector.Sink.Config["storage_account"]; ok {
-			sinkConfig["storage_account"] = storageAccount
+		if apiKey != "" {
+			// Azure Blob can use connection string OR account + key
+			sinkConfig["connection_string"] = apiKey
 		}
-		sinkConfig["storage_account_key"] = apiKey
 		sinkConfig["compression"] = "gzip"
 		sinkConfig["encoding"] = map[string]interface{}{
-			"codec": "ndjson",
+			"codec": "json",
 		}
 
 	case "gcp_cloud_storage":
@@ -1008,12 +1261,12 @@ func (d *Deployer) createVectorConfig(apiKey string) map[string]interface{} {
 		}
 		sinkConfig["compression"] = "gzip"
 		sinkConfig["encoding"] = map[string]interface{}{
-			"codec": "ndjson",
+			"codec": "json",
 		}
 
 	case "splunk_hec":
 		sinkConfig["endpoint"] = d.config.Logging.Vector.Sink.Endpoint
-		sinkConfig["token"] = apiKey
+		sinkConfig["default_token"] = apiKey  // Correct field name for Splunk HEC
 		if index, ok := d.config.Logging.Vector.Sink.Config["index"]; ok {
 			sinkConfig["index"] = index
 		}
@@ -1022,10 +1275,17 @@ func (d *Deployer) createVectorConfig(apiKey string) map[string]interface{} {
 		}
 
 	case "new_relic_logs":
-		sinkConfig["endpoint"] = d.config.Logging.Vector.Sink.Endpoint
+		// New Relic doesn't use endpoint field, it's determined by the license key
 		sinkConfig["license_key"] = apiKey
 		sinkConfig["encoding"] = map[string]interface{}{
 			"codec": "json",
+		}
+		// Set region if specified (EU or US)
+		if region, ok := d.config.Logging.Vector.Sink.Config["region"]; ok {
+			if region == "EU" {
+				sinkConfig["region"] = "eu"
+			}
+			// US is the default, no need to explicitly set
 		}
 
 	default:
@@ -1683,28 +1943,6 @@ func (d *Deployer) DisplayConnectionInfo() {
 		color.Yellow("\n⚠️  Email not configured. Configure email to enable notifications.\n")
 	}
 
-	if d.config.AI.Enabled {
-		color.Green("\n✅ AI Features: Enabled")
-		fmt.Println("   - Natural language rule creation")
-		fmt.Println("   - Intelligent rule suggestions")
-		fmt.Println("   - AI-powered data transformations")
-	}
-
-	if d.config.Logging.Enabled {
-		if d.config.Logging.Provider == "app" {
-			color.Green("\n✅ Rule Execution Logging: Enabled (Better Stack)")
-			fmt.Println("   - Logs will be sent to Better Stack")
-			fmt.Println("   - Monitor rule executions and debug issues")
-		} else if d.config.Logging.Provider == "vector" {
-			color.Green("\n✅ Rule Execution Logging: Enabled (Vector)")
-			fmt.Printf("   - Vector endpoint: %s\n", d.state.Application.VectorEndpoint)
-			fmt.Printf("   - Sink type: %s\n", d.config.Logging.Vector.Sink.Type)
-			if d.config.Logging.Vector.Sink.Endpoint != "" {
-				fmt.Printf("   - Sink endpoint: %s\n", d.config.Logging.Vector.Sink.Endpoint)
-			}
-		}
-	}
-
 	fmt.Println("\n" + strings.Repeat("=", 60))
 }
 
@@ -1804,7 +2042,8 @@ type ApplicationState struct {
 	Version        string `yaml:"version"`
 	URL            string `yaml:"url"`
 	Replicas       int    `yaml:"replicas"`
-	VectorEndpoint string `yaml:"vector_endpoint,omitempty"`
+	VectorEndpoint string `yaml:"vector_endpoint,omitempty"` // Deprecated, kept for backward compatibility
+	KafkaBrokers   string `yaml:"kafka_brokers,omitempty"`
 }
 
 type MonitoringState struct {

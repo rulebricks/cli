@@ -46,18 +46,22 @@ func (w *ConfigWizard) Run() Config {
 	w.configureEmail()
 
 	// Step 5: Security settings
+	// Step 5: Security configuration
 	w.configureSecurity()
 
-	// Step 6: Optional advanced features
-	w.configureAdvanced()
-
-	// Step 7: AI features configuration
+	// Step 6: AI features configuration
 	w.configureAI()
 
-	// Step 8: Logging configuration
+	// Step 7: Logging configuration
 	w.configureLogging()
 
-	// Summary
+	// Step 8: Performance and scaling configuration
+	w.configurePerformanceAndScaling()
+
+	// Step 9: Optional advanced features
+	w.configureAdvanced()
+
+	// Step 10: Summary
 	w.showSummary()
 
 	return w.config
@@ -1027,11 +1031,19 @@ func (w *ConfigWizard) configureSecurity() {
 func (w *ConfigWizard) configureAdvanced() {
 	color.Yellow("\n⚙️  Advanced Configuration (Optional)\n")
 
+	fmt.Println("Advanced options include:")
+	fmt.Println("• Specific Rulebricks version selection")
+	fmt.Println("• Terraform state backend (S3, GCS, Azure)")
+	fmt.Println("• Monitoring with Prometheus/Grafana")
+	fmt.Println("• Automated backup configuration")
+	fmt.Println("• Custom Docker registry settings")
+	fmt.Println()
+
 	advanced := false
 	advPrompt := &survey.Confirm{
 		Message: "Configure advanced options?",
 		Default: false,
-		Help:    "Terraform backend, monitoring, backups, etc.",
+		Help:    "Configure version, state management, monitoring, backups, and registry settings",
 	}
 	survey.AskOne(advPrompt, &advanced)
 
@@ -1138,7 +1150,39 @@ func (w *ConfigWizard) configureAdvanced() {
 		w.config.Advanced.Backup.Provider = provider
 	}
 
+	// Docker Registry
+	fmt.Println("\n🐳 Docker Registry Configuration")
+	customRegistry := false
+	registryPrompt := &survey.Confirm{
+		Message: "Use custom Docker registry?",
+		Default: false,
+		Help:    "Configure private registry for Rulebricks images",
+	}
+	survey.AskOne(registryPrompt, &customRegistry)
 
+	if customRegistry {
+		// App image
+		appImage := ""
+		appPrompt := &survey.Input{
+			Message: "App image repository:",
+			Default: "index.docker.io/rulebricks/app",
+			Help:    "Full path to your Rulebricks app image",
+		}
+		survey.AskOne(appPrompt, &appImage)
+		w.config.Advanced.DockerRegistry.AppImage = appImage
+
+		// HPS image
+		hpsImage := ""
+		hpsPrompt := &survey.Input{
+			Message: "HPS image repository:",
+			Default: "index.docker.io/rulebricks/hps",
+			Help:    "Full path to your Rulebricks HPS image",
+		}
+		survey.AskOne(hpsPrompt, &hpsImage)
+		w.config.Advanced.DockerRegistry.HPSImage = hpsImage
+
+		// Note: Registry authentication is handled separately via deployment secrets
+	}
 }
 
 func (w *ConfigWizard) configureAI() {
@@ -1178,71 +1222,41 @@ func (w *ConfigWizard) configureAI() {
 func (w *ConfigWizard) configureLogging() {
 	color.Yellow("\n📊 Rule Execution Logging Configuration\n")
 
-	// Ask if they want to enable logging
-	enableLogging := false
-	enablePrompt := &survey.Confirm{
-		Message: "Would you like to enable rule execution logging?",
-		Default: false,
-		Help:    "Logging allows you to track rule executions, debug issues, and monitor performance",
+	// Logging is now mandatory for high-volume request processing
+	fmt.Println("Rulebricks uses Kafka for high-volume request processing.")
+	fmt.Println("This requires setting up Vector with Kafka for log collection and buffering.")
+	fmt.Println()
+
+	// Set logging as enabled
+	w.config.Logging.Enabled = true
+
+	// Configure Kafka and Vector settings
+	w.configureKafkaSettings()
+	w.configureVectorLogging()
+}
+
+func (w *ConfigWizard) configureKafkaSettings() {
+	fmt.Println("\n📊 Configure Kafka log retention policy.")
+
+	retention := 24
+	retentionPrompt := &survey.Input{
+		Message: "Log retention period (hours):",
+		Default: "24",
+		Help:    "How long to keep logs in Kafka before automatic deletion (default: 24 hours)",
 	}
-	survey.AskOne(enablePrompt, &enableLogging)
-	w.config.Logging.Enabled = enableLogging
+	survey.AskOne(retentionPrompt, &retention)
 
-	if enableLogging {
-		// Ask which logging provider to use
-		provider := ""
-		providerPrompt := &survey.Select{
-			Message: "Choose logging approach:",
-			Options: []string{
-				"Better Stack (built-in)",
-				"Vector (self-hosted)",
-			},
-			Help: "Better Stack uses our managed service. Vector allows you to send logs to any provider.",
-		}
-		survey.AskOne(providerPrompt, &provider)
-
-		if provider == "Better Stack (built-in)" {
-			w.config.Logging.Provider = "app"
-			fmt.Println("\n📝 To enable logging, you'll need a Better Stack account.")
-			fmt.Println("1. Sign up at: https://betterstack.com/telemetry")
-			fmt.Println("2. Create a new source in your Better Stack dashboard")
-			fmt.Println("3. Copy the Source Token and Source ID")
-			fmt.Println()
-
-			// Ask for Logtail Source Token
-			var sourceKey string
-			keyPrompt := &survey.Password{
-				Message: "Enter your Logtail Source Token:",
-				Help:    "This token authenticates log shipments to Better Stack",
-			}
-			survey.AskOne(keyPrompt, &sourceKey)
-
-			// Ask for Logtail Source ID
-			var sourceID string
-			idPrompt := &survey.Input{
-				Message: "Enter your Logtail Source ID:",
-				Help:    "The unique identifier for your log source in Better Stack",
-			}
-			survey.AskOne(idPrompt, &sourceID)
-
-			// Store as environment variable references
-			if sourceKey != "" {
-				w.config.Logging.LogtailSourceKeyFrom = "env:LOGTAIL_SOURCE_KEY"
-				os.Setenv("LOGTAIL_SOURCE_KEY", sourceKey)
-			}
-			if sourceID != "" {
-				w.config.Logging.LogtailSourceIDFrom = "env:LOGTAIL_SOURCE_ID"
-				os.Setenv("LOGTAIL_SOURCE_ID", sourceID)
-			}
-		} else {
-			w.config.Logging.Provider = "vector"
-			w.configureVectorLogging()
-		}
+	// Ensure retention is at least 1 hour
+	if retention < 1 {
+		retention = 24
 	}
+	w.config.Performance.KafkaRetentionHours = retention
+
+	fmt.Printf("✅ Kafka logs will be retained for %d hours\n", retention)
 }
 
 func (w *ConfigWizard) configureVectorLogging() {
-	fmt.Println("\n🚀 Vector will be deployed to collect and forward logs.")
+	fmt.Println("\n🚀 Vector will consume logs from Kafka and forward to your chosen destination.")
 
 	// Ask for sink type
 	sinkType := ""
@@ -1297,15 +1311,27 @@ func (w *ConfigWizard) configureVectorLogging() {
 		survey.AskOne(authPrompt, &useAuth)
 
 		if useAuth {
-			apiKey := ""
-			keyPrompt := &survey.Password{
-				Message: "Enter Elasticsearch API key:",
-				Help:    "API key for authentication",
+			username := ""
+			userPrompt := &survey.Input{
+				Message: "Elasticsearch username:",
+				Default: "elastic",
+				Help:    "Username for basic authentication",
 			}
-			survey.AskOne(keyPrompt, &apiKey)
-			if apiKey != "" {
-				w.config.Logging.Vector.Sink.APIKey = "env:VECTOR_ES_API_KEY"
-				os.Setenv("VECTOR_ES_API_KEY", apiKey)
+			survey.AskOne(userPrompt, &username)
+
+			password := ""
+			passPrompt := &survey.Password{
+				Message: "Elasticsearch password:",
+				Help:    "Password for basic authentication",
+			}
+			survey.AskOne(passPrompt, &password)
+
+			if username != "" && password != "" {
+				w.config.Logging.Vector.Sink.Config = map[string]string{
+					"auth_user": username,
+				}
+				w.config.Logging.Vector.Sink.APIKey = "env:VECTOR_ES_PASSWORD"
+				os.Setenv("VECTOR_ES_PASSWORD", password)
 			}
 		}
 
@@ -1404,26 +1430,18 @@ func (w *ConfigWizard) configureVectorLogging() {
 		}
 		survey.AskOne(containerPrompt, &containerName)
 
-		storageAccount := ""
-		accountPrompt := &survey.Input{
-			Message: "Azure Storage account name:",
-			Help:    "Your Azure Storage account name",
+		connectionString := ""
+		connPrompt := &survey.Password{
+			Message: "Azure Storage connection string:",
+			Help:    "Your Azure Storage connection string (starts with DefaultEndpointsProtocol=...)",
 		}
-		survey.AskOne(accountPrompt, &storageAccount)
+		survey.AskOne(connPrompt, &connectionString)
 
-		accessKey := ""
-		keyPrompt := &survey.Password{
-			Message: "Azure Storage access key:",
-			Help:    "Your Azure Storage account access key",
-		}
-		survey.AskOne(keyPrompt, &accessKey)
-
-		if accessKey != "" {
-			w.config.Logging.Vector.Sink.APIKey = "env:AZURE_STORAGE_KEY"
-			os.Setenv("AZURE_STORAGE_KEY", accessKey)
+		if connectionString != "" {
+			w.config.Logging.Vector.Sink.APIKey = "env:AZURE_CONNECTION_STRING"
+			os.Setenv("AZURE_CONNECTION_STRING", connectionString)
 			w.config.Logging.Vector.Sink.Config = map[string]string{
-				"container_name":  containerName,
-				"storage_account": storageAccount,
+				"container_name": containerName,
 			}
 		}
 
@@ -1516,12 +1534,10 @@ func (w *ConfigWizard) configureVectorLogging() {
 			w.config.Logging.Vector.Sink.APIKey = "env:NEW_RELIC_LICENSE_KEY"
 			os.Setenv("NEW_RELIC_LICENSE_KEY", apiKey)
 
-			// Set endpoint based on region
-			endpoint := "https://log-api.newrelic.com/log/v1"
-			if region == "EU" {
-				endpoint = "https://log-api.eu.newrelic.com/log/v1"
+			// Store region in config for New Relic
+			w.config.Logging.Vector.Sink.Config = map[string]string{
+				"region": region,
 			}
-			w.config.Logging.Vector.Sink.Endpoint = endpoint
 		}
 
 	case "Custom HTTP endpoint":
@@ -1561,6 +1577,167 @@ func (w *ConfigWizard) configureVectorLogging() {
 	}
 }
 
+func (w *ConfigWizard) configurePerformanceAndScaling() {
+	color.Yellow("\n🚀 Performance & Scaling Configuration\n")
+
+	fmt.Println("Let's optimize Rulebricks for your expected workload.")
+	fmt.Println("This will also configure Kafka settings for optimal performance.")
+	fmt.Println()
+
+	// Ask about expected volume
+	volumeLevel := ""
+	volumePrompt := &survey.Select{
+		Message: "What's your expected solution volume?",
+		Options: []string{
+			"Low (0-1,000 solutions/second)",
+			"Medium (1,000-10,000 solutions/second)",
+			"High (10,000-100,000 solutions/second)",
+		},
+		Default: "Low (0-1,000 solutions/second)",
+		Help:    "This helps us configure appropriate resources and scaling policies",
+	}
+	survey.AskOne(volumePrompt, &volumeLevel)
+
+	// Ask about load pattern
+	loadPattern := ""
+	patternPrompt := &survey.Select{
+		Message: "What's your typical load pattern?",
+		Options: []string{
+			"Steady (consistent load throughout the day)",
+			"Variable (peaks and valleys throughout the day)",
+			"Spiky (sudden bursts of high traffic)",
+		},
+		Default: "Variable (peaks and valleys throughout the day)",
+		Help:    "This helps us configure scaling responsiveness",
+	}
+	survey.AskOne(patternPrompt, &loadPattern)
+
+	// Configure based on selections
+	switch volumeLevel {
+	case "Low (0-1,000 solutions/second)":
+		// Low volume configuration
+		w.config.Performance.VolumeLevel = "low"
+		w.config.Performance.HPSReplicas = 1
+		w.config.Performance.HPSMaxReplicas = 4
+		w.config.Performance.HPSWorkerReplicas = 2
+		w.config.Performance.KafkaPartitions = 12
+		w.config.Performance.HPSWorkerMaxReplicas = 10
+		w.config.Performance.KafkaLagThreshold = 50
+
+		// Kafka configuration
+		w.config.Performance.KafkaPartitions = 12
+		w.config.Performance.KafkaStorageSize = "50Gi"
+		w.config.Performance.KafkaReplicationFactor = 2
+		w.config.Performance.KafkaRetentionHours = 24
+
+		// Resources
+		w.config.Performance.HPSResources.Requests.CPU = "250m"
+		w.config.Performance.HPSResources.Requests.Memory = "256Mi"
+		w.config.Performance.HPSResources.Limits.CPU = "500m"
+		w.config.Performance.HPSResources.Limits.Memory = "512Mi"
+
+		w.config.Performance.WorkerResources.Requests.CPU = "100m"
+		w.config.Performance.WorkerResources.Requests.Memory = "128Mi"
+		w.config.Performance.WorkerResources.Limits.CPU = "250m"
+		w.config.Performance.WorkerResources.Limits.Memory = "256Mi"
+
+	case "Medium (1,000-10,000 solutions/second)":
+		// Medium volume configuration
+		w.config.Performance.VolumeLevel = "medium"
+		w.config.Performance.HPSReplicas = 2
+		w.config.Performance.HPSMaxReplicas = 8
+		w.config.Performance.HPSWorkerReplicas = 5
+		w.config.Performance.KafkaPartitions = 36
+		w.config.Performance.HPSWorkerMaxReplicas = 30
+		w.config.Performance.KafkaLagThreshold = 100
+
+		// Kafka configuration
+		w.config.Performance.KafkaPartitions = 36
+		w.config.Performance.KafkaStorageSize = "100Gi"
+		w.config.Performance.KafkaReplicationFactor = 2
+		w.config.Performance.KafkaRetentionHours = 24
+
+		// Resources
+		w.config.Performance.HPSResources.Requests.CPU = "500m"
+		w.config.Performance.HPSResources.Requests.Memory = "512Mi"
+		w.config.Performance.HPSResources.Limits.CPU = "1000m"
+		w.config.Performance.HPSResources.Limits.Memory = "1Gi"
+
+		w.config.Performance.WorkerResources.Requests.CPU = "200m"
+		w.config.Performance.WorkerResources.Requests.Memory = "256Mi"
+		w.config.Performance.WorkerResources.Limits.CPU = "500m"
+		w.config.Performance.WorkerResources.Limits.Memory = "512Mi"
+
+	case "High (10,000-100,000 solutions/second)":
+		// High volume configuration - wide scaling range for flexibility
+		w.config.Performance.VolumeLevel = "high"
+		w.config.Performance.HPSReplicas = 3
+		w.config.Performance.HPSMaxReplicas = 20             // Scale HPS for high connection volume
+		w.config.Performance.HPSWorkerReplicas = 5          // Start lower to save costs
+		w.config.Performance.KafkaPartitions = 600          // Support up to 500 workers
+		w.config.Performance.HPSWorkerMaxReplicas = 500     // Very high ceiling
+		w.config.Performance.KafkaLagThreshold = 150        // More sensitive to lag
+
+		// Kafka configuration
+		w.config.Performance.KafkaPartitions = 600
+		w.config.Performance.KafkaStorageSize = "500Gi"
+		w.config.Performance.KafkaReplicationFactor = 3
+		w.config.Performance.KafkaRetentionHours = 24
+
+		// Resources - higher limits for better per-instance performance
+		w.config.Performance.HPSResources.Requests.CPU = "1000m"
+		w.config.Performance.HPSResources.Requests.Memory = "1Gi"
+		w.config.Performance.HPSResources.Limits.CPU = "4000m"      // 4 CPU cores
+		w.config.Performance.HPSResources.Limits.Memory = "4Gi"     // 4GB RAM
+
+		w.config.Performance.WorkerResources.Requests.CPU = "500m"
+		w.config.Performance.WorkerResources.Requests.Memory = "512Mi"
+		w.config.Performance.WorkerResources.Limits.CPU = "2000m"   // 2 CPU cores
+		w.config.Performance.WorkerResources.Limits.Memory = "2Gi"  // 2GB RAM
+	}
+
+	// Configure scaling behavior based on load pattern
+	switch loadPattern {
+	case "Steady (consistent load throughout the day)":
+		// Conservative scaling for steady load
+		w.config.Performance.ScaleUpStabilization = 60    // Wait 60s before scaling up
+		w.config.Performance.ScaleDownStabilization = 300 // Wait 5 min before scaling down
+		w.config.Performance.KedaPollingInterval = 30     // Check every 30s
+
+	case "Variable (peaks and valleys throughout the day)":
+		// Balanced scaling for variable load
+		w.config.Performance.ScaleUpStabilization = 30    // Wait 30s before scaling up
+		w.config.Performance.ScaleDownStabilization = 180 // Wait 3 min before scaling down
+		w.config.Performance.KedaPollingInterval = 15     // Check every 15s
+
+	case "Spiky (sudden bursts of high traffic)":
+		// Aggressive scaling for spiky load
+		w.config.Performance.ScaleUpStabilization = 0     // Scale up immediately
+		w.config.Performance.ScaleDownStabilization = 120 // Wait 2 min before scaling down
+		w.config.Performance.KedaPollingInterval = 10     // Check every 10s
+	}
+
+	// Ask about scale-down preferences for cost optimization
+	if loadPattern != "Steady (consistent load throughout the day)" {
+		costOptimize := false
+		costPrompt := &survey.Confirm{
+			Message: "Optimize for cost by scaling down more aggressively during low traffic?",
+			Default: true,
+			Help:    "This may cause slight delays when traffic increases again",
+		}
+		survey.AskOne(costPrompt, &costOptimize)
+
+		if costOptimize {
+			// More aggressive scale down
+			w.config.Performance.ScaleDownStabilization = 60 // Only 1 minute
+		}
+	}
+
+	fmt.Printf("\n✅ Configured for %s volume with %s load pattern\n",
+		strings.ToLower(strings.Split(volumeLevel, " ")[0]),
+		strings.ToLower(strings.Split(loadPattern, " ")[0]))
+}
+
 func (w *ConfigWizard) showSummary() {
 	color.Green("\n✅ Configuration Summary\n")
 
@@ -1571,7 +1748,12 @@ func (w *ConfigWizard) showSummary() {
 	fmt.Printf("Email:       %s\n", w.config.Email.Provider)
 	fmt.Printf("Monitoring:  %v\n", w.config.Monitoring.Enabled)
 	fmt.Printf("AI Features: %v\n", w.config.AI.Enabled)
-	fmt.Printf("Logging:     %v\n", w.config.Logging.Enabled)
+	fmt.Printf("Logging:     Enabled (Kafka + Vector → %s)\n", w.config.Logging.Vector.Sink.Type)
+	if w.config.Performance.VolumeLevel != "" {
+		fmt.Printf("Performance: %s volume, %d HPS workers\n",
+			w.config.Performance.VolumeLevel,
+			w.config.Performance.HPSWorkerReplicas)
+	}
 	fmt.Printf("Backups:     %v\n", w.config.Advanced.Backup.Enabled)
 
 	fmt.Println("\n📝 Your configuration will be saved to: rulebricks.yaml")

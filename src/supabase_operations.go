@@ -178,6 +178,9 @@ func (s *SupabaseOperations) deploySelfHosted() error {
 		return err
 	}
 
+	// Ensure realtime tenant exists (workaround for Supabase Helm chart issue)
+	s.ensureRealtimeTenant()
+
 	// Run migrations
 	if err := s.RunMigrations(); err != nil {
 		return err
@@ -214,6 +217,9 @@ func (s *SupabaseOperations) deploySelfHostedWithExternalDB() error {
 	if err := s.waitForSupabaseReady(); err != nil {
 		return err
 	}
+
+	// Ensure realtime tenant exists (workaround for Supabase Helm chart issue)
+	s.ensureRealtimeTenant()
 
 	// Run migrations on external database
 	if err := s.RunMigrationsExternal(); err != nil {
@@ -934,7 +940,7 @@ func (s *SupabaseOperations) createSelfHostedValues() map[string]interface{} {
 			},
 		},
 		"functions": map[string]interface{}{
-			"enabled": false,
+			"enabled": true,
 			"image": map[string]interface{}{
 				"repository": "supabase/edge-runtime",
 				"tag":        "v1.29.1",
@@ -1474,4 +1480,19 @@ func (s *SupabaseOperations) getTemplateURL(templateType string, defaultURL stri
 		}
 	}
 	return defaultURL
+}
+
+// ensureRealtimeTenant works around a Supabase Helm chart issue where the realtime
+// service expects a different tenant ID than what the migrations create
+func (s *SupabaseOperations) ensureRealtimeTenant() {
+	namespace := s.getNamespace("supabase")
+
+	// This is a non-critical operation - don't fail deployment if it errors
+	cmd := exec.Command("kubectl", "exec", "-n", namespace,
+		"deployment/supabase-supabase-db", "--",
+		"psql", "-U", "supabase_admin", "-d", "postgres", "-c",
+		`INSERT INTO _realtime.tenants SELECT gen_random_uuid(), 'supabase-supabase-realtime', name, jwt_secret, max_concurrent_users, max_events_per_second, postgres_cdc_default, max_bytes_per_second, max_channels_per_client, max_joins_per_second, NOW(), NOW() FROM _realtime.tenants WHERE external_id = 'realtime-dev' ON CONFLICT DO NOTHING;
+		INSERT INTO _realtime.extensions SELECT gen_random_uuid(), type, settings, 'supabase-supabase-realtime', NOW(), NOW() FROM _realtime.extensions WHERE tenant_external_id = 'realtime-dev' AND NOT EXISTS (SELECT 1 FROM _realtime.extensions WHERE tenant_external_id = 'supabase-supabase-realtime');`)
+
+	cmd.Run() // Ignore errors
 }

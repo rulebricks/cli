@@ -75,6 +75,14 @@ func (v *Validator) ValidateAll() ValidationResults {
 	// Validate advanced settings
 	v.validateAdvanced(&results)
 
+	// Validate performance settings
+	v.validatePerformance(&results)
+
+	// Validate logging settings
+	if v.config.Logging.Enabled {
+		v.validateLogging(&results)
+	}
+
 	return results
 }
 
@@ -675,6 +683,206 @@ func (v *Validator) validateAdvanced(results *ValidationResults) {
 	}
 }
 
+func (v *Validator) validatePerformance(results *ValidationResults) {
+	// Validate Kafka settings
+	if v.config.Performance.KafkaPartitions > 0 {
+		if v.config.Performance.KafkaPartitions < 1 || v.config.Performance.KafkaPartitions > 1000 {
+			results.Errors = append(results.Errors, ValidationError{
+				Field:   "performance.kafka_partitions",
+				Message: "Kafka partitions must be between 1 and 1000",
+			})
+		}
+	}
+
+	if v.config.Performance.KafkaRetentionHours > 0 {
+		if v.config.Performance.KafkaRetentionHours < 1 || v.config.Performance.KafkaRetentionHours > 720 {
+			results.Warnings = append(results.Warnings, ValidationWarning{
+				Field:   "performance.kafka_retention_hours",
+				Message: "Kafka retention hours should be between 1 and 720 (30 days)",
+			})
+		}
+	}
+
+	if v.config.Performance.KafkaStorageSize != "" {
+		if !isValidResourceQuantity(v.config.Performance.KafkaStorageSize) {
+			results.Errors = append(results.Errors, ValidationError{
+				Field:   "performance.kafka_storage_size",
+				Message: "Invalid Kafka storage size format. Use Kubernetes quantity format (e.g., 50Gi, 100Gi)",
+			})
+		}
+	}
+
+	if v.config.Performance.KafkaReplicationFactor > 0 {
+		if v.config.Performance.KafkaReplicationFactor < 1 || v.config.Performance.KafkaReplicationFactor > 5 {
+			results.Errors = append(results.Errors, ValidationError{
+				Field:   "performance.kafka_replication_factor",
+				Message: "Kafka replication factor must be between 1 and 5",
+			})
+		}
+	}
+
+	// Validate HPS settings
+	if v.config.Performance.HPSReplicas > 0 {
+		if v.config.Performance.HPSReplicas < 1 || v.config.Performance.HPSReplicas > 10 {
+			results.Warnings = append(results.Warnings, ValidationWarning{
+				Field:   "performance.hps_replicas",
+				Message: "HPS replicas should be between 1 and 10 for optimal performance",
+			})
+		}
+	}
+
+	if v.config.Performance.HPSMaxReplicas > 0 {
+		if v.config.Performance.HPSMaxReplicas < v.config.Performance.HPSReplicas {
+			results.Errors = append(results.Errors, ValidationError{
+				Field:   "performance.hps_max_replicas",
+				Message: "Maximum HPS replicas cannot be less than initial HPS replicas",
+			})
+		}
+
+		if v.config.Performance.HPSMaxReplicas > 50 {
+			results.Warnings = append(results.Warnings, ValidationWarning{
+				Field:   "performance.hps_max_replicas",
+				Message: "Maximum HPS replicas above 50 may be excessive for a connection handler",
+			})
+		}
+	}
+
+	if v.config.Performance.HPSWorkerMaxReplicas > 0 {
+		if v.config.Performance.HPSWorkerMaxReplicas < v.config.Performance.HPSWorkerReplicas {
+			results.Errors = append(results.Errors, ValidationError{
+				Field:   "performance.hps_worker_max_replicas",
+				Message: "Maximum worker replicas cannot be less than initial worker replicas",
+			})
+		}
+
+		if v.config.Performance.HPSWorkerMaxReplicas > 1000 {
+			results.Warnings = append(results.Warnings, ValidationWarning{
+				Field:   "performance.hps_worker_max_replicas",
+				Message: "Maximum worker replicas above 1000 may require cluster adjustments",
+			})
+		}
+	}
+
+	// Validate resource specifications
+	if v.config.Performance.HPSResources.Requests.CPU != "" {
+		if !isValidResourceQuantity(v.config.Performance.HPSResources.Requests.CPU) {
+			results.Errors = append(results.Errors, ValidationError{
+				Field:   "performance.hps_resources.requests.cpu",
+				Message: "Invalid CPU request format",
+			})
+		}
+	}
+
+	if v.config.Performance.HPSResources.Requests.Memory != "" {
+		if !isValidResourceQuantity(v.config.Performance.HPSResources.Requests.Memory) {
+			results.Errors = append(results.Errors, ValidationError{
+				Field:   "performance.hps_resources.requests.memory",
+				Message: "Invalid memory request format",
+			})
+		}
+	}
+
+	// Validate volume level
+	if v.config.Performance.VolumeLevel != "" {
+		validLevels := []string{"low", "medium", "high"}
+		if !contains(validLevels, v.config.Performance.VolumeLevel) {
+			results.Errors = append(results.Errors, ValidationError{
+				Field:   "performance.volume_level",
+				Message: fmt.Sprintf("Invalid volume level. Must be one of: %s", strings.Join(validLevels, ", ")),
+			})
+		}
+	}
+
+	// Validate scaling parameters
+	if v.config.Performance.ScaleUpStabilization < 0 {
+		results.Errors = append(results.Errors, ValidationError{
+			Field:   "performance.scale_up_stabilization",
+			Message: "Scale up stabilization cannot be negative",
+		})
+	}
+
+	if v.config.Performance.ScaleDownStabilization < 0 {
+		results.Errors = append(results.Errors, ValidationError{
+			Field:   "performance.scale_down_stabilization",
+			Message: "Scale down stabilization cannot be negative",
+		})
+	}
+
+	if v.config.Performance.KedaPollingInterval > 0 && v.config.Performance.KedaPollingInterval < 10 {
+		results.Warnings = append(results.Warnings, ValidationWarning{
+			Field:   "performance.keda_polling_interval",
+			Message: "KEDA polling interval below 10 seconds may impact cluster performance",
+		})
+	}
+}
+
+func (v *Validator) validateLogging(results *ValidationResults) {
+	// If logging is enabled, validate Vector configuration
+	if v.config.Logging.Enabled {
+		// Validate Vector sink configuration
+		if v.config.Logging.Vector.Sink.Type == "" {
+			results.Errors = append(results.Errors, ValidationError{
+				Field:   "logging.vector.sink.type",
+				Message: "Vector sink type is required when logging is enabled",
+			})
+		} else {
+			// Validate sink type
+			validSinkTypes := []string{
+				"elasticsearch", "datadog", "loki", "s3", "gcs", "azure_blob",
+				"splunk_hec", "new_relic", "cloudwatch_logs", "file", "console",
+			}
+			if !contains(validSinkTypes, v.config.Logging.Vector.Sink.Type) {
+				results.Warnings = append(results.Warnings, ValidationWarning{
+					Field:   "logging.vector.sink.type",
+					Message: fmt.Sprintf("Unusual Vector sink type '%s'. Common types are: %s",
+						v.config.Logging.Vector.Sink.Type,
+						strings.Join(validSinkTypes[:5], ", ")),
+				})
+			}
+		}
+
+		// Validate endpoint for sinks that require it
+		requiresEndpoint := []string{
+			"elasticsearch", "datadog", "loki", "splunk_hec", "new_relic",
+		}
+		if contains(requiresEndpoint, v.config.Logging.Vector.Sink.Type) {
+			if v.config.Logging.Vector.Sink.Endpoint == "" {
+				results.Errors = append(results.Errors, ValidationError{
+					Field:   "logging.vector.sink.endpoint",
+					Message: fmt.Sprintf("Vector sink type '%s' requires an endpoint",
+						v.config.Logging.Vector.Sink.Type),
+				})
+			}
+		}
+
+		// Validate API key format if provided
+		if v.config.Logging.Vector.Sink.APIKey != "" {
+			v.validateSecretSource(v.config.Logging.Vector.Sink.APIKey, "logging.vector.sink.api_key_from", results)
+		}
+
+		// Validate sink-specific requirements
+		switch v.config.Logging.Vector.Sink.Type {
+		case "s3", "gcs", "azure_blob":
+			if v.config.Logging.Vector.Sink.Config == nil ||
+				v.config.Logging.Vector.Sink.Config["bucket"] == "" {
+				results.Errors = append(results.Errors, ValidationError{
+					Field:   "logging.vector.sink.config",
+					Message: fmt.Sprintf("Vector sink type '%s' requires 'bucket' configuration",
+						v.config.Logging.Vector.Sink.Type),
+				})
+			}
+		case "elasticsearch":
+			if v.config.Logging.Vector.Sink.Config != nil &&
+				v.config.Logging.Vector.Sink.Config["index"] == "" {
+				results.Warnings = append(results.Warnings, ValidationWarning{
+					Field:   "logging.vector.sink.config.index",
+					Message: "No Elasticsearch index specified, will use default 'rulebricks-logs'",
+				})
+			}
+		}
+	}
+}
+
 func (v *Validator) validateSecretSource(source, field string, results *ValidationResults) {
 	if strings.HasPrefix(source, "env:") {
 		envVar := strings.TrimPrefix(source, "env:")
@@ -807,12 +1015,19 @@ func isValidCronExpression(cron string) bool {
 }
 
 func contains(slice []string, item string) bool {
-	for _, v := range slice {
-		if v == item {
+	for _, s := range slice {
+		if s == item {
 			return true
 		}
 	}
 	return false
+}
+
+// isValidResourceQuantity validates Kubernetes resource quantity format (e.g., 50Gi, 100Mi)
+func isValidResourceQuantity(quantity string) bool {
+	// Simple validation for common formats
+	validPattern := regexp.MustCompile(`^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$`)
+	return validPattern.MatchString(quantity)
 }
 
 // PrerequisiteChecker checks system prerequisites

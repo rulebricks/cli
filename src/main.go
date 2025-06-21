@@ -197,9 +197,6 @@ type Config struct {
 
 	Logging struct {
 		Enabled               bool   `yaml:"enabled"`
-		Provider              string `yaml:"provider,omitempty"` // app or vector
-		LogtailSourceKeyFrom  string `yaml:"logtail_source_key_from,omitempty"` // env:VAR_NAME or file:/path
-		LogtailSourceIDFrom   string `yaml:"logtail_source_id_from,omitempty"`  // env:VAR_NAME or file:/path
 
 		Vector struct {
 			Sink struct {
@@ -210,6 +207,44 @@ type Config struct {
 			} `yaml:"sink,omitempty"`
 		} `yaml:"vector,omitempty"`
 	} `yaml:"logging,omitempty"`
+
+	Performance struct {
+		VolumeLevel              string `yaml:"volume_level,omitempty"` // low, medium, high
+		HPSReplicas              int    `yaml:"hps_replicas,omitempty"`
+		HPSMaxReplicas           int    `yaml:"hps_max_replicas,omitempty"`
+		HPSWorkerReplicas        int    `yaml:"hps_worker_replicas,omitempty"`
+		HPSWorkerMaxReplicas     int    `yaml:"hps_worker_max_replicas,omitempty"`
+		KafkaPartitions          int    `yaml:"kafka_partitions,omitempty"`
+		KafkaLagThreshold        int    `yaml:"kafka_lag_threshold,omitempty"`
+		KafkaRetentionHours      int    `yaml:"kafka_retention_hours,omitempty"`      // Log retention in hours
+		KafkaStorageSize         string `yaml:"kafka_storage_size,omitempty"`         // PVC size for Kafka storage
+		KafkaReplicationFactor   int    `yaml:"kafka_replication_factor,omitempty"`   // Replication factor for HA
+		ScaleUpStabilization     int    `yaml:"scale_up_stabilization,omitempty"`     // seconds
+		ScaleDownStabilization   int    `yaml:"scale_down_stabilization,omitempty"`   // seconds
+		KedaPollingInterval      int    `yaml:"keda_polling_interval,omitempty"`      // seconds
+
+		HPSResources struct {
+			Requests struct {
+				CPU    string `yaml:"cpu,omitempty"`
+				Memory string `yaml:"memory,omitempty"`
+			} `yaml:"requests,omitempty"`
+			Limits struct {
+				CPU    string `yaml:"cpu,omitempty"`
+				Memory string `yaml:"memory,omitempty"`
+			} `yaml:"limits,omitempty"`
+		} `yaml:"hps_resources,omitempty"`
+
+		WorkerResources struct {
+			Requests struct {
+				CPU    string `yaml:"cpu,omitempty"`
+				Memory string `yaml:"memory,omitempty"`
+			} `yaml:"requests,omitempty"`
+			Limits struct {
+				CPU    string `yaml:"cpu,omitempty"`
+				Memory string `yaml:"memory,omitempty"`
+			} `yaml:"limits,omitempty"`
+		} `yaml:"worker_resources,omitempty"`
+	} `yaml:"performance,omitempty"`
 }
 
 var (

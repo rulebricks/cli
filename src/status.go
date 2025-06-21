@@ -1148,6 +1148,7 @@ func (d *Destroyer) cleanupPVCs() error {
 func (d *Destroyer) deleteNamespaces() error {
 	// Delete all project-related namespaces
 	namespaces := []string{
+		d.getNamespace("default"),
 		d.getNamespace("app"),
 		d.getNamespace("supabase"),
 		d.getNamespace("monitoring"),
