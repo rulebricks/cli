@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"encoding/json"
 	"github.com/fatih/color"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -356,7 +357,8 @@ func (s *StatusChecker) checkSelfHostedDatabase() DatabaseStatus {
 	ctx := context.Background()
 
 	// Check if Supabase pods are running
-	pods, err := s.k8sClient.CoreV1().Pods("default").List(ctx, metav1.ListOptions{
+	supabaseNamespace := s.getNamespace("supabase")
+	pods, err := s.k8sClient.CoreV1().Pods(supabaseNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "app.kubernetes.io/instance=supabase",
 	})
 
@@ -491,14 +493,15 @@ func (s *StatusChecker) checkServices() ServicesStatus {
 
 	// Check Supabase if self-hosted
 	if s.config.Database.Type == "self-hosted" {
+		supabaseNamespace := s.getNamespace("supabase")
 		supabase := ServiceInfo{
 			Name:      "supabase",
-			Namespace: "default",
+			Namespace: supabaseNamespace,
 			Status:    "Unknown",
 		}
 
 		// Check Kong (API Gateway)
-		kongDeploy, err := s.k8sClient.AppsV1().Deployments("default").Get(ctx, "supabase-kong", metav1.GetOptions{})
+		kongDeploy, err := s.k8sClient.AppsV1().Deployments(supabaseNamespace).Get(ctx, "supabase-kong", metav1.GetOptions{})
 		if err == nil && kongDeploy.Status.ReadyReplicas > 0 {
 			supabase.Status = "Running"
 			supabase.Endpoints = append(supabase.Endpoints, fmt.Sprintf("https://supabase.%s", s.config.Project.Domain))
@@ -964,15 +967,21 @@ func (u *Updater) updateDatabase(change Change) error {
 
 // Destroyer handles deployment teardown
 type Destroyer struct {
-	config        Config
-	destroyCluster bool
+	config             Config
+	destroyCluster     bool
+	force              bool
+	deployedComponents map[string]bool
+	discoveredNamespaces []string
 }
 
 // NewDestroyer creates a new destroyer
-func NewDestroyer(config Config, destroyCluster bool) *Destroyer {
+func NewDestroyer(config Config, destroyCluster bool, force bool) *Destroyer {
 	return &Destroyer{
-		config:        config,
-		destroyCluster: destroyCluster,
+		config:               config,
+		destroyCluster:       destroyCluster,
+		force:                true, // Always force delete for aggressive cleanup
+		deployedComponents:   make(map[string]bool),
+		discoveredNamespaces: []string{},
 	}
 }
 
@@ -982,27 +991,822 @@ func (d *Destroyer) getNamespace(component string) string {
 	return GetDefaultNamespace(d.config.Project.Name, component)
 }
 
+// Add required imports
+func (d *Destroyer) discoverDeployedComponents() error {
+	fmt.Println("\n🔍 Discovering all namespaces for cleanup...")
+
+	// Get all namespaces
+	projectPrefix := d.config.Project.Name
+	cmd := exec.Command("kubectl", "get", "namespaces", "-o", "json")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to list namespaces: %w", err)
+	}
+
+	// Parse namespaces
+	type NamespaceList struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Status struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+
+	var nsList NamespaceList
+	if err := json.Unmarshal(output, &nsList); err != nil {
+		return fmt.Errorf("failed to parse namespace list: %w", err)
+	}
+
+	// Find ALL namespaces with our project prefix
+	for _, ns := range nsList.Items {
+		if !strings.HasPrefix(ns.Metadata.Name, projectPrefix+"-") {
+			continue
+		}
+
+		// Add to discovered namespaces list for forced cleanup
+		d.discoveredNamespaces = append(d.discoveredNamespaces, ns.Metadata.Name)
+
+		// Mark all components as deployed to trigger cleanup steps
+		d.deployedComponents["application"] = true
+		d.deployedComponents["traefik"] = true
+		d.deployedComponents["cert-manager"] = true
+		d.deployedComponents["monitoring"] = true
+		d.deployedComponents["supabase"] = true
+		d.deployedComponents["logging"] = true
+		d.deployedComponents["kafka"] = true
+		d.deployedComponents["vector"] = true
+		d.deployedComponents["keda"] = true
+		d.deployedComponents["execution"] = true
+
+		fmt.Printf("  Found namespace: %s (status: %s)\n", ns.Metadata.Name, ns.Status.Phase)
+	}
+
+	fmt.Printf("\n  Total namespaces to clean: %d\n", len(d.discoveredNamespaces))
+
+	// Also check for cluster-wide resources with our prefix
+	fmt.Println("\n🔍 Checking for cluster-wide resources...")
+
+	// Check for CRDs
+	cmd = exec.Command("kubectl", "get", "crd", "-o", "name")
+	if crdOutput, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(crdOutput), "\n")
+		for _, line := range lines {
+			if strings.Contains(strings.ToLower(line), projectPrefix) {
+				fmt.Printf("  Found CRD: %s\n", line)
+			}
+		}
+	}
+
+	// Check for ClusterRoles/ClusterRoleBindings
+	for _, resource := range []string{"clusterrole", "clusterrolebinding"} {
+		cmd = exec.Command("kubectl", "get", resource, "-o", "name")
+		if resourceOutput, err := cmd.Output(); err == nil {
+			lines := strings.Split(string(resourceOutput), "\n")
+			for _, line := range lines {
+				if strings.Contains(line, projectPrefix) {
+					fmt.Printf("  Found %s: %s\n", resource, line)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (d *Destroyer) forceDeleteNamespace(namespace string) {
+	fmt.Printf("\n💣 Force deleting namespace: %s\n", namespace)
+
+	// First, try a quick delete with a short timeout
+	fmt.Printf("  Attempting quick namespace deletion...\n")
+	quickCtx, quickCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	quickCmd := exec.CommandContext(quickCtx, "kubectl", "delete", "namespace", namespace, "--force", "--grace-period=0")
+	quickCmd.Run()
+	quickCancel()
+
+	// Check if namespace still exists
+	checkCmd := exec.Command("kubectl", "get", "namespace", namespace)
+	if err := checkCmd.Run(); err != nil {
+		fmt.Printf("  ✅ Namespace deleted successfully\n")
+		return
+	}
+
+	// If still exists, do aggressive cleanup
+	fmt.Printf("  Namespace still exists, performing aggressive cleanup...\n")
+
+	// Delete common resource types that might block namespace deletion
+	resourceTypes := []string{
+		"deployment", "statefulset", "daemonset", "replicaset", "pod",
+		"service", "ingress", "endpoints", "endpointslice",
+		"pvc", "configmap", "secret", "serviceaccount",
+		"role", "rolebinding", "networkpolicy",
+		"poddisruptionbudget", "horizontalpodautoscaler",
+		"job", "cronjob", "lease", "event",
+	}
+
+	fmt.Printf("  Deleting resources in namespace...\n")
+	for i, resourceType := range resourceTypes {
+		if i%5 == 0 && i > 0 {
+			fmt.Printf("    Progress: %d/%d resource types\n", i, len(resourceTypes))
+		}
+
+		// Use short timeout for each resource type
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		cmd := exec.CommandContext(ctx, "kubectl", "delete", resourceType, "--all", "-n", namespace, "--force", "--grace-period=0")
+		cmd.Run() // Ignore errors, resource type might not exist
+		cancel()
+
+		// Also try to patch finalizers for stuck resources
+		getCtx, getCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		getCmd := exec.CommandContext(getCtx, "kubectl", "get", resourceType, "-n", namespace, "-o", "name")
+		if output, err := getCmd.Output(); err == nil {
+			resources := strings.Split(strings.TrimSpace(string(output)), "\n")
+			for _, resource := range resources {
+				if resource != "" {
+					// Remove finalizers
+					patchCmd := exec.Command("kubectl", "patch", resource, "-n", namespace,
+						"--type", "json", "-p", `[{"op": "remove", "path": "/metadata/finalizers"}]`)
+					patchCmd.Run()
+				}
+			}
+		}
+		getCancel()
+	}
+
+	// Now handle the namespace itself
+	fmt.Printf("  Removing namespace finalizers...\n")
+
+	// Try multiple approaches to remove namespace
+	approaches := []struct {
+		name string
+		cmd  *exec.Cmd
+	}{
+		{
+			"patch finalizers to empty array",
+			exec.Command("kubectl", "patch", "namespace", namespace,
+				"--type", "json", "-p", `[{"op": "remove", "path": "/spec/finalizers"}]`),
+		},
+		{
+			"patch finalizers to null",
+			exec.Command("kubectl", "patch", "namespace", namespace,
+				"-p", `{"spec":{"finalizers":null}}`, "--type=merge"),
+		},
+		{
+			"patch metadata finalizers to null",
+			exec.Command("kubectl", "patch", "namespace", namespace,
+				"-p", `{"metadata":{"finalizers":null}}`, "--type=merge"),
+		},
+	}
+
+	for _, approach := range approaches {
+		fmt.Printf("    Trying: %s\n", approach.name)
+		approach.cmd.Run()
+	}
+
+	// Use the finalize API directly
+	fmt.Printf("  Using finalize API...\n")
+	finalizeCmd := exec.Command("sh", "-c", fmt.Sprintf(
+		`kubectl get namespace %s -o json 2>/dev/null | jq '.spec.finalizers = []' | kubectl replace --raw "/api/v1/namespaces/%s/finalize" -f - 2>/dev/null`,
+		namespace, namespace,
+	))
+	finalizeCmd.Run()
+
+	// Final deletion attempt
+	fmt.Printf("  Final deletion attempt...\n")
+	finalCtx, finalCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	finalCmd := exec.CommandContext(finalCtx, "kubectl", "delete", "namespace", namespace, "--force", "--grace-period=0")
+	finalCmd.Run()
+	finalCancel()
+
+	// Verify deletion
+	verifyCmd := exec.Command("kubectl", "get", "namespace", namespace)
+	if err := verifyCmd.Run(); err != nil {
+		fmt.Printf("  ✅ Namespace deleted successfully\n")
+	} else {
+		fmt.Printf("  ⚠️  Namespace still exists (will retry in final cleanup pass)\n")
+	}
+}
+
+func (d *Destroyer) cleanupClusterWideResources() {
+	projectPrefix := d.config.Project.Name
+	fmt.Printf("  Looking for cluster resources with prefix '%s'...\n", projectPrefix)
+
+	// Delete CRDs
+	fmt.Println("  Checking Custom Resource Definitions...")
+	cmd := exec.Command("kubectl", "get", "crd", "-o", "name")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && strings.Contains(strings.ToLower(line), strings.ToLower(projectPrefix)) {
+				fmt.Printf("    Deleting %s\n", line)
+				deleteCmd := exec.Command("kubectl", "delete", line, "--force", "--grace-period=0")
+				deleteCmd.Run()
+			}
+		}
+	}
+
+	// Delete ClusterRoles
+	fmt.Println("  Checking ClusterRoles...")
+	cmd = exec.Command("kubectl", "get", "clusterrole", "-o", "name")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && strings.Contains(line, projectPrefix) {
+				fmt.Printf("    Deleting %s\n", line)
+				deleteCmd := exec.Command("kubectl", "delete", line, "--force", "--grace-period=0")
+				deleteCmd.Run()
+			}
+		}
+	}
+
+	// Delete ClusterRoleBindings
+	fmt.Println("  Checking ClusterRoleBindings...")
+	cmd = exec.Command("kubectl", "get", "clusterrolebinding", "-o", "name")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && strings.Contains(line, projectPrefix) {
+				fmt.Printf("    Deleting %s\n", line)
+				deleteCmd := exec.Command("kubectl", "delete", line, "--force", "--grace-period=0")
+				deleteCmd.Run()
+			}
+		}
+	}
+
+	// Delete PersistentVolumes
+	fmt.Println("  Checking PersistentVolumes...")
+	cmd = exec.Command("kubectl", "get", "pv", "-o", "json")
+	if output, err := cmd.Output(); err == nil {
+		type PVList struct {
+			Items []struct {
+				Metadata struct {
+					Name string `json:"name"`
+				} `json:"metadata"`
+				Spec struct {
+					ClaimRef struct {
+						Namespace string `json:"namespace"`
+					} `json:"claimRef"`
+				} `json:"spec"`
+			} `json:"items"`
+		}
+
+		var pvList PVList
+		if err := json.Unmarshal(output, &pvList); err == nil {
+			for _, pv := range pvList.Items {
+				// Check if PV is bound to a namespace with our prefix
+				if strings.HasPrefix(pv.Spec.ClaimRef.Namespace, projectPrefix+"-") {
+					fmt.Printf("    Deleting PV %s (bound to %s)\n", pv.Metadata.Name, pv.Spec.ClaimRef.Namespace)
+					deleteCmd := exec.Command("kubectl", "delete", "pv", pv.Metadata.Name, "--force", "--grace-period=0")
+					deleteCmd.Run()
+				}
+			}
+		}
+	}
+
+	// Delete StorageClasses
+	fmt.Println("  Checking StorageClasses...")
+	cmd = exec.Command("kubectl", "get", "storageclass", "-o", "name")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && strings.Contains(line, projectPrefix) {
+				fmt.Printf("    Deleting %s\n", line)
+				deleteCmd := exec.Command("kubectl", "delete", line, "--force", "--grace-period=0")
+				deleteCmd.Run()
+			}
+		}
+	}
+
+	// Delete ValidatingWebhookConfigurations
+	fmt.Println("  Checking ValidatingWebhookConfigurations...")
+	cmd = exec.Command("kubectl", "get", "validatingwebhookconfiguration", "-o", "name")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && strings.Contains(line, projectPrefix) {
+				fmt.Printf("    Deleting %s\n", line)
+				deleteCmd := exec.Command("kubectl", "delete", line, "--force", "--grace-period=0")
+				deleteCmd.Run()
+			}
+		}
+	}
+
+	// Delete MutatingWebhookConfigurations
+	fmt.Println("  Checking MutatingWebhookConfigurations...")
+	cmd = exec.Command("kubectl", "get", "mutatingwebhookconfiguration", "-o", "name")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && strings.Contains(line, projectPrefix) {
+				fmt.Printf("    Deleting %s\n", line)
+				deleteCmd := exec.Command("kubectl", "delete", line, "--force", "--grace-period=0")
+				deleteCmd.Run()
+			}
+		}
+	}
+
+	// Delete PriorityClasses
+	fmt.Println("  Checking PriorityClasses...")
+	cmd = exec.Command("kubectl", "get", "priorityclass", "-o", "name")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && strings.Contains(line, projectPrefix) {
+				fmt.Printf("    Deleting %s\n", line)
+				deleteCmd := exec.Command("kubectl", "delete", line, "--force", "--grace-period=0")
+				deleteCmd.Run()
+			}
+		}
+	}
+
+	// Delete IngressClasses
+	fmt.Println("  Checking IngressClasses...")
+	cmd = exec.Command("kubectl", "get", "ingressclass", "-o", "json")
+	if output, err := cmd.Output(); err == nil {
+		type IngressClassList struct {
+			Items []struct {
+				Metadata struct {
+					Name string `json:"name"`
+					Annotations map[string]string `json:"annotations"`
+				} `json:"metadata"`
+			} `json:"items"`
+		}
+
+		var icList IngressClassList
+		if err := json.Unmarshal(output, &icList); err == nil {
+			for _, ic := range icList.Items {
+				// Check if IngressClass is owned by a namespace with our prefix
+				if releaseNs, ok := ic.Metadata.Annotations["meta.helm.sh/release-namespace"]; ok {
+					if strings.HasPrefix(releaseNs, projectPrefix+"-") {
+						fmt.Printf("    Deleting IngressClass %s (owned by %s)\n", ic.Metadata.Name, releaseNs)
+						deleteCmd := exec.Command("kubectl", "delete", "ingressclass", ic.Metadata.Name, "--force", "--grace-period=0")
+						deleteCmd.Run()
+					}
+				}
+				// Also check if the name contains our prefix
+				if strings.Contains(ic.Metadata.Name, projectPrefix) {
+					fmt.Printf("    Deleting IngressClass %s\n", ic.Metadata.Name)
+					deleteCmd := exec.Command("kubectl", "delete", "ingressclass", ic.Metadata.Name, "--force", "--grace-period=0")
+					deleteCmd.Run()
+				}
+			}
+		}
+	}
+
+	fmt.Println("  ✅ Cluster-wide resource cleanup complete")
+}
+
+func (d *Destroyer) cleanupAllProjectOwnedResources() {
+	projectPrefix := d.config.Project.Name
+	fmt.Printf("  🧹 Cleaning ALL resources owned by %s-* namespaces...\n", projectPrefix)
+
+	// List of all resource types to check (cluster-wide and namespaced)
+	clusterWideResources := []string{
+		"ingressclass",
+		"clusterrole",
+		"clusterrolebinding",
+		"storageclass",
+		"priorityclass",
+		"validatingwebhookconfiguration",
+		"mutatingwebhookconfiguration",
+		"apiservice",
+		"crd",
+	}
+
+	// Check cluster-wide resources
+	for _, resourceType := range clusterWideResources {
+		cmd := exec.Command("kubectl", "get", resourceType, "-o", "json")
+		output, err := cmd.Output()
+		if err != nil {
+			continue // Resource type might not exist
+		}
+
+		type ResourceList struct {
+			Items []struct {
+				Metadata struct {
+					Name string `json:"name"`
+					Annotations map[string]string `json:"annotations"`
+					Labels map[string]string `json:"labels"`
+				} `json:"metadata"`
+			} `json:"items"`
+		}
+
+		var resList ResourceList
+		if err := json.Unmarshal(output, &resList); err != nil {
+			continue
+		}
+
+		for _, res := range resList.Items {
+			shouldDelete := false
+			ownerInfo := ""
+
+			// Check Helm ownership annotations
+			if releaseNs, ok := res.Metadata.Annotations["meta.helm.sh/release-namespace"]; ok {
+				if strings.HasPrefix(releaseNs, projectPrefix+"-") {
+					shouldDelete = true
+					ownerInfo = fmt.Sprintf("owned by %s", releaseNs)
+				}
+			}
+
+			// Also check if managed by our project
+			if releaseName, ok := res.Metadata.Labels["app.kubernetes.io/managed-by"]; ok && releaseName == "Helm" {
+				if instance, ok := res.Metadata.Labels["app.kubernetes.io/instance"]; ok {
+					if strings.Contains(instance, projectPrefix) {
+						shouldDelete = true
+						ownerInfo = fmt.Sprintf("instance %s", instance)
+					}
+				}
+			}
+
+			if shouldDelete {
+				fmt.Printf("    Deleting %s %s (%s)\n", resourceType, res.Metadata.Name, ownerInfo)
+
+				// Special handling for CRDs - delete all instances first
+				if resourceType == "crd" {
+					fmt.Printf("      Deleting all instances of %s...\n", res.Metadata.Name)
+					// Extract resource name from CRD (e.g., scaledobjects from scaledobjects.keda.sh)
+					resourceName := strings.Split(res.Metadata.Name, ".")[0]
+
+					// Delete all instances across all namespaces
+					deleteInstancesCmd := exec.Command("kubectl", "delete", resourceName, "--all", "--all-namespaces", "--force", "--grace-period=0")
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					deleteInstancesCmd = exec.CommandContext(ctx, deleteInstancesCmd.Path, deleteInstancesCmd.Args[1:]...)
+					deleteInstancesCmd.Run()
+					cancel()
+				}
+
+				// Delete the resource with timeout
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				deleteCmd := exec.CommandContext(ctx, "kubectl", "delete", resourceType, res.Metadata.Name, "--force", "--grace-period=0")
+				if err := deleteCmd.Run(); err != nil {
+					// If deletion fails, try removing finalizers
+					fmt.Printf("      Resource stuck, removing finalizers...\n")
+					patchCmd := exec.Command("kubectl", "patch", resourceType, res.Metadata.Name,
+						"--type=json", "-p", `[{"op": "remove", "path": "/metadata/finalizers"}]`)
+					patchCmd.Run()
+
+					// Try delete again
+					retryCmd := exec.Command("kubectl", "delete", resourceType, res.Metadata.Name, "--force", "--grace-period=0")
+					retryCmd.Run()
+				}
+				cancel()
+			}
+		}
+	}
+
+	// Check namespaced resources in ALL namespaces (including kube-system)
+	namespacedResources := []string{
+		"rolebinding",
+		"role",
+		"serviceaccount",
+		"configmap",
+		"secret",
+		"service",
+		"deployment",
+		"statefulset",
+		"daemonset",
+		"job",
+		"cronjob",
+	}
+
+	// Get all namespaces
+	namespaces := []string{"kube-system", "kube-public", "kube-node-lease", "default"}
+	cmd := exec.Command("kubectl", "get", "namespaces", "-o", "name")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			ns := strings.TrimPrefix(strings.TrimSpace(line), "namespace/")
+			if ns != "" && !contains(namespaces, ns) {
+				namespaces = append(namespaces, ns)
+			}
+		}
+	}
+
+	// Check each namespace for resources owned by our project
+	for _, ns := range namespaces {
+		for _, resourceType := range namespacedResources {
+			cmd := exec.Command("kubectl", "get", resourceType, "-n", ns, "-o", "json")
+			output, err := cmd.Output()
+			if err != nil {
+				continue
+			}
+
+			type ResourceList struct {
+				Items []struct {
+					Metadata struct {
+						Name string `json:"name"`
+						Namespace string `json:"namespace"`
+						Annotations map[string]string `json:"annotations"`
+						Labels map[string]string `json:"labels"`
+					} `json:"metadata"`
+				} `json:"items"`
+			}
+
+			var resList ResourceList
+			if err := json.Unmarshal(output, &resList); err != nil {
+				continue
+			}
+
+			for _, res := range resList.Items {
+				shouldDelete := false
+				ownerInfo := ""
+
+				// Check Helm ownership
+				if releaseNs, ok := res.Metadata.Annotations["meta.helm.sh/release-namespace"]; ok {
+					if strings.HasPrefix(releaseNs, projectPrefix+"-") {
+						shouldDelete = true
+						ownerInfo = fmt.Sprintf("owned by %s", releaseNs)
+					}
+				}
+
+				if shouldDelete {
+					fmt.Printf("    Deleting %s %s in namespace %s (%s)\n", resourceType, res.Metadata.Name, ns, ownerInfo)
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					deleteCmd := exec.CommandContext(ctx, "kubectl", "delete", resourceType, res.Metadata.Name, "-n", ns, "--force", "--grace-period=0")
+					deleteCmd.Run()
+					cancel()
+				}
+			}
+		}
+	}
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Destroyer) finalCleanupPass() {
+	fmt.Printf("  Performing final aggressive cleanup for prefix '%s-'...\n", d.config.Project.Name)
+
+	// Get all namespaces again
+	cmd := exec.Command("kubectl", "get", "namespaces", "-o", "json")
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Printf("  Warning: Failed to list namespaces: %v\n", err)
+		return
+	}
+
+	type NamespaceList struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Status struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+
+	var nsList NamespaceList
+	if err := json.Unmarshal(output, &nsList); err != nil {
+		fmt.Printf("  Warning: Failed to parse namespace list: %v\n", err)
+		return
+	}
+
+	projectPrefix := d.config.Project.Name
+	remainingNamespaces := []string{}
+
+	for _, ns := range nsList.Items {
+		if strings.HasPrefix(ns.Metadata.Name, projectPrefix+"-") {
+			remainingNamespaces = append(remainingNamespaces, ns.Metadata.Name)
+			fmt.Printf("  Found remaining namespace: %s (status: %s)\n", ns.Metadata.Name, ns.Status.Phase)
+		}
+	}
+
+	if len(remainingNamespaces) == 0 {
+		fmt.Println("  ✅ No remaining namespaces found")
+	} else {
+		fmt.Printf("  💣 Force deleting %d remaining namespaces...\n", len(remainingNamespaces))
+		for _, ns := range remainingNamespaces {
+			d.forceDeleteNamespace(ns)
+		}
+	}
+
+	// Clean up ALL resources owned by this project
+	fmt.Println("  🧹 Cleaning up ALL resources owned by this project...")
+	d.cleanupAllProjectOwnedResources()
+
+	// Final cluster-wide cleanup
+	d.cleanupClusterWideResources()
+}
+
 func (d *Destroyer) Execute() error {
+	// Always discover what's deployed
+	if err := d.discoverDeployedComponents(); err != nil {
+		color.Yellow("⚠️  Warning: Failed to discover components: %v\n", err)
+	}
+
+	// First, clean up ALL resources owned by this project (including in system namespaces)
+	fmt.Printf("\n🔥 Cleaning up ALL resources owned by %s project...\n", d.config.Project.Name)
+	d.cleanupAllProjectOwnedResources()
+
+	// Then, aggressively clean up all discovered namespaces
+	if len(d.discoveredNamespaces) > 0 {
+		fmt.Printf("\n🧹 Force cleaning %d namespaces with prefix '%s-'...\n", len(d.discoveredNamespaces), d.config.Project.Name)
+		for _, ns := range d.discoveredNamespaces {
+			d.forceDeleteNamespace(ns)
+		}
+	}
+
+	// Clean up cluster-wide resources
+	fmt.Println("\n🧹 Cleaning cluster-wide resources...")
+	d.cleanupClusterWideResources()
+
 	steps := []struct {
 		name string
 		fn   func() error
 		skip bool
-	}{
-		{"Delete application", d.deleteApplication, false},
-		{"Delete monitoring", d.deleteMonitoring, false},
-		{"Delete database", d.deleteDatabase, false},
-		{"Delete ingress controller", d.deleteIngress, false},
-		{"Clean up persistent volumes", d.cleanupPVCs, false},
-		{"Delete namespaces", d.deleteNamespaces, false},
-		{"Clean up cluster-wide resources", d.cleanupClusterResources, false},
-		{"Delete managed Supabase", d.deleteManagedSupabase, false},
-		{"Destroy infrastructure", d.destroyInfrastructure, !d.destroyCluster},
+	}{}
+
+	// Always run cleanup steps regardless of discovered components when force is enabled
+	if d.force {
+		// Mark all components as deployed to ensure cleanup runs
+		d.deployedComponents["application"] = true
+		d.deployedComponents["monitoring"] = true
+		d.deployedComponents["supabase"] = true
+		d.deployedComponents["traefik"] = true
+		d.deployedComponents["kafka"] = true
+		d.deployedComponents["vector"] = true
+		d.deployedComponents["keda"] = true
+		d.deployedComponents["execution"] = true
 	}
 
+	// Build steps based on discovered components
+	if d.deployedComponents["application"] {
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete application", d.deleteApplication, false})
+	} else if d.force {
+		// In force mode, always try to delete the application
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete application", d.deleteApplication, false})
+	}
+
+	if d.deployedComponents["monitoring"] {
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete monitoring", d.deleteMonitoring, false})
+	} else if d.force && d.config.Monitoring.Provider == "prometheus" {
+		// In force mode, delete monitoring if configured
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete monitoring", d.deleteMonitoring, false})
+	}
+
+	if d.deployedComponents["supabase"] && d.config.Database.Type == "self-hosted" {
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete database", d.deleteDatabase, false})
+	} else if d.force && d.config.Database.Type == "self-hosted" {
+		// In force mode, delete database if self-hosted
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete database", d.deleteDatabase, false})
+	}
+
+	// Check for Kafka and KEDA in execution namespace
+	if d.deployedComponents["execution"] || d.deployedComponents["kafka"] {
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete Kafka", d.deleteKafka, false})
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete KEDA", d.deleteKEDA, false})
+	} else if d.force {
+		// In force mode, always try to delete Kafka and KEDA
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete Kafka", d.deleteKafka, false})
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete KEDA", d.deleteKEDA, false})
+	}
+
+	if d.deployedComponents["logging"] || d.deployedComponents["vector"] {
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete Vector", d.deleteVector, false})
+	} else if d.force {
+		// In force mode, always try to delete Vector
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete Vector", d.deleteVector, false})
+	}
+
+	if d.deployedComponents["kafka"] {
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete ingress controller", d.deleteIngress, false})
+	} else if d.force {
+		// In force mode, always try to delete ingress
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete ingress controller", d.deleteIngress, false})
+	}
+
+	// Always clean up PVCs if any namespaces were found
+	if len(d.deployedComponents) > 0 {
+		// Always clean up PVCs, namespaces, and cluster resources (even in non-force mode)
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Clean up persistent volumes", d.cleanupPVCs, false})
+
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete namespaces", d.deleteNamespaces, false})
+	}
+
+	// Clean up cluster-wide resources only if we found components
+	if len(d.deployedComponents) > 0 {
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Clean up cluster-wide resources", d.cleanupClusterResources, false})
+	}
+
+	// Only add managed Supabase deletion if using managed database
+	if d.config.Database.Type == "managed" && d.config.Database.Provider == "supabase" {
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete managed Supabase", d.deleteManagedSupabase, false})
+	} else if d.force && d.config.Database.Type == "managed" && d.config.Database.Provider == "supabase" {
+		// In force mode, delete managed Supabase if configured
+		steps = append(steps, struct {
+			name string
+			fn   func() error
+			skip bool
+		}{"Delete managed Supabase", d.deleteManagedSupabase, false})
+	}
+
+	// Add infrastructure destruction as last step
+	steps = append(steps, struct {
+		name string
+		fn   func() error
+		skip bool
+	}{"Destroy infrastructure", d.destroyInfrastructure, !d.destroyCluster})
+
 	if d.destroyCluster {
-		fmt.Println("\n🗑️  Beginning full deployment teardown (including infrastructure)...")
+		if d.force {
+			fmt.Println("\n🗑️  Beginning FORCED full deployment teardown (including infrastructure)...")
+		} else {
+			fmt.Println("\n🗑️  Beginning full deployment teardown (including infrastructure)...")
+		}
 	} else {
-		fmt.Println("\n🗑️  Beginning deployment teardown (preserving cluster infrastructure)...")
+		if d.force {
+			fmt.Println("\n🗑️  Beginning FORCED deployment teardown (preserving cluster infrastructure)...")
+		} else {
+			fmt.Println("\n🗑️  Beginning deployment teardown (preserving cluster infrastructure)...")
+		}
 	}
 
 	for _, step := range steps {
@@ -1020,42 +1824,98 @@ func (d *Destroyer) Execute() error {
 		}
 	}
 
+	// Final aggressive cleanup pass
+	fmt.Println("\n🔥 Final cleanup pass...")
+	d.finalCleanupPass()
+
 	return nil
 }
 
 func (d *Destroyer) deleteApplication() error {
+	// Use default namespace or configured namespace
 	namespace := d.config.Project.Namespace
 	if namespace == "" {
 		namespace = d.getNamespace("rulebricks")
 	}
+	namespaces := []string{namespace}
 
-	cmd := exec.Command("helm", "uninstall", "rulebricks", "-n", namespace)
-	return cmd.Run()
+	// In force mode or if application is deployed, also check the app namespace
+	if d.force || d.deployedComponents["application"] {
+		appNamespace := d.getNamespace("app")
+		if appNamespace != namespace {
+			namespaces = append(namespaces, appNamespace)
+		}
+	}
+
+	// Try to uninstall from all discovered namespaces
+	for _, ns := range namespaces {
+		cmd := exec.Command("helm", "uninstall", "rulebricks", "-n", ns)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			outputStr := string(output)
+			if !strings.Contains(outputStr, "not found") && !strings.Contains(outputStr, "release: not found") {
+				return fmt.Errorf("failed to uninstall application from %s: %s", ns, outputStr)
+			}
+		}
+	}
+	return nil
 }
 
 func (d *Destroyer) deleteMonitoring() error {
-	if !d.config.Monitoring.Enabled {
+	if d.config.Monitoring.Provider != "prometheus" {
 		return nil
 	}
 
-	monitoringNamespace := d.getNamespace("monitoring")
-	cmd := exec.Command("helm", "uninstall", "prometheus", "-n", monitoringNamespace)
-	return cmd.Run()
+	// Use default monitoring namespace
+	namespaces := []string{d.getNamespace("monitoring")}
+
+	// Try to uninstall from all discovered namespaces
+	for _, ns := range namespaces {
+		cmd := exec.Command("helm", "uninstall", "prometheus", "-n", ns, "--wait")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			outputStr := string(output)
+			if !strings.Contains(outputStr, "not found") && !strings.Contains(outputStr, "release: not found") {
+				color.Yellow("  Warning: Failed to uninstall monitoring stack from %s: %s\n", ns, outputStr)
+			}
+		}
+	}
+
+	// Clean up Prometheus CRDs
+	fmt.Println("  Deleting Prometheus CRDs...")
+	prometheusCRDs := []string{
+		"alertmanagerconfigs.monitoring.coreos.com",
+		"alertmanagers.monitoring.coreos.com",
+		"podmonitors.monitoring.coreos.com",
+		"probes.monitoring.coreos.com",
+		"prometheusagents.monitoring.coreos.com",
+		"prometheuses.monitoring.coreos.com",
+		"prometheusrules.monitoring.coreos.com",
+		"scrapeconfigs.monitoring.coreos.com",
+		"servicemonitors.monitoring.coreos.com",
+		"thanosrulers.monitoring.coreos.com",
+	}
+
+	for _, crd := range prometheusCRDs {
+		cmd := exec.Command("kubectl", "delete", "crd", crd, "--ignore-not-found=true")
+		cmd.Run() // Ignore errors
+	}
+
+	return nil
 }
 
 func (d *Destroyer) deleteDatabase() error {
-	if d.config.Database.Type != "self-hosted" {
-		return nil
-	}
+	// Use default supabase namespace
+	namespaces := []string{d.getNamespace("supabase")}
 
-	supabaseNamespace := d.getNamespace("supabase")
-
-	// First uninstall the helm release
-	cmd := exec.Command("helm", "uninstall", "supabase", "-n", supabaseNamespace)
-	if err := cmd.Run(); err != nil {
-		// Don't fail if release doesn't exist
-		if !strings.Contains(err.Error(), "not found") {
-			return fmt.Errorf("failed to uninstall supabase: %w", err)
+	// Try to uninstall from all discovered namespaces
+	for _, supabaseNamespace := range namespaces {
+		// First uninstall the helm release
+		cmd := exec.Command("helm", "uninstall", "supabase", "-n", supabaseNamespace)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			outputStr := string(output)
+			// Don't fail if release doesn't exist
+			if !strings.Contains(outputStr, "not found") && !strings.Contains(outputStr, "release: not found") {
+				return fmt.Errorf("failed to uninstall supabase from %s: %s", supabaseNamespace, outputStr)
+			}
 		}
 	}
 
@@ -1065,7 +1925,7 @@ func (d *Destroyer) deleteDatabase() error {
 	// Delete ClusterRoles
 	clusterRoles := []string{"supabase-reader"}
 	for _, cr := range clusterRoles {
-		cmd = exec.Command("kubectl", "delete", "clusterrole", cr, "--ignore-not-found=true")
+		cmd := exec.Command("kubectl", "delete", "clusterrole", cr, "--ignore-not-found=true")
 		if err := cmd.Run(); err != nil {
 			color.Yellow("  Warning: Failed to delete ClusterRole %s: %v\n", cr, err)
 		}
@@ -1074,25 +1934,249 @@ func (d *Destroyer) deleteDatabase() error {
 	// Delete ClusterRoleBindings
 	clusterRoleBindings := []string{"supabase-view"}
 	for _, crb := range clusterRoleBindings {
-		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", crb, "--ignore-not-found=true")
+		cmd := exec.Command("kubectl", "delete", "clusterrolebinding", crb, "--ignore-not-found=true")
 		if err := cmd.Run(); err != nil {
 			color.Yellow("  Warning: Failed to delete ClusterRoleBinding %s: %v\n", crb, err)
 		}
 	}
 
-	// Delete the namespace itself
-	cmd = exec.Command("kubectl", "delete", "namespace", supabaseNamespace, "--wait=false", "--ignore-not-found=true")
-	if err := cmd.Run(); err != nil {
-		color.Yellow("  Warning: Failed to delete namespace %s: %v\n", supabaseNamespace, err)
+	// Delete the namespaces themselves
+	for _, supabaseNamespace := range namespaces {
+		cmd := exec.Command("kubectl", "delete", "namespace", supabaseNamespace, "--wait=false", "--ignore-not-found=true")
+		if err := cmd.Run(); err != nil {
+			color.Yellow("  Warning: Failed to delete namespace %s: %v\n", supabaseNamespace, err)
+		}
 	}
 
 	return nil
 }
 
 func (d *Destroyer) deleteIngress() error {
-	traefikNamespace := d.getNamespace("traefik")
-	cmd := exec.Command("helm", "uninstall", "traefik", "-n", traefikNamespace)
-	return cmd.Run()
+	// Use default traefik namespace
+	namespaces := []string{d.getNamespace("traefik")}
+
+	// Try to uninstall from all discovered namespaces
+	for _, ns := range namespaces {
+		cmd := exec.Command("helm", "uninstall", "traefik", "-n", ns, "--wait")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			outputStr := string(output)
+			if !strings.Contains(outputStr, "not found") && !strings.Contains(outputStr, "release: not found") {
+				color.Yellow("  Warning: Failed to uninstall Traefik from %s: %s\n", ns, outputStr)
+			}
+		}
+	}
+
+	// Clean up Traefik CRDs
+	fmt.Println("  Deleting Traefik CRDs...")
+	traefikCRDs := []string{
+		"accesscontrolpolicies.hub.traefik.io",
+		"aiservices.hub.traefik.io",
+		"apibundles.hub.traefik.io",
+		"apicatalogitems.hub.traefik.io",
+		"apiplans.hub.traefik.io",
+		"apiportals.hub.traefik.io",
+		"apiratelimits.hub.traefik.io",
+		"apis.hub.traefik.io",
+		"apiversions.hub.traefik.io",
+		"ingressroutes.traefik.io",
+		"ingressroutetcps.traefik.io",
+		"ingressrouteudps.traefik.io",
+		"managedsubscriptions.hub.traefik.io",
+		"middlewares.traefik.io",
+		"middlewaretcps.traefik.io",
+		"serverstransports.traefik.io",
+		"serverstransporttcps.traefik.io",
+		"tlsoptions.traefik.io",
+		"tlsstores.traefik.io",
+		"traefikservices.traefik.io",
+	}
+
+	for _, crd := range traefikCRDs {
+		cmd := exec.Command("kubectl", "delete", "crd", crd, "--ignore-not-found=true")
+		cmd.Run() // Ignore errors
+	}
+
+	// Clean up Traefik API services
+	fmt.Println("  Deleting Traefik API services...")
+	traefikAPIServices := []string{
+		"v1alpha1.hub.traefik.io",
+		"v1alpha1.traefik.io",
+	}
+
+	for _, apiService := range traefikAPIServices {
+		cmd := exec.Command("kubectl", "delete", "apiservice", apiService, "--ignore-not-found=true")
+		cmd.Run() // Ignore errors
+	}
+
+	// Clean up IngressClass resources
+	fmt.Println("  Deleting IngressClass resources...")
+	cmd := exec.Command("kubectl", "get", "ingressclass", "-o", "name")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				// Check if this IngressClass is related to traefik
+				ingressClassName := strings.TrimPrefix(line, "ingressclass.networking.k8s.io/")
+				if strings.Contains(ingressClassName, "traefik") {
+					fmt.Printf("    Deleting %s\n", ingressClassName)
+					deleteCmd := exec.Command("kubectl", "delete", "ingressclass", ingressClassName, "--force", "--grace-period=0")
+					deleteCmd.Run()
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (d *Destroyer) deleteKEDA() error {
+	fmt.Println("  🧹 Force deleting KEDA components...")
+
+	// Find ALL namespaces that might contain KEDA
+	projectPrefix := d.config.Project.Name
+	kedaNamespaces := []string{}
+
+	// Look for any namespace with -keda or -execution suffix
+	cmd := exec.Command("kubectl", "get", "namespaces", "-o", "name")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			ns := strings.TrimPrefix(strings.TrimSpace(line), "namespace/")
+			if ns != "" && strings.HasPrefix(ns, projectPrefix+"-") &&
+			   (strings.Contains(ns, "keda") || strings.Contains(ns, "execution")) {
+				kedaNamespaces = append(kedaNamespaces, ns)
+			}
+		}
+	}
+
+	// Add default namespaces
+	kedaNamespaces = append(kedaNamespaces, d.getNamespace("keda"), d.getNamespace("execution"))
+
+	// Force delete all resources in KEDA namespaces
+	for _, ns := range kedaNamespaces {
+		fmt.Printf("    Force cleaning namespace %s...\n", ns)
+
+		// Delete all resources in namespace
+		cmd := exec.Command("kubectl", "delete", "all", "--all", "-n", ns, "--force", "--grace-period=0")
+		cmd.Run()
+
+		// Try helm uninstall first
+		helmCmd := exec.Command("helm", "uninstall", "keda", "-n", ns, "--no-hooks")
+		helmCmd.Run()
+	}
+
+	// Delete KEDA CRDs with force
+	fmt.Println("  Force deleting KEDA CRDs...")
+	kedaCRDs := []string{
+		"clustertriggerauthentications.keda.sh",
+		"scaledjobs.keda.sh",
+		"scaledobjects.keda.sh",
+		"triggerauthentications.keda.sh",
+		"cloudeventsources.eventing.keda.sh",
+		"clustercloudeventsources.eventing.keda.sh",
+	}
+
+	// First delete all instances of KEDA custom resources
+	for _, crd := range kedaCRDs {
+		resourceName := strings.Split(crd, ".")[0]
+		fmt.Printf("    Deleting all %s instances...\n", resourceName)
+
+		// Delete all instances with timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cmd := exec.CommandContext(ctx, "kubectl", "delete", resourceName, "--all", "--all-namespaces", "--force", "--grace-period=0")
+		cmd.Run()
+		cancel()
+	}
+
+	// Then delete the CRDs themselves
+	for _, crd := range kedaCRDs {
+		fmt.Printf("    Deleting CRD %s...\n", crd)
+
+		// First try to patch finalizers
+		patchCmd := exec.Command("kubectl", "patch", "crd", crd,
+			"--type=json", "-p", `[{"op": "remove", "path": "/metadata/finalizers"}]`)
+		patchCmd.Run()
+
+		// Also try merge patch
+		mergePatchCmd := exec.Command("kubectl", "patch", "crd", crd,
+			"-p", `{"metadata":{"finalizers":null}}`, "--type=merge")
+		mergePatchCmd.Run()
+
+		// Delete with timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		cmd := exec.CommandContext(ctx, "kubectl", "delete", "crd", crd, "--force", "--grace-period=0")
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("      Warning: Failed to delete CRD %s: %v\n", crd, err)
+		}
+		cancel()
+	}
+
+	// Clean up KEDA resources in kube-system
+	fmt.Println("  Force deleting KEDA resources in kube-system...")
+	systemResources := []struct {
+		kind string
+		name string
+	}{
+		{"rolebinding", "keda-operator-auth-reader"},
+		{"clusterrole", "keda-operator"},
+		{"clusterrole", "keda-operator-external-metrics-reader"},
+		{"clusterrolebinding", "keda-operator"},
+		{"clusterrolebinding", "keda-operator-hpa-controller-external-metrics"},
+	}
+
+	for _, res := range systemResources {
+		cmd := exec.Command("kubectl", "delete", res.kind, res.name, "--force", "--grace-period=0")
+		cmd.Run()
+	}
+
+	// Delete any remaining KEDA-related cluster resources
+	cmd = exec.Command("kubectl", "get", "clusterrole,clusterrolebinding", "-o", "name")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "keda") {
+				deleteCmd := exec.Command("kubectl", "delete", line, "--force", "--grace-period=0")
+				deleteCmd.Run()
+			}
+		}
+	}
+
+	return nil
+}
+
+func (d *Destroyer) deleteKafka() error {
+	// Use default execution namespace (Kafka is deployed there)
+	namespaces := []string{d.getNamespace("execution")}
+
+	// Try to uninstall from discovered namespaces
+	for _, ns := range namespaces {
+		cmd := exec.Command("helm", "uninstall", "kafka", "-n", ns, "--wait")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			outputStr := string(output)
+			if !strings.Contains(outputStr, "not found") && !strings.Contains(outputStr, "release: not found") {
+				color.Yellow("  Warning: Failed to uninstall Kafka from %s: %s\n", ns, outputStr)
+			}
+		}
+	}
+	return nil
+}
+
+func (d *Destroyer) deleteVector() error {
+	// Use default logging namespace
+	namespaces := []string{d.getNamespace("logging")}
+
+	// Try to uninstall from discovered namespaces
+	for _, ns := range namespaces {
+		cmd := exec.Command("helm", "uninstall", "vector", "-n", ns, "--wait")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			outputStr := string(output)
+			if !strings.Contains(outputStr, "not found") && !strings.Contains(outputStr, "release: not found") {
+				color.Yellow("  Warning: Failed to uninstall Vector from %s: %s\n", ns, outputStr)
+			}
+		}
+	}
+	return nil
 }
 
 func (d *Destroyer) destroyInfrastructure() error {
@@ -1105,40 +2189,101 @@ func (d *Destroyer) destroyInfrastructure() error {
 }
 
 func (d *Destroyer) cleanupPVCs() error {
-	namespace := d.config.Project.Namespace
-	if namespace == "" {
-		namespace = d.getNamespace("rulebricks")
+	fmt.Println("  🧹 Force cleaning all PVCs and PVs...")
+
+	// First, delete ALL PVCs in ALL namespaces with our project prefix
+	projectPrefix := d.config.Project.Name
+
+	// Get all namespaces
+	cmd := exec.Command("kubectl", "get", "namespaces", "-o", "name")
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Printf("  Warning: Failed to list namespaces: %v\n", err)
+	} else {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			ns := strings.TrimPrefix(strings.TrimSpace(line), "namespace/")
+			if ns != "" && strings.HasPrefix(ns, projectPrefix+"-") {
+				fmt.Printf("  Force deleting all PVCs in namespace %s...\n", ns)
+
+				// Delete all PVCs with force
+				cmd = exec.Command("kubectl", "delete", "pvc", "--all", "-n", ns, "--force", "--grace-period=0")
+				cmd.Run()
+
+				// Also try to patch and delete stuck PVCs
+				cmd = exec.Command("kubectl", "get", "pvc", "-n", ns, "-o", "name")
+				if pvcOutput, err := cmd.Output(); err == nil {
+					pvcLines := strings.Split(string(pvcOutput), "\n")
+					for _, pvcLine := range pvcLines {
+						pvcLine = strings.TrimSpace(pvcLine)
+						if pvcLine != "" {
+							// Remove finalizers
+							patchCmd := exec.Command("kubectl", "patch", pvcLine, "-n", ns,
+								"--type=json", "-p", `[{"op": "remove", "path": "/metadata/finalizers"}]`)
+							patchCmd.Run()
+
+							// Force delete
+							deleteCmd := exec.Command("kubectl", "delete", pvcLine, "-n", ns, "--force", "--grace-period=0")
+							deleteCmd.Run()
+						}
+					}
+				}
+			}
+		}
 	}
 
-	// Delete Redis PVC specifically
-	fmt.Println("  Deleting Redis PVC...")
-	cmd := exec.Command("kubectl", "delete", "pvc", "redis-data", "-n", namespace, "--ignore-not-found=true")
-	if err := cmd.Run(); err != nil {
-		color.Yellow("  Warning: Failed to delete Redis PVC: %v\n", err)
+	// Also use discovered namespaces
+	for _, ns := range d.discoveredNamespaces {
+		fmt.Printf("  Force deleting all PVCs in discovered namespace %s...\n", ns)
+		cmd = exec.Command("kubectl", "delete", "pvc", "--all", "-n", ns, "--force", "--grace-period=0")
+		cmd.Run()
 	}
 
-	// Delete all PVCs in the rulebricks namespace
-	fmt.Println("  Deleting all PVCs in rulebricks namespace...")
-	cmd = exec.Command("kubectl", "delete", "pvc", "--all", "-n", namespace)
-	if err := cmd.Run(); err != nil {
-		color.Yellow("  Warning: Failed to delete PVCs in %s namespace: %v\n", namespace, err)
-	}
+	// Clean up PVs that were bound to our namespaces
+	fmt.Println("  Cleaning up PersistentVolumes...")
+	cmd = exec.Command("kubectl", "get", "pv", "-o", "json")
+	if output, err := cmd.Output(); err == nil {
+		type PVList struct {
+			Items []struct {
+				Metadata struct {
+					Name string `json:"name"`
+				} `json:"metadata"`
+				Spec struct {
+					ClaimRef struct {
+						Namespace string `json:"namespace"`
+						Name      string `json:"name"`
+					} `json:"claimRef,omitempty"`
+				} `json:"spec"`
+				Status struct {
+					Phase string `json:"phase"`
+				} `json:"status"`
+			} `json:"items"`
+		}
 
-	// Delete all PVCs in the traefik namespace
-	traefikNamespace := d.getNamespace("traefik")
-	fmt.Printf("  Deleting all PVCs in %s namespace...\n", traefikNamespace)
-	cmd = exec.Command("kubectl", "delete", "pvc", "--all", "-n", traefikNamespace)
-	if err := cmd.Run(); err != nil {
-		color.Yellow("  Warning: Failed to delete PVCs in %s namespace: %v\n", traefikNamespace, err)
-	}
+		var pvList PVList
+		if err := json.Unmarshal(output, &pvList); err == nil {
+			for _, pv := range pvList.Items {
+				// Check if PV is bound to a namespace with our prefix
+				if pv.Spec.ClaimRef.Namespace != "" &&
+				   strings.HasPrefix(pv.Spec.ClaimRef.Namespace, projectPrefix+"-") {
+					fmt.Printf("  Force deleting PV %s (was bound to %s/%s)...\n",
+						pv.Metadata.Name, pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name)
 
-	// If self-hosted Supabase, delete its PVCs
-	if d.config.Database.Type == "self-hosted" {
-		supabaseNamespace := d.getNamespace("supabase")
-		fmt.Printf("  Deleting self-hosted Supabase PVCs in %s namespace...\n", supabaseNamespace)
-		cmd = exec.Command("kubectl", "delete", "pvc", "-l", "app.kubernetes.io/instance=supabase", "-n", supabaseNamespace, "--wait=false")
-		if err := cmd.Run(); err != nil {
-			color.Yellow("  Warning: Failed to delete Supabase PVCs: %v\n", err)
+					// Remove finalizers first
+					patchCmd := exec.Command("kubectl", "patch", "pv", pv.Metadata.Name,
+						"--type=json", "-p", `[{"op": "remove", "path": "/metadata/finalizers"}]`)
+					patchCmd.Run()
+
+					// Remove claimRef to unbind it
+					patchCmd = exec.Command("kubectl", "patch", "pv", pv.Metadata.Name,
+						"--type=json", "-p", `[{"op": "remove", "path": "/spec/claimRef"}]`)
+					patchCmd.Run()
+
+					// Force delete
+					deleteCmd := exec.Command("kubectl", "delete", "pv", pv.Metadata.Name, "--force", "--grace-period=0")
+					deleteCmd.Run()
+				}
+			}
 		}
 	}
 
@@ -1146,26 +2291,134 @@ func (d *Destroyer) cleanupPVCs() error {
 }
 
 func (d *Destroyer) deleteNamespaces() error {
-	// Delete all project-related namespaces
-	namespaces := []string{
-		d.getNamespace("default"),
-		d.getNamespace("app"),
-		d.getNamespace("supabase"),
-		d.getNamespace("monitoring"),
-		d.getNamespace("traefik"),
-		d.getNamespace("logging"),
+	// Use discovered namespaces from discovery phase
+	namespaces := []string{}
+	seen := make(map[string]bool)
+
+	// Add all discovered namespaces
+	for _, ns := range d.discoveredNamespaces {
+		if !seen[ns] {
+			namespaces = append(namespaces, ns)
+			seen[ns] = true
+		}
 	}
 
-	// Also add the custom namespace if specified
-	if d.config.Project.Namespace != "" {
-		namespaces = append(namespaces, d.config.Project.Namespace)
+	// If no namespaces were discovered, fall back to default behavior
+	if len(namespaces) == 0 {
+		fmt.Println("  No namespaces discovered, using default namespace list...")
+		// In force mode or when no components discovered, delete all possible namespaces
+
+		if d.force || len(d.deployedComponents) == 0 {
+			// Force mode: try all possible namespaces
+			namespaces = append(namespaces, d.getNamespace("default"))
+			namespaces = append(namespaces, d.getNamespace("app"))
+			namespaces = append(namespaces, d.getNamespace("rulebricks"))
+			namespaces = append(namespaces, d.getNamespace("supabase"))
+			namespaces = append(namespaces, d.getNamespace("logging"))
+			namespaces = append(namespaces, d.getNamespace("execution"))
+			namespaces = append(namespaces, d.getNamespace("monitoring"))
+			namespaces = append(namespaces, d.getNamespace("traefik"))
+		} else {
+			// Normal mode: use discovered namespaces
+			for _, ns := range d.discoveredNamespaces {
+				if !seen[ns] {
+					namespaces = append(namespaces, ns)
+					seen[ns] = true
+				}
+			}
+		}
+
+		// Also add the custom namespace if specified
+		if d.config.Project.Namespace != "" {
+			namespaces = append(namespaces, d.config.Project.Namespace)
+		}
 	}
 
 	for _, ns := range namespaces {
 		fmt.Printf("  Deleting namespace %s...\n", ns)
-		cmd := exec.Command("kubectl", "delete", "namespace", ns, "--wait=false", "--ignore-not-found=true")
+
+		// Check if namespace exists first
+		checkCmd := exec.Command("kubectl", "get", "namespace", ns, "-o", "json")
+		output, err := checkCmd.Output()
+		if err != nil {
+			// Namespace doesn't exist, skip
+			continue
+		}
+
+		// Parse namespace to check its status
+		var nsData struct {
+			Status struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
+			Spec struct {
+				Finalizers []string `json:"finalizers"`
+			} `json:"spec"`
+		}
+
+		if err := json.Unmarshal(output, &nsData); err != nil {
+			color.Yellow("  Warning: Failed to parse namespace %s data: %v\n", ns, err)
+			continue
+		}
+
+		// If namespace is already terminating or has finalizers, handle it immediately
+		if nsData.Status.Phase == "Terminating" || len(nsData.Spec.Finalizers) > 0 {
+			fmt.Printf("  Namespace %s is terminating or has finalizers, force-deleting...\n", ns)
+
+			// Clean up any remaining resources first
+			d.cleanNamespaceResources(ns)
+
+			// Remove finalizers to force deletion
+			cmd := exec.Command("sh", "-c", fmt.Sprintf(
+				`kubectl get namespace %s -o json | jq '.spec.finalizers = []' | kubectl replace --raw "/api/v1/namespaces/%s/finalize" -f -`,
+				ns, ns,
+			))
+			if err := cmd.Run(); err != nil {
+				color.Yellow("  Warning: Failed to force-delete namespace %s: %v\n", ns, err)
+			} else {
+				color.Green("  Force-deleted namespace %s\n", ns)
+			}
+		} else {
+			// Clean all resources in the namespace first
+			fmt.Printf("  Cleaning resources in namespace %s...\n", ns)
+			d.cleanNamespaceResources(ns)
+
+			// Normal deletion
+			cmd := exec.Command("kubectl", "delete", "namespace", ns, "--wait=false", "--ignore-not-found=true")
+			if err := cmd.Run(); err != nil {
+				color.Yellow("  Warning: Failed to delete namespace %s: %v\n", ns, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (d *Destroyer) cleanNamespaceResources(namespace string) error {
+	// Delete all deployments, services, configmaps, secrets, etc. in the namespace
+	resourceTypes := []string{
+		"deployments",
+		"services",
+		"configmaps",
+		"secrets",
+		"ingresses",
+		"persistentvolumeclaims",
+		"serviceaccounts",
+		"roles",
+		"rolebindings",
+		"jobs",
+		"cronjobs",
+		"pods",
+		"replicasets",
+		"statefulsets",
+		"daemonsets",
+		"horizontalpodautoscalers",
+	}
+
+	for _, resourceType := range resourceTypes {
+		cmd := exec.Command("kubectl", "delete", resourceType, "--all", "-n", namespace, "--ignore-not-found=true", "--wait=false")
 		if err := cmd.Run(); err != nil {
-			color.Yellow("  Warning: Failed to delete namespace %s: %v\n", ns, err)
+			// Don't fail on errors, just log them
+			color.Yellow("  Warning: Failed to delete %s in namespace %s: %v\n", resourceType, namespace, err)
 		}
 	}
 
@@ -1174,6 +2427,17 @@ func (d *Destroyer) deleteNamespaces() error {
 
 func (d *Destroyer) cleanupClusterResources() error {
 	fmt.Println("  Cleaning up cluster-wide resources...")
+
+	// Delete metrics server if it exists
+	fmt.Println("  Deleting metrics server...")
+	metricsCmd := exec.Command("kubectl", "delete", "-f",
+		"https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml",
+		"--ignore-not-found=true")
+	if err := metricsCmd.Run(); err != nil {
+		color.Yellow("  Warning: Failed to delete metrics server: %v\n", err)
+	}
+
+
 
 	// Clean up any remaining ClusterRoles with project prefix
 	projectPrefix := d.config.Project.Name
@@ -1224,10 +2488,6 @@ func (d *Destroyer) cleanupClusterResources() error {
 }
 
 func (d *Destroyer) deleteManagedSupabase() error {
-	// Only delete managed Supabase projects
-	if d.config.Database.Type == "self-hosted" || d.config.Database.Provider != "supabase" {
-		return nil
-	}
 
 	// Convert domain to project name (same logic as teardown.sh)
 	projectName := strings.Map(func(r rune) rune {

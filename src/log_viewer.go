@@ -46,12 +46,12 @@ func (l *LogViewer) ViewLogs(component string, follow bool, tail int) error {
 			container: "rulebricks",
 		},
 		"database": {
-			namespace: "default",
+			namespace: GetDefaultNamespace(l.config.Project.Name, "supabase"),
 			labels:    "app.kubernetes.io/name=supabase-db",
 			container: "postgres",
 		},
 		"supabase": {
-			namespace: "default",
+			namespace: GetDefaultNamespace(l.config.Project.Name, "supabase"),
 			labels:    "app.kubernetes.io/instance=supabase",
 			container: "",
 		},
@@ -66,32 +66,32 @@ func (l *LogViewer) ViewLogs(component string, follow bool, tail int) error {
 			container: "traefik",
 		},
 		"kong": {
-			namespace: "default",
+			namespace: GetDefaultNamespace(l.config.Project.Name, "supabase"),
 			labels:    "app=kong",
 			container: "kong",
 		},
 		"auth": {
-			namespace: "default",
+			namespace: GetDefaultNamespace(l.config.Project.Name, "supabase"),
 			labels:    "app.kubernetes.io/name=supabase-auth",
 			container: "gotrue",
 		},
 		"realtime": {
-			namespace: "default",
+			namespace: GetDefaultNamespace(l.config.Project.Name, "supabase"),
 			labels:    "app.kubernetes.io/name=supabase-realtime",
 			container: "realtime",
 		},
 		"storage": {
-			namespace: "default",
+			namespace: GetDefaultNamespace(l.config.Project.Name, "supabase"),
 			labels:    "app.kubernetes.io/name=supabase-storage",
 			container: "storage",
 		},
 		"prometheus": {
-			namespace: "monitoring",
+			namespace: GetDefaultNamespace(l.config.Project.Name, "monitoring"),
 			labels:    "app.kubernetes.io/name=prometheus",
 			container: "prometheus",
 		},
 		"grafana": {
-			namespace: "monitoring",
+			namespace: GetDefaultNamespace(l.config.Project.Name, "monitoring"),
 			labels:    "app.kubernetes.io/name=grafana",
 			container: "grafana",
 		},

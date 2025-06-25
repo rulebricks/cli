@@ -254,6 +254,7 @@ var (
 	verbose        bool
 	verboseFlag    bool // Alias for verbose to maintain compatibility
 	destroyCluster bool
+	forceDestroy   bool
 )
 
 var rootCmd = &cobra.Command{
@@ -397,7 +398,7 @@ Use --cluster to also destroy the Kubernetes cluster and all infrastructure.`,
 			}
 		}
 
-		destroyer := NewDestroyer(config, destroyCluster)
+		destroyer := NewDestroyer(config, destroyCluster, forceDestroy)
 		if err := destroyer.Execute(); err != nil {
 			log.Fatalf("Destroy failed: %v", err)
 		}
@@ -543,6 +544,7 @@ func init() {
 
 	// Destroy command specific flags
 	destroyCmd.Flags().BoolVar(&destroyCluster, "cluster", false, "also destroy the Kubernetes cluster infrastructure")
+	destroyCmd.Flags().BoolVar(&forceDestroy, "force", false, "force deletion of all resources even if discovery fails")
 
 	// Config subcommands
 	configCmd.AddCommand(configGetCmd)

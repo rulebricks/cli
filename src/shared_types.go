@@ -392,8 +392,10 @@ func GetDefaultNamespace(projectName, component string) string {
 		return fmt.Sprintf("%s-monitoring", prefix)
 	case "supabase":
 		return fmt.Sprintf("%s-supabase", prefix)
-	case "logging", "kafka", "vector":
+	case "logging", "vector":
 		return fmt.Sprintf("%s-logging", prefix)
+	case "execution", "kafka", "workers", "keda":
+		return fmt.Sprintf("%s-execution", prefix)
 	case "rulebricks", "app":
 		return fmt.Sprintf("%s-app", prefix)
 	default:

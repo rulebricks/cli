@@ -1223,8 +1223,8 @@ func (w *ConfigWizard) configureLogging() {
 	color.Yellow("\n📊 Rule Execution Logging Configuration\n")
 
 	// Logging is now mandatory for high-volume request processing
-	fmt.Println("Rulebricks uses Kafka for high-volume request processing.")
-	fmt.Println("This requires setting up Vector with Kafka for log collection and buffering.")
+	fmt.Println("Rulebricks uses Kafka for high-volume request processing and worker execution.")
+	fmt.Println("Vector will consume logs from Kafka for centralized log collection.")
 	fmt.Println()
 
 	// Set logging as enabled
@@ -1236,13 +1236,13 @@ func (w *ConfigWizard) configureLogging() {
 }
 
 func (w *ConfigWizard) configureKafkaSettings() {
-	fmt.Println("\n📊 Configure Kafka log retention policy.")
+	fmt.Println("\n📊 Configure Kafka retention policy for execution messages and logs.")
 
 	retention := 24
 	retentionPrompt := &survey.Input{
 		Message: "Log retention period (hours):",
 		Default: "24",
-		Help:    "How long to keep logs in Kafka before automatic deletion (default: 24 hours)",
+		Help:    "How long to keep messages in Kafka before automatic deletion (default: 24 hours)",
 	}
 	survey.AskOne(retentionPrompt, &retention)
 
@@ -1252,7 +1252,7 @@ func (w *ConfigWizard) configureKafkaSettings() {
 	}
 	w.config.Performance.KafkaRetentionHours = retention
 
-	fmt.Printf("✅ Kafka logs will be retained for %d hours\n", retention)
+	fmt.Printf("✅ Kafka messages will be retained for %d hours\n", retention)
 }
 
 func (w *ConfigWizard) configureVectorLogging() {
@@ -1581,7 +1581,7 @@ func (w *ConfigWizard) configurePerformanceAndScaling() {
 	color.Yellow("\n🚀 Performance & Scaling Configuration\n")
 
 	fmt.Println("Let's optimize Rulebricks for your expected workload.")
-	fmt.Println("This will also configure Kafka settings for optimal performance.")
+	fmt.Println("This will also configure Kafka settings for worker execution and optimal performance.")
 	fmt.Println()
 
 	// Ask about expected volume

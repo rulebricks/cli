@@ -77,7 +77,7 @@ func (p *DeploymentPlanner) CreatePlan() DeploymentPlan {
 	plan.Steps = append(plan.Steps, DeploymentStep{
 		Name:        "Core Services",
 		Type:        "helm",
-		Description: "Install Traefik ingress controller and cert-manager",
+		Description: "Install Traefik ingress controller, KEDA autoscaler, and metrics server",
 		Required:    true,
 	})
 
@@ -110,7 +110,7 @@ func (p *DeploymentPlanner) CreatePlan() DeploymentPlan {
 	plan.Steps = append(plan.Steps, DeploymentStep{
 		Name:        "Kafka",
 		Type:        "helm",
-		Description: "Deploy Kafka for high-volume request processing and log buffering",
+		Description: "Deploy Kafka for high-volume request processing and worker execution",
 		Required:    true,
 	})
 
@@ -489,12 +489,59 @@ func (d *Deployer) deployCoreServices() error {
 
 	// Create traefik namespace
 	traefikNamespace := d.getNamespace("traefik")
-	cmd = exec.Command("kubectl", "create", "namespace", traefikNamespace, "--dry-run=client", "-o", "yaml")
-	output, _ := cmd.Output()
-	cmd = exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(string(output))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create traefik namespace %s: %w", traefikNamespace, err)
+	if d.Verbose {
+		fmt.Printf("Creating namespace: %s\n", traefikNamespace)
+	}
+
+	// Check namespace status
+	cmd = exec.Command("kubectl", "get", "namespace", traefikNamespace, "-o", "json")
+	output, err := cmd.Output()
+	if err != nil {
+		// Namespace doesn't exist, create it
+		cmd = exec.Command("kubectl", "create", "namespace", traefikNamespace)
+		if d.Verbose {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+		}
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to create traefik namespace %s: %w", traefikNamespace, err)
+		}
+	} else {
+		// Check if namespace is terminating
+		var nsData struct {
+			Status struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(output, &nsData); err == nil && nsData.Status.Phase == "Terminating" {
+			fmt.Printf("Namespace %s is terminating, force deleting...\n", traefikNamespace)
+			// Force delete by removing finalizers
+			forceCmd := exec.Command("sh", "-c", fmt.Sprintf(
+				`kubectl patch namespace %s -p '{"metadata":{"finalizers":[]}}' --type=merge && kubectl delete namespace %s --wait=false --ignore-not-found=true`,
+				traefikNamespace, traefikNamespace,
+			))
+			forceCmd.Run() // Ignore errors
+
+			// Wait for namespace to be gone
+			for i := 0; i < 30; i++ {
+				checkCmd := exec.Command("kubectl", "get", "namespace", traefikNamespace)
+				if err := checkCmd.Run(); err != nil {
+					// Namespace is gone, recreate it
+					cmd = exec.Command("kubectl", "create", "namespace", traefikNamespace)
+					if d.Verbose {
+						cmd.Stdout = os.Stdout
+						cmd.Stderr = os.Stderr
+					}
+					if err := cmd.Run(); err != nil {
+						return fmt.Errorf("failed to recreate traefik namespace %s: %w", traefikNamespace, err)
+					}
+					break
+				}
+				time.Sleep(1 * time.Second)
+			}
+		} else if d.Verbose {
+			fmt.Printf("Namespace %s already exists and is active\n", traefikNamespace)
+		}
 	}
 
 	// Find the traefik values file in the extracted chart
@@ -504,7 +551,8 @@ func (d *Deployer) deployCoreServices() error {
 	cmd = exec.Command("helm", "upgrade", "--install", "traefik", "traefik/traefik",
 		"--namespace", traefikNamespace,
 		"-f", traefikValuesPath,
-		"--wait")
+		"--wait",
+		"--cleanup-on-fail")
 
 	if d.Verbose {
 		cmd.Stdout = os.Stdout
@@ -548,25 +596,80 @@ func (d *Deployer) deployCoreServices() error {
 		return fmt.Errorf("failed to add KEDA helm repository: %w", err)
 	}
 
+	// Update helm repositories
 	cmd = exec.Command("helm", "repo", "update")
+	if d.Verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 	if err := cmd.Run(); err != nil {
-		return err
+		return fmt.Errorf("failed to update helm repositories: %w", err)
 	}
 
 	// Create keda namespace
-	kedaNamespace := "keda"
-	cmd = exec.Command("kubectl", "create", "namespace", kedaNamespace, "--dry-run=client", "-o", "yaml")
-	output, _ = cmd.Output()
-	cmd = exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(string(output))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create keda namespace: %w", err)
+	kedaNamespace := d.getNamespace("keda")
+	if d.Verbose {
+		fmt.Printf("Creating namespace: %s\n", kedaNamespace)
+	}
+
+	// Check namespace status
+	cmd = exec.Command("kubectl", "get", "namespace", kedaNamespace, "-o", "json")
+	output, err = cmd.Output()
+	if err != nil {
+		// Namespace doesn't exist, create it
+		cmd = exec.Command("kubectl", "create", "namespace", kedaNamespace)
+		if d.Verbose {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+		}
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to create keda namespace %s: %w", kedaNamespace, err)
+		}
+	} else {
+		// Check if namespace is terminating
+		var nsData struct {
+			Status struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(output, &nsData); err == nil && nsData.Status.Phase == "Terminating" {
+			fmt.Printf("Namespace %s is terminating, force deleting...\n", kedaNamespace)
+			// Force delete by removing finalizers
+			forceCmd := exec.Command("sh", "-c", fmt.Sprintf(
+				`kubectl patch namespace %s -p '{"metadata":{"finalizers":[]}}' --type=merge && kubectl delete namespace %s --wait=false --ignore-not-found=true`,
+				kedaNamespace, kedaNamespace,
+			))
+			forceCmd.Run() // Ignore errors
+
+			// Wait for namespace to be gone
+			for i := 0; i < 30; i++ {
+				checkCmd := exec.Command("kubectl", "get", "namespace", kedaNamespace)
+				if err := checkCmd.Run(); err != nil {
+					// Namespace is gone, recreate it
+					cmd = exec.Command("kubectl", "create", "namespace", kedaNamespace)
+					if d.Verbose {
+						cmd.Stdout = os.Stdout
+						cmd.Stderr = os.Stderr
+					}
+					if err := cmd.Run(); err != nil {
+						return fmt.Errorf("failed to recreate keda namespace %s: %w", kedaNamespace, err)
+					}
+					break
+				}
+				time.Sleep(1 * time.Second)
+			}
+		} else if d.Verbose {
+			fmt.Printf("Namespace %s already exists and is active\n", kedaNamespace)
+		}
 	}
 
 	// Install KEDA
 	cmd = exec.Command("helm", "upgrade", "--install", "keda", "kedacore/keda",
 		"--namespace", kedaNamespace,
-		"--wait")
+		"--create-namespace",
+		"--wait",
+		"--cleanup-on-fail",
+		"--timeout", "5m")
 
 	if d.Verbose {
 		cmd.Stdout = os.Stdout
@@ -576,6 +679,8 @@ func (d *Deployer) deployCoreServices() error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to install KEDA: %w", err)
 	}
+
+
 
 	// Wait for KEDA to be ready
 	fmt.Println("⏳ Waiting for KEDA to be ready...")
@@ -587,6 +692,8 @@ func (d *Deployer) deployCoreServices() error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("KEDA operator pod failed to become ready: %w", err)
 	}
+
+
 
 	return nil
 }
@@ -864,22 +971,14 @@ func (d *Deployer) deployRulebricksApp() error {
 		emailTemplates.TemplateEmailChange = d.config.Email.Templates.CustomEmailChangeURL
 	}
 
-	switch d.config.Email.Provider {
-	case "smtp":
-		rulebricksValues["app"].(map[string]interface{})["smtp"] = map[string]interface{}{
-			"host": d.config.Email.SMTP.Host,
-			"port": d.config.Email.SMTP.Port,
-			"user": d.config.Email.SMTP.Username,
-			"pass": d.secrets["smtp_password"],
-			"from": d.config.Email.From,
-			"fromName": d.config.Email.FromName,
-		}
-
-	case "resend", "sendgrid", "ses":
-		rulebricksValues["app"].(map[string]interface{})["emailProvider"] = d.config.Email.Provider
-		rulebricksValues["app"].(map[string]interface{})["emailApiKey"] = d.secrets["email_api_key"]
-		rulebricksValues["app"].(map[string]interface{})["emailFrom"] = d.config.Email.From
-		rulebricksValues["app"].(map[string]interface{})["emailFromName"] = d.config.Email.FromName
+	// provider always ends up smtp
+	rulebricksValues["app"].(map[string]interface{})["smtp"] = map[string]interface{}{
+		"host": d.config.Email.SMTP.Host,
+		"port": d.config.Email.SMTP.Port,
+		"user": d.config.Email.SMTP.Username,
+		"pass": d.secrets["smtp_password"],
+		"from": d.config.Email.From,
+		"fromName": d.config.Email.FromName,
 	}
 
 	// Add email template configuration
@@ -894,38 +993,36 @@ func (d *Deployer) deployRulebricksApp() error {
 	}
 
 	// Configure logging with Vector and Kafka (mandatory)
-	if d.config.Logging.Enabled {
-		// Vector logging with Kafka - use Kafka brokers
-		kafkaBrokers := d.state.Application.KafkaBrokers
-		if kafkaBrokers == "" {
-			// Fallback to internal service if external endpoint not available yet
-			kafkaBrokers = fmt.Sprintf("kafka.%s:9092", d.getNamespace("logging"))
-		}
+	// Vector logging with Kafka - use Kafka brokers
+	kafkaBrokers := d.state.Application.KafkaBrokers
+	if kafkaBrokers == "" {
+		// Fallback to internal service if external endpoint not available yet
+		kafkaBrokers = fmt.Sprintf("kafka.%s:9092", d.getNamespace("execution"))
+	}
 
-		// Map sink types to friendly names
-		sinkFriendlyNames := map[string]string{
-			"elasticsearch":       "Elasticsearch",
-			"datadog_logs":       "Datadog",
-			"loki":               "Grafana Loki",
-			"aws_s3":             "AWS S3",
-			"azure_blob":         "Azure Blob Storage",
-			"gcp_cloud_storage":  "Google Cloud Storage",
-			"splunk_hec":         "Splunk",
-			"new_relic_logs":     "New Relic",
-			"http":               "Custom HTTP endpoint",
-		}
+	// Map sink types to friendly names
+	sinkFriendlyNames := map[string]string{
+		"elasticsearch":       "Elasticsearch",
+		"datadog_logs":       "Datadog",
+		"loki":               "Grafana Loki",
+		"aws_s3":             "AWS S3",
+		"azure_blob":         "Azure Blob Storage",
+		"gcp_cloud_storage":  "Google Cloud Storage",
+		"splunk_hec":         "Splunk",
+		"new_relic_logs":     "New Relic",
+		"http":               "Custom HTTP endpoint",
+	}
 
-		loggingDestination := sinkFriendlyNames[d.config.Logging.Vector.Sink.Type]
-		if loggingDestination == "" {
-			loggingDestination = d.config.Logging.Vector.Sink.Type
-		}
+	loggingDestination := sinkFriendlyNames[d.config.Logging.Vector.Sink.Type]
+	if loggingDestination == "" {
+		loggingDestination = d.config.Logging.Vector.Sink.Type
+	}
 
-		rulebricksValues["app"].(map[string]interface{})["logging"] = map[string]interface{}{
-			"enabled": true,
-			"kafkaBrokers": kafkaBrokers,
-			"kafkaTopic": "logs",
-			"loggingDestination": loggingDestination,
-		}
+	rulebricksValues["app"].(map[string]interface{})["logging"] = map[string]interface{}{
+		"enabled": true,
+		"kafkaBrokers": kafkaBrokers,
+		"kafkaTopic": "logs",
+		"loggingDestination": loggingDestination,
 	}
 
 	// Create namespace if it doesn't exist
@@ -954,6 +1051,7 @@ func (d *Deployer) deployRulebricksApp() error {
 		"--namespace", namespace,
 		"-f", valuesFile,
 		"--wait",
+		"--cleanup-on-fail",
 		"--timeout", "10m")
 
 	if d.Verbose {
@@ -981,9 +1079,9 @@ func (d *Deployer) deployMonitoring() error {
 	return d.deployPrometheus()
 }
 
-// deployKafka installs Kafka for log buffering and high-volume request processing
+// deployKafka installs Kafka for high-volume request processing and worker execution
 func (d *Deployer) deployKafka() error {
-	color.Blue("☕ Deploying Kafka for log buffering and request processing...\n")
+	color.Blue("☕ Deploying Kafka for high-volume request processing and worker execution...\n")
 
 	// Add Bitnami Helm repository
 	cmd := exec.Command("helm", "repo", "add", "bitnami", "https://charts.bitnami.com/bitnami")
@@ -1068,13 +1166,14 @@ func (d *Deployer) deployKafka() error {
 	}
 	defer os.Remove(valuesFile)
 
-	namespace := d.getNamespace("logging")
+	namespace := d.getNamespace("execution")
 	cmd = exec.Command("helm", "upgrade", "--install", "kafka",
 		"bitnami/kafka",
 		"--namespace", namespace,
 		"--create-namespace",
 		"--values", valuesFile,
 		"--wait",
+		"--cleanup-on-fail",
 		"--timeout", "10m")
 
 	if d.Verbose {
@@ -1086,32 +1185,11 @@ func (d *Deployer) deployKafka() error {
 		return fmt.Errorf("failed to deploy Kafka: %w", err)
 	}
 
-	// Get Kafka service endpoint
-	time.Sleep(10 * time.Second) // Wait for service to be ready
-	cmd = exec.Command("kubectl", "get", "service", "kafka",
-		"-n", namespace,
-		"-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}")
-	output, err := cmd.Output()
-	if err != nil {
-		// Try IP if hostname is not available
-		cmd = exec.Command("kubectl", "get", "service", "kafka",
-			"-n", namespace,
-			"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}")
-		output, err = cmd.Output()
-		if err != nil {
-			// Use internal service name as fallback
-			d.state.Application.KafkaBrokers = fmt.Sprintf("kafka.%s:9092", namespace)
-			color.Yellow("⚠️  Using internal Kafka service (external endpoint not available)\n")
-			return nil
-		}
-	}
-
-	kafkaEndpoint := string(output)
-	if kafkaEndpoint != "" {
-		d.state.Application.KafkaBrokers = fmt.Sprintf("%s:9092", kafkaEndpoint)
-		color.Green("✅ Kafka deployed successfully\n")
-		fmt.Printf("   Brokers: %s\n", d.state.Application.KafkaBrokers)
-	}
+	// Use internal service name for Kafka to ensure proper connectivity
+	// The external LoadBalancer causes issues with advertised listeners
+	d.state.Application.KafkaBrokers = fmt.Sprintf("kafka.%s.svc.cluster.local:9092", namespace)
+	color.Green("✅ Kafka deployed successfully\n")
+	fmt.Printf("   Brokers: %s\n", d.state.Application.KafkaBrokers)
 
 	return nil
 }
@@ -1147,7 +1225,7 @@ func (d *Deployer) deployVector() error {
 	// Get Kafka brokers from state or use internal service
 	kafkaBrokers := d.state.Application.KafkaBrokers
 	if kafkaBrokers == "" {
-		kafkaBrokers = fmt.Sprintf("kafka.%s:9092", d.getNamespace("logging"))
+		kafkaBrokers = fmt.Sprintf("kafka.%s.svc.cluster.local:9092", d.getNamespace("execution"))
 	}
 
 	// Update Vector config to use Kafka as source
@@ -1174,7 +1252,8 @@ func (d *Deployer) deployVector() error {
 	releaseName := fmt.Sprintf("vector-%s", d.config.Project.Name)
 
 	vectorValues := map[string]interface{}{
-		"role": "Agent",
+		"role": "Stateless-Aggregator",  // Use Deployment instead of DaemonSet
+		"replicas": 2,                    // Start with 2 replicas
 		"customConfig": vectorConfig,
 		"fullnameOverride": releaseName, // Make all resources project-specific
 		"rbac": map[string]interface{}{
@@ -1194,12 +1273,12 @@ func (d *Deployer) deployVector() error {
 		},
 		"resources": map[string]interface{}{
 			"requests": map[string]interface{}{
-				"cpu":    "100m",
-				"memory": "256Mi",
+				"cpu":    "50m",    // Reduced since it's just consuming from Kafka
+				"memory": "128Mi",
 			},
 			"limits": map[string]interface{}{
-				"cpu":    "500m",
-				"memory": "512Mi",
+				"cpu":    "200m",
+				"memory": "256Mi",
 			},
 		},
 	}
@@ -1217,6 +1296,7 @@ func (d *Deployer) deployVector() error {
 		"--create-namespace",
 		"--values", valuesFile,
 		"--wait",
+		"--cleanup-on-fail",
 		"--timeout", "5m")
 
 	if d.Verbose {
@@ -1439,12 +1519,69 @@ func (d *Deployer) deployPrometheus() error {
 	defer os.Remove(valuesFile)
 
 	monitoringNamespace := d.getNamespace("monitoring")
+
+	// Create monitoring namespace
+	if d.Verbose {
+		fmt.Printf("Creating namespace: %s\n", monitoringNamespace)
+	}
+
+	// Check namespace status
+	cmd = exec.Command("kubectl", "get", "namespace", monitoringNamespace, "-o", "json")
+	output, err := cmd.Output()
+	if err != nil {
+		// Namespace doesn't exist, create it
+		cmd = exec.Command("kubectl", "create", "namespace", monitoringNamespace)
+		if d.Verbose {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+		}
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to create monitoring namespace %s: %w", monitoringNamespace, err)
+		}
+	} else {
+		// Check if namespace is terminating
+		var nsData struct {
+			Status struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(output, &nsData); err == nil && nsData.Status.Phase == "Terminating" {
+			fmt.Printf("Namespace %s is terminating, force deleting...\n", monitoringNamespace)
+			// Force delete by removing finalizers
+			forceCmd := exec.Command("sh", "-c", fmt.Sprintf(
+				`kubectl patch namespace %s -p '{"metadata":{"finalizers":[]}}' --type=merge && kubectl delete namespace %s --wait=false --ignore-not-found=true`,
+				monitoringNamespace, monitoringNamespace,
+			))
+			forceCmd.Run() // Ignore errors
+
+			// Wait for namespace to be gone
+			for i := 0; i < 30; i++ {
+				checkCmd := exec.Command("kubectl", "get", "namespace", monitoringNamespace)
+				if err := checkCmd.Run(); err != nil {
+					// Namespace is gone, recreate it
+					cmd = exec.Command("kubectl", "create", "namespace", monitoringNamespace)
+					if d.Verbose {
+						cmd.Stdout = os.Stdout
+						cmd.Stderr = os.Stderr
+					}
+					if err := cmd.Run(); err != nil {
+						return fmt.Errorf("failed to recreate monitoring namespace %s: %w", monitoringNamespace, err)
+					}
+					break
+				}
+				time.Sleep(1 * time.Second)
+			}
+		} else if d.Verbose {
+			fmt.Printf("Namespace %s already exists and is active\n", monitoringNamespace)
+		}
+	}
+
 	cmd = exec.Command("helm", "upgrade", "--install", "prometheus",
 		"prometheus-community/kube-prometheus-stack",
 		"--namespace", monitoringNamespace,
-		"--create-namespace",
 		"-f", valuesFile,
 		"--wait",
+		"--cleanup-on-fail",
 		"--timeout", "15m")
 
 	if d.Verbose {
@@ -1812,11 +1949,47 @@ func (d *Deployer) configureTLS() error {
 
 	// Ensure rulebricks namespace exists
 	rulebricksNamespace := d.getNamespace("rulebricks")
-	nsCmd := exec.Command("kubectl", "create", "namespace", rulebricksNamespace, "--dry-run=client", "-o", "yaml")
-	nsOutput, _ := nsCmd.Output()
-	nsApplyCmd := exec.Command("kubectl", "apply", "-f", "-")
-	nsApplyCmd.Stdin = strings.NewReader(string(nsOutput))
-	nsApplyCmd.Run()
+
+	// Check namespace status
+	nsCmd := exec.Command("kubectl", "get", "namespace", rulebricksNamespace, "-o", "json")
+	nsOutput, err := nsCmd.Output()
+	if err != nil {
+		// Namespace doesn't exist, create it
+		nsCmd = exec.Command("kubectl", "create", "namespace", rulebricksNamespace)
+		if err := nsCmd.Run(); err != nil {
+			return fmt.Errorf("failed to create rulebricks namespace %s: %w", rulebricksNamespace, err)
+		}
+	} else {
+		// Check if namespace is terminating
+		var nsData struct {
+			Status struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal(nsOutput, &nsData); err == nil && nsData.Status.Phase == "Terminating" {
+			fmt.Printf("Namespace %s is terminating, force deleting...\n", rulebricksNamespace)
+			// Force delete by removing finalizers
+			forceCmd := exec.Command("sh", "-c", fmt.Sprintf(
+				`kubectl patch namespace %s -p '{"metadata":{"finalizers":[]}}' --type=merge && kubectl delete namespace %s --wait=false --ignore-not-found=true`,
+				rulebricksNamespace, rulebricksNamespace,
+			))
+			forceCmd.Run() // Ignore errors
+
+			// Wait for namespace to be gone
+			for i := 0; i < 30; i++ {
+				checkCmd := exec.Command("kubectl", "get", "namespace", rulebricksNamespace)
+				if err := checkCmd.Run(); err != nil {
+					// Namespace is gone, recreate it
+					nsCmd = exec.Command("kubectl", "create", "namespace", rulebricksNamespace)
+					if err := nsCmd.Run(); err != nil {
+						return fmt.Errorf("failed to recreate rulebricks namespace %s: %w", rulebricksNamespace, err)
+					}
+					break
+				}
+				time.Sleep(1 * time.Second)
+			}
+		}
+	}
 
 	// Update or create the config map with the current domain
 	configCmd := exec.Command("kubectl", "create", "configmap", "-n", rulebricksNamespace,
@@ -1946,7 +2119,8 @@ func (d *Deployer) configureTLS() error {
 // rollback reverses completed steps
 func (d *Deployer) rollback(completedSteps []int) {
 	// Run the destroy command to clean up everything except the cluster
-	destroyer := NewDestroyer(*d.config, false)
+	// Use force=true to ensure thorough cleanup even if discovery fails
+	destroyer := NewDestroyer(*d.config, false, true)
 	if err := destroyer.Execute(); err != nil {
 		color.Red("⚠️  Failed to perform soft destroy during rollback: %v\n", err)
 		color.Yellow("You may need to manually clean up resources before retrying\n")
