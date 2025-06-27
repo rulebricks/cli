@@ -102,8 +102,8 @@ var SupabaseRegions = []struct {
 // DefaultInstanceTypes contains default instance types for each cloud provider
 var DefaultInstanceTypes = map[string]string{
 	"aws":   "c8g.large",
-	"azure": "Standard_D4s_v5",
-	"gcp":   "n2-standard-4",
+	"azure": "Standard_D4ps_v5",
+	"gcp":   "t2a-standard-4",
 }
 
 // KubernetesVersions contains supported Kubernetes versions

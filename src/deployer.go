@@ -651,6 +651,36 @@ func (d *Deployer) displayConnectionInfo() {
 	fmt.Printf("   2. Check 'rulebricks status' to monitor your deployment\n")
 	fmt.Printf("   3. Use 'rulebricks logs' to view application logs\n")
 
+	// Check if logging requires IAM setup
+	if d.config.Logging.Enabled && d.config.Logging.Vector != nil && d.config.Logging.Vector.Sink != nil {
+		needsIAMSetup := false
+		var setupCommand string
+
+		switch d.config.Logging.Vector.Sink.Type {
+		case "aws_s3":
+			if setupIAM, ok := d.config.Logging.Vector.Sink.Config["setup_iam"].(bool); ok && setupIAM {
+				needsIAMSetup = true
+				setupCommand = "rulebricks vector setup-s3"
+			}
+		case "gcp_cloud_storage":
+			if setupIAM, ok := d.config.Logging.Vector.Sink.Config["setup_iam"].(bool); ok && setupIAM {
+				needsIAMSetup = true
+				setupCommand = "rulebricks vector setup-gcs"
+			}
+		case "azure_blob":
+			if setupIAM, ok := d.config.Logging.Vector.Sink.Config["setup_iam"].(bool); ok && setupIAM {
+				needsIAMSetup = true
+				setupCommand = "rulebricks vector setup-azure"
+			}
+		}
+
+		if needsIAMSetup {
+			color.Yellow("\n⚠️  Vector logging requires IAM permissions to be configured.")
+			fmt.Printf("   Run '%s' to set up the required permissions.\n", setupCommand)
+			fmt.Printf("   Or use 'rulebricks vector generate-iam-config' for manual setup instructions.\n")
+		}
+	}
+
 	if d.config.Email.Provider == "" {
 		color.Yellow("\n⚠️  Email not configured. Configure email to enable notifications.\n")
 	}

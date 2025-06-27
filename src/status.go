@@ -21,7 +21,7 @@ type StatusChecker struct {
 func NewStatusChecker(config *Config) *StatusChecker {
 	return &StatusChecker{
 		config:   config,
-		progress: NewProgressIndicator(false), // Status checking is always non-verbose
+		progress: NewProgressIndicator(false),
 	}
 }
 
@@ -187,7 +187,7 @@ func (checker *StatusChecker) checkApplication(status *DeploymentStatus) {
 	ctx := context.Background()
 
 	// Check deployment
-	deployment, err := checker.k8sOps.GetDeployment(ctx, namespace, "rulebricks")
+	deployment, err := checker.k8sOps.GetDeployment(ctx, namespace, "rulebricks-app")
 	if err != nil {
 		status.Application.Deployed = false
 		return
@@ -279,9 +279,9 @@ func (checker *StatusChecker) checkMonitoring(status *DeploymentStatus) {
 	ctx := context.Background()
 	monitoringNs := checker.config.GetNamespace("monitoring")
 
-	// Check Prometheus
-	prometheusDeployment, err := checker.k8sOps.GetDeployment(ctx, monitoringNs, "prometheus-kube-prometheus-prometheus")
-	if err == nil && prometheusDeployment.Status.ReadyReplicas > 0 {
+	// Check Prometheus (it's a StatefulSet, not a Deployment)
+	prometheusStatefulSet, err := checker.k8sOps.GetStatefulSet(ctx, monitoringNs, "prometheus-prometheus-kube-prometheus-prometheus")
+	if err == nil && prometheusStatefulSet.Status.ReadyReplicas > 0 {
 		status.Monitoring.PrometheusRunning = true
 	}
 

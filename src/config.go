@@ -408,14 +408,14 @@ func (c *Config) ApplyDefaults() {
 			c.Cloud.Azure = &AzureConfig{}
 		}
 		if c.Cloud.Azure.VMSize == "" {
-			c.Cloud.Azure.VMSize = "Standard_D4s_v5"
+			c.Cloud.Azure.VMSize = "Standard_D4ps_v5"
 		}
 	case "gcp":
 		if c.Cloud.GCP == nil {
 			c.Cloud.GCP = &GCPConfig{}
 		}
 		if c.Cloud.GCP.MachineType == "" {
-			c.Cloud.GCP.MachineType = "n2-standard-4"
+			c.Cloud.GCP.MachineType = "t2a-standard-4"
 		}
 	}
 

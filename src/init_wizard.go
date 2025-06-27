@@ -415,16 +415,88 @@ func (w *InitWizard) configureOptionalFeatures() error {
 	// Logging
 	w.config.Logging.Enabled = w.confirm("Enable centralized logging?", false)
 	if w.config.Logging.Enabled {
+		sinkTypes := []string{"console", "elasticsearch", "datadog_logs", "loki", "aws_s3", "azure_blob", "gcp_cloud_storage", "splunk_hec", "new_relic_logs", "http"}
 		w.config.Logging.Vector = &VectorConfig{
 			Sink: &VectorSink{
-				Type: w.promptChoice("Log sink type", []string{"console", "elasticsearch", "s3", "datadog"}, "console"),
+				Type: w.promptChoice("Log sink type", sinkTypes, "console"),
 			},
 		}
 
 		if w.config.Logging.Vector.Sink.Type != "console" {
-			w.config.Logging.Vector.Sink.Endpoint = w.promptString("Sink endpoint", "", nil)
-			if w.confirm("Requires API key?", true) {
-				w.config.Logging.Vector.Sink.APIKey = w.promptString("API key source", "env:VECTOR_API_KEY", nil)
+			w.config.Logging.Vector.Sink.Config = make(map[string]interface{})
+
+			switch w.config.Logging.Vector.Sink.Type {
+			case "elasticsearch":
+				w.config.Logging.Vector.Sink.Endpoint = w.promptString("Elasticsearch endpoint (e.g., https://elastic.example.com:9200)", "", nil)
+				w.config.Logging.Vector.Sink.Config["index"] = w.promptString("Index name", "rulebricks-logs", nil)
+				if w.confirm("Use authentication?", true) {
+					w.config.Logging.Vector.Sink.Config["auth_user"] = w.promptString("Username", "elastic", nil)
+					w.config.Logging.Vector.Sink.APIKey = w.promptString("Password source", "env:ELASTIC_PASSWORD", nil)
+				}
+
+			case "datadog_logs":
+				w.config.Logging.Vector.Sink.APIKey = w.promptString("Datadog API key source", "env:DATADOG_API_KEY", nil)
+				site := w.promptChoice("Datadog site", []string{"datadoghq.com", "datadoghq.eu"}, "datadoghq.com")
+				w.config.Logging.Vector.Sink.Config["site"] = site
+
+			case "loki":
+				w.config.Logging.Vector.Sink.Endpoint = w.promptString("Loki endpoint (e.g., http://loki:3100)", "", nil)
+
+			case "aws_s3":
+				w.config.Logging.Vector.Sink.Config["bucket"] = w.promptString("S3 bucket name", "", nil)
+				w.config.Logging.Vector.Sink.Config["region"] = w.promptString("AWS region", "us-east-1", nil)
+				fmt.Println("\n📋 S3 requires IAM permissions for Vector to write logs")
+				if w.confirm("Would you like to set up IAM permissions automatically after deployment?", true) {
+					w.config.Logging.Vector.Sink.Config["setup_iam"] = true
+					fmt.Println("✅ IAM setup will be available via: rulebricks vector setup-s3")
+				} else {
+					fmt.Println("ℹ️  You can set up IAM manually later using: rulebricks vector generate-iam-config --sink aws_s3")
+				}
+
+			case "azure_blob":
+				w.config.Logging.Vector.Sink.Config["container_name"] = w.promptString("Container name", "logs", nil)
+				fmt.Println("\n📋 Azure Blob Storage can use Managed Identity (recommended) or Connection String")
+				if w.confirm("Would you like to use Managed Identity instead of connection string?", true) {
+					w.config.Logging.Vector.Sink.Config["use_managed_identity"] = true
+					w.config.Logging.Vector.Sink.Config["storage_account"] = w.promptString("Storage account name", "", nil)
+					if w.confirm("Would you like to set up Managed Identity automatically after deployment?", true) {
+						w.config.Logging.Vector.Sink.Config["setup_iam"] = true
+						fmt.Println("✅ Managed Identity setup will be available via: rulebricks vector setup-azure")
+					}
+				} else {
+					w.config.Logging.Vector.Sink.APIKey = w.promptString("Connection string source", "env:AZURE_STORAGE_CONNECTION_STRING", nil)
+				}
+
+			case "gcp_cloud_storage":
+				w.config.Logging.Vector.Sink.Config["bucket"] = w.promptString("GCS bucket name", "", nil)
+				fmt.Println("\n📋 GCS can use Workload Identity (recommended) or Service Account JSON")
+				if w.confirm("Would you like to use Workload Identity instead of service account JSON?", true) {
+					w.config.Logging.Vector.Sink.Config["use_workload_identity"] = true
+					if w.confirm("Would you like to set up Workload Identity automatically after deployment?", true) {
+						w.config.Logging.Vector.Sink.Config["setup_iam"] = true
+						fmt.Println("✅ Workload Identity setup will be available via: rulebricks vector setup-gcs")
+					}
+				} else {
+					w.config.Logging.Vector.Sink.Config["credentials_path"] = w.promptString("Service account JSON path", "/var/secrets/gcp/key.json", nil)
+					fmt.Println("ℹ️  Remember to create the secret: kubectl create secret generic gcs-key -n <namespace> --from-file=key.json=<path>")
+				}
+
+			case "splunk_hec":
+				w.config.Logging.Vector.Sink.Endpoint = w.promptString("Splunk HEC endpoint", "", nil)
+				w.config.Logging.Vector.Sink.APIKey = w.promptString("HEC token source", "env:SPLUNK_HEC_TOKEN", nil)
+				w.config.Logging.Vector.Sink.Config["index"] = w.promptString("Index name", "main", nil)
+
+			case "new_relic_logs":
+				w.config.Logging.Vector.Sink.APIKey = w.promptString("License key source", "env:NEW_RELIC_LICENSE_KEY", nil)
+				region := w.promptChoice("Region", []string{"US", "EU"}, "US")
+				w.config.Logging.Vector.Sink.Config["region"] = region
+
+			case "http":
+				w.config.Logging.Vector.Sink.Endpoint = w.promptString("HTTP endpoint URL", "", nil)
+				if w.confirm("Add authorization header?", false) {
+					authHeader := w.promptString("Authorization header value", "Bearer YOUR_TOKEN", nil)
+					w.config.Logging.Vector.Sink.Config["auth_header"] = authHeader
+				}
 			}
 		}
 	}

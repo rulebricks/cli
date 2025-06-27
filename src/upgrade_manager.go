@@ -64,11 +64,7 @@ func (um *UpgradeManager) ListVersions() error {
 	spinner.Success()
 
 	// Get current version
-	currentVersion, err := um.getCurrentVersion()
-	if err != nil {
-		um.progress.Warning("Could not determine current version: %v", err)
-		currentVersion = "unknown"
-	}
+	currentVersion, _ := um.getCurrentVersion()
 
 	// Display versions
 	color.New(color.Bold).Println("\n📦 Available Versions")
@@ -85,14 +81,17 @@ func (um *UpgradeManager) ListVersions() error {
 		}
 
 		marker := "  "
+		dateStr := release.CreatedAt.Format("2006-01-02")
+
 		if versionStr == currentVersion {
-			marker = "→ "
-			versionStr = color.GreenString("%s (current)", versionStr)
+			marker = color.GreenString("→ ")
+			versionStr = color.New(color.Bold, color.FgGreen).Sprintf("%s", versionStr)
+			dateStr = fmt.Sprintf("%s %s", dateStr, color.GreenString("(current)"))
 		} else if release.Prerelease {
 			versionStr = color.YellowString("%s (pre-release)", versionStr)
 		}
 
-		fmt.Printf("%s%s - %s\n", marker, versionStr, release.CreatedAt.Format("2006-01-02"))
+		fmt.Printf("%s%s - %s\n", marker, versionStr, dateStr)
 	}
 
 	fmt.Println(strings.Repeat("─", 50))
@@ -144,14 +143,19 @@ func (um *UpgradeManager) Upgrade(version string, dryRun bool) error {
 	currentVersion, err := um.getCurrentVersion()
 	if err != nil {
 		um.progress.Warning("Could not determine current version: %v", err)
-	} else if currentVersion == version {
+		currentVersion = "unknown"
+	} else if currentVersion != "unknown" && currentVersion == version {
 		return fmt.Errorf("already running version %s", version)
 	}
 
 	// Display upgrade plan
 	color.New(color.Bold).Println("\n📋 Upgrade Plan")
 	fmt.Println(strings.Repeat("─", 50))
-	fmt.Printf("Current version: %s\n", currentVersion)
+	if currentVersion == "unknown" {
+		fmt.Printf("Current version: %s\n", color.YellowString("unknown"))
+	} else {
+		fmt.Printf("Current version: %s\n", currentVersion)
+	}
 	fmt.Printf("Target version:  %s\n", color.GreenString(version))
 	fmt.Printf("Dry run:         %v\n", dryRun)
 	fmt.Println(strings.Repeat("─", 50))
@@ -192,9 +196,52 @@ func (um *UpgradeManager) fetchReleases() ([]ChartRelease, error) {
 }
 
 func (um *UpgradeManager) getCurrentVersion() (string, error) {
-	// Check deployment state
-	statePath := ".rulebricks-state.yaml"
+	// Try to get from deployed application first (more accurate)
+	k8sOps, err := NewKubernetesOperations(um.config, false)
+	if err == nil {
+		namespace := um.config.GetNamespace("app")
 
+		// Try to get the deployed helm release version
+		cmd := exec.Command("helm", "list", "-n", namespace, "-o", "json")
+		output, err := cmd.Output()
+		if err == nil {
+			var releases []map[string]interface{}
+			if err := json.Unmarshal(output, &releases); err == nil {
+				for _, release := range releases {
+					if release["name"] == "rulebricks" {
+						// Try to get app_version first (most reliable)
+						if appVersion, ok := release["app_version"].(string); ok && appVersion != "" {
+							return appVersion, nil
+						}
+						// Fallback to parsing chart name
+						if chartInfo, ok := release["chart"].(string); ok {
+							// Extract version from chart name (e.g., "rulebricks-0.0.11")
+							// Use a more robust approach - find the last occurrence of "-"
+							lastDash := strings.LastIndex(chartInfo, "-")
+							if lastDash > 0 && lastDash < len(chartInfo)-1 {
+								version := chartInfo[lastDash+1:]
+								// Validate it looks like a version
+								if strings.Count(version, ".") >= 1 {
+									return version, nil
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Fallback to deployment labels
+		deployment, err := k8sOps.GetDeployment(context.Background(), namespace, "rulebricks")
+		if err == nil {
+			if version, ok := deployment.Labels["app.kubernetes.io/version"]; ok {
+				return version, nil
+			}
+		}
+	}
+
+	// Check deployment state as fallback
+	statePath := ".rulebricks-state.yaml"
 	if data, err := os.ReadFile(statePath); err == nil {
 		var state DeploymentState
 		if err := yaml.Unmarshal(data, &state); err == nil && state.Application.Version != "" {
@@ -202,23 +249,7 @@ func (um *UpgradeManager) getCurrentVersion() (string, error) {
 		}
 	}
 
-	// Try to get from deployed application
-	k8sOps, err := NewKubernetesOperations(um.config, false)
-	if err != nil {
-		return "", err
-	}
-
-	namespace := um.config.GetNamespace("app")
-	deployment, err := k8sOps.GetDeployment(context.Background(), namespace, "rulebricks")
-	if err != nil {
-		return "", err
-	}
-
-	if version, ok := deployment.Labels["app.kubernetes.io/version"]; ok {
-		return version, nil
-	}
-
-	return "", fmt.Errorf("version not found")
+	return "unknown", nil
 }
 
 func (um *UpgradeManager) getLatestVersion() (string, error) {
@@ -297,6 +328,12 @@ func (um *UpgradeManager) performUpgrade(version string) error {
 	startTime := time.Now()
 	um.progress.Section("Starting Upgrade")
 
+	// Debug: Log current directory
+	if um.verbose {
+		cwd, _ := os.Getwd()
+		um.progress.Info("Current working directory: %s", cwd)
+	}
+
 	// Phase 1: Download new chart
 	spinner := um.progress.StartSpinner("Downloading chart version " + version)
 	chartInfo, err := um.chartManager.PullChart(version)
@@ -315,6 +352,15 @@ func (um *UpgradeManager) performUpgrade(version string) error {
 	}
 	defer os.RemoveAll(extractedPath)
 	spinner.Success()
+
+	// Debug: Log extracted path
+	if um.verbose {
+		um.progress.Info("Chart extracted to: %s", extractedPath)
+		// List contents to verify structure
+		cmd := exec.Command("ls", "-la", extractedPath)
+		output, _ := cmd.Output()
+		um.progress.Info("Extracted contents:\n%s", string(output))
+	}
 
 	// Phase 3: Generate values
 	spinner = um.progress.StartSpinner("Preparing configuration")
@@ -342,8 +388,18 @@ func (um *UpgradeManager) performUpgrade(version string) error {
 	}
 	defer os.Remove(valuesFile)
 
+	chartPath := filepath.Join(extractedPath, "rulebricks")
+
+	// Debug: Verify chart exists
+	if um.verbose {
+		um.progress.Info("Using chart path: %s", chartPath)
+		if _, err := os.Stat(filepath.Join(chartPath, "Chart.yaml")); err != nil {
+			um.progress.Warning("Chart.yaml not found at expected path: %v", err)
+		}
+	}
+
 	cmd := exec.Command("helm", "upgrade", "rulebricks",
-		filepath.Join(extractedPath, "rulebricks"),
+		chartPath,
 		"--namespace", namespace,
 		"--values", valuesFile,
 		"--wait",
@@ -352,11 +408,38 @@ func (um *UpgradeManager) performUpgrade(version string) error {
 	if um.verbose {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-	}
+		if err := cmd.Run(); err != nil {
+			spinner.Fail()
+			return fmt.Errorf("helm upgrade failed: %w", err)
+		}
+	} else {
+		// Capture both stdout and stderr for error reporting
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
-		spinner.Fail()
-		return fmt.Errorf("helm upgrade failed: %w", err)
+		if err := cmd.Run(); err != nil {
+			spinner.Fail()
+			errMsg := stderr.String()
+			outMsg := stdout.String()
+
+			// Provide detailed error information
+			errorDetails := fmt.Sprintf("helm upgrade failed: %v", err)
+			if errMsg != "" {
+				errorDetails += fmt.Sprintf("\n\nError output:\n%s", errMsg)
+			}
+			if outMsg != "" {
+				errorDetails += fmt.Sprintf("\n\nStandard output:\n%s", outMsg)
+			}
+
+			// Additional debugging for common issues
+			if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "no such file") {
+				errorDetails += fmt.Sprintf("\n\nDebug: Chart path was: %s", chartPath)
+				errorDetails += "\nPlease check if the chart was extracted correctly."
+			}
+
+			return fmt.Errorf(errorDetails)
+		}
 	}
 	spinner.Success()
 
@@ -371,18 +454,44 @@ func (um *UpgradeManager) performUpgrade(version string) error {
 }
 
 func (um *UpgradeManager) generateUpgradeValues() (map[string]interface{}, error) {
-	// This would generate the Helm values for upgrade
-	// Similar to deployment, but preserving existing configuration
-	values := make(map[string]interface{})
+	// Get current values from deployed release
+	namespace := um.config.GetNamespace("app")
+	cmd := exec.Command("helm", "get", "values", "rulebricks", "-n", namespace, "-o", "json")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current helm values: %w", err)
+	}
 
-	// Add basic configuration
+	var currentValues map[string]interface{}
+	if err := json.Unmarshal(output, &currentValues); err != nil {
+		return nil, fmt.Errorf("failed to parse current values: %w", err)
+	}
+
+	// Start with current values as base
+	values := currentValues
+
+	// Override/update with any new configuration from config file
 	values["project"] = map[string]interface{}{
 		"name":    um.config.Project.Name,
 		"domain":  um.config.Project.Domain,
 		"version": um.config.Project.Version,
 	}
 
-	// Add other necessary values...
+	// Ensure app configuration is present
+	if appConfig, ok := values["app"].(map[string]interface{}); ok {
+		// Update TLS setting if changed
+		appConfig["tlsEnabled"] = um.config.Security.TLS != nil && um.config.Security.TLS.Enabled
+
+		// Update project email if different
+		if um.config.Project.Email != "" {
+			appConfig["email"] = um.config.Project.Email
+		}
+
+		// Update license key if present
+		if um.config.Project.License != "" {
+			appConfig["licenseKey"] = um.config.Project.License
+		}
+	}
 
 	return values, nil
 }

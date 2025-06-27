@@ -179,6 +179,13 @@ var versionCmd = &cobra.Command{
 	},
 }
 
+// vectorCmd handles Vector logging configuration
+var vectorCmd = &cobra.Command{
+	Use:   "vector",
+	Short: "Manage Vector logging configuration",
+	Long:  `Configure IAM permissions and settings for Vector logging sinks.`,
+}
+
 func init() {
 	// Global flags
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default: rulebricks.yaml)")
@@ -199,6 +206,9 @@ func init() {
 	// Add upgrade subcommands
 	upgradeCmd.AddCommand(createUpgradeSubcommands()...)
 
+	// Add vector subcommands
+	vectorCmd.AddCommand(createVectorSubcommands()...)
+
 	// Add commands to root
 	rootCmd.AddCommand(
 		initCmd,
@@ -208,6 +218,7 @@ func init() {
 		logsCmd,
 		upgradeCmd,
 		versionCmd,
+		vectorCmd,
 	)
 }
 
@@ -370,4 +381,214 @@ func getGoVersion() string {
 func getPlatform() string {
 	// This would detect the actual platform
 	return "darwin/arm64"
+}
+
+func createVectorSubcommands() []*cobra.Command {
+	// Setup S3 permissions
+	setupS3Cmd := &cobra.Command{
+		Use:   "setup-s3",
+		Short: "Configure AWS IAM permissions for S3 logging",
+		Long:  `Set up IAM roles and service accounts for Vector to write logs to S3.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			config, err := LoadConfig(cfgFile)
+			if err != nil {
+				return fmt.Errorf("failed to load configuration: %w", err)
+			}
+
+			// Validate logging configuration
+			if !config.Logging.Enabled {
+				return fmt.Errorf("logging is not enabled in configuration")
+			}
+			if config.Logging.Vector == nil || config.Logging.Vector.Sink == nil {
+				return fmt.Errorf("Vector sink is not configured")
+			}
+			if config.Logging.Vector.Sink.Type != "aws_s3" {
+				return fmt.Errorf("Vector sink type is not aws_s3")
+			}
+
+			bucket, _ := cmd.Flags().GetString("bucket")
+			if bucket == "" {
+				if bucketValue, ok := config.Logging.Vector.Sink.Config["bucket"].(string); ok {
+					bucket = bucketValue
+				} else {
+					return fmt.Errorf("bucket not specified and not found in configuration")
+				}
+			}
+
+			region, _ := cmd.Flags().GetString("region")
+			if region == "" {
+				if regionValue, ok := config.Logging.Vector.Sink.Config["region"].(string); ok {
+					region = regionValue
+				} else {
+					region = config.Cloud.Region
+				}
+			}
+
+			clusterName, _ := cmd.Flags().GetString("cluster")
+			if clusterName == "" {
+				clusterName = config.Kubernetes.ClusterName
+			}
+
+			namespace := config.GetNamespace("logging")
+			setup := NewVectorIAMSetup(config, namespace, clusterName, verbose, nonInteractive)
+			return setup.SetupS3(bucket, region)
+		},
+	}
+	setupS3Cmd.Flags().String("bucket", "", "S3 bucket name")
+	setupS3Cmd.Flags().String("region", "", "AWS region")
+	setupS3Cmd.Flags().String("cluster", "", "EKS cluster name")
+
+	// Setup GCS permissions
+	setupGCSCmd := &cobra.Command{
+		Use:   "setup-gcs",
+		Short: "Configure GCP IAM permissions for Cloud Storage logging",
+		Long:  `Set up Workload Identity and service accounts for Vector to write logs to GCS.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			config, err := LoadConfig(cfgFile)
+			if err != nil {
+				return fmt.Errorf("failed to load configuration: %w", err)
+			}
+
+			// Validate configuration
+			if !config.Logging.Enabled {
+				return fmt.Errorf("logging is not enabled in configuration")
+			}
+			if config.Logging.Vector == nil || config.Logging.Vector.Sink == nil {
+				return fmt.Errorf("Vector sink is not configured")
+			}
+			if config.Logging.Vector.Sink.Type != "gcp_cloud_storage" {
+				return fmt.Errorf("Vector sink type is not gcp_cloud_storage")
+			}
+
+			bucket, _ := cmd.Flags().GetString("bucket")
+			if bucket == "" {
+				if bucketValue, ok := config.Logging.Vector.Sink.Config["bucket"].(string); ok {
+					bucket = bucketValue
+				} else {
+					return fmt.Errorf("bucket not specified and not found in configuration")
+				}
+			}
+
+			projectID, _ := cmd.Flags().GetString("project")
+			if projectID == "" {
+				if config.Cloud.Provider == "gcp" && config.Cloud.GCP != nil {
+					projectID = config.Cloud.GCP.ProjectID
+				} else {
+					return fmt.Errorf("project ID not specified and not found in configuration")
+				}
+			}
+
+			clusterName, _ := cmd.Flags().GetString("cluster")
+			if clusterName == "" {
+				clusterName = config.Kubernetes.ClusterName
+			}
+
+			namespace := config.GetNamespace("logging")
+			setup := NewVectorIAMSetup(config, namespace, clusterName, verbose, nonInteractive)
+			return setup.SetupGCS(bucket, projectID)
+		},
+	}
+	setupGCSCmd.Flags().String("bucket", "", "GCS bucket name")
+	setupGCSCmd.Flags().String("project", "", "GCP project ID")
+	setupGCSCmd.Flags().String("cluster", "", "GKE cluster name")
+
+	// Setup Azure permissions
+	setupAzureCmd := &cobra.Command{
+		Use:   "setup-azure",
+		Short: "Configure Azure IAM permissions for Blob Storage logging",
+		Long:  `Set up Managed Identity and pod identity for Vector to write logs to Azure Blob Storage.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			config, err := LoadConfig(cfgFile)
+			if err != nil {
+				return fmt.Errorf("failed to load configuration: %w", err)
+			}
+
+			// Validate configuration
+			if !config.Logging.Enabled {
+				return fmt.Errorf("logging is not enabled in configuration")
+			}
+			if config.Logging.Vector == nil || config.Logging.Vector.Sink == nil {
+				return fmt.Errorf("Vector sink is not configured")
+			}
+			if config.Logging.Vector.Sink.Type != "azure_blob" {
+				return fmt.Errorf("Vector sink type is not azure_blob")
+			}
+
+			storageAccount, _ := cmd.Flags().GetString("storage-account")
+			container, _ := cmd.Flags().GetString("container")
+			if container == "" {
+				if containerValue, ok := config.Logging.Vector.Sink.Config["container_name"].(string); ok {
+					container = containerValue
+				} else {
+					return fmt.Errorf("container not specified and not found in configuration")
+				}
+			}
+
+			resourceGroup, _ := cmd.Flags().GetString("resource-group")
+			if resourceGroup == "" {
+				if config.Cloud.Provider == "azure" && config.Cloud.Azure != nil {
+					resourceGroup = config.Cloud.Azure.ResourceGroup
+				} else {
+					return fmt.Errorf("resource group not specified and not found in configuration")
+				}
+			}
+
+			clusterName, _ := cmd.Flags().GetString("cluster")
+			if clusterName == "" {
+				clusterName = config.Kubernetes.ClusterName
+			}
+
+			namespace := config.GetNamespace("logging")
+			setup := NewVectorIAMSetup(config, namespace, clusterName, verbose, nonInteractive)
+			return setup.SetupAzure(storageAccount, container, resourceGroup)
+		},
+	}
+	setupAzureCmd.Flags().String("storage-account", "", "Azure storage account name")
+	setupAzureCmd.Flags().String("container", "", "Blob container name")
+	setupAzureCmd.Flags().String("resource-group", "", "Azure resource group")
+	setupAzureCmd.Flags().String("cluster", "", "AKS cluster name")
+
+	// Generate IAM configuration
+	generateIAMCmd := &cobra.Command{
+		Use:   "generate-iam-config",
+		Short: "Generate IAM configuration for manual setup",
+		Long:  `Generate IAM policies and commands for manually configuring Vector sink permissions.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			config, err := LoadConfig(cfgFile)
+			if err != nil {
+				return fmt.Errorf("failed to load configuration: %w", err)
+			}
+
+			sinkType, _ := cmd.Flags().GetString("sink")
+			if sinkType == "" && config.Logging.Enabled && config.Logging.Vector != nil && config.Logging.Vector.Sink != nil {
+				sinkType = config.Logging.Vector.Sink.Type
+			}
+			if sinkType == "" {
+				return fmt.Errorf("sink type not specified")
+			}
+
+			bucket, _ := cmd.Flags().GetString("bucket")
+			if bucket == "" && config.Logging.Enabled && config.Logging.Vector != nil && config.Logging.Vector.Sink != nil {
+				if bucketValue, ok := config.Logging.Vector.Sink.Config["bucket"].(string); ok {
+					bucket = bucketValue
+				} else if containerValue, ok := config.Logging.Vector.Sink.Config["container_name"].(string); ok {
+					bucket = containerValue
+				}
+			}
+
+			clusterName := config.Kubernetes.ClusterName
+			namespace := config.GetNamespace("logging")
+			setup := NewVectorIAMSetup(config, namespace, clusterName, verbose, nonInteractive)
+			return setup.GenerateIAMConfig(sinkType, bucket)
+		},
+	}
+	generateIAMCmd.Flags().String("sink", "", "Sink type (aws_s3, gcp_cloud_storage, azure_blob)")
+	generateIAMCmd.Flags().String("bucket", "", "Bucket/container name")
+
+	return []*cobra.Command{setupS3Cmd, setupGCSCmd, setupAzureCmd, generateIAMCmd}
+}
+
+// NewVectorIAMSetup creates a new Vector IAM setup instance
+func NewVectorIAMSetup(config interface{}, namespace, clusterName string, verbose, nonInteractive bool) *IAMSetup {
+	return NewIAMSetup(config, namespace, clusterName, verbose, nonInteractive)
 }

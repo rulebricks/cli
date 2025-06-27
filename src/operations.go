@@ -578,6 +578,27 @@ func (ko *KubernetesOperations) InstallVector(ctx context.Context, vectorConfig 
 	// Use project-specific release name to avoid conflicts
 	releaseName := fmt.Sprintf("vector-%s", ko.config.Project.Name)
 
+	// Check if we need a specific service account for IAM
+	serviceAccountName := releaseName
+	if vectorConfig != nil && vectorConfig.Sink != nil && vectorConfig.Sink.Config != nil {
+		// Check for cloud storage sinks that might need IAM service accounts
+		switch vectorConfig.Sink.Type {
+		case "aws_s3":
+			// S3 will use vector-s3-access service account if IAM is configured
+			if setupIAM, ok := vectorConfig.Sink.Config["setup_iam"].(bool); ok && setupIAM {
+				serviceAccountName = "vector-s3-access"
+			}
+		case "gcp_cloud_storage":
+			// GCS will use vector-gcs-access service account if Workload Identity is configured
+			if useWI, ok := vectorConfig.Sink.Config["use_workload_identity"].(bool); ok && useWI {
+				serviceAccountName = "vector-gcs-access"
+			}
+		case "azure_blob":
+			// Azure doesn't change service account but needs pod identity label
+			// This is handled by the IAM setup command
+		}
+	}
+
 	values := map[string]interface{}{
 		"role":              "Stateless-Aggregator", // Use Deployment instead of DaemonSet
 		"replicas":          2,                      // Start with 2 replicas
@@ -585,7 +606,7 @@ func (ko *KubernetesOperations) InstallVector(ctx context.Context, vectorConfig 
 		"fullnameOverride":  releaseName, // Make all resources project-specific
 		"rbac": map[string]interface{}{
 			"create":             true,
-			"serviceAccountName": releaseName, // Project-specific service account
+			"serviceAccountName": serviceAccountName,
 		},
 		"service": map[string]interface{}{
 			"type": "ClusterIP", // Internal only, not exposed
@@ -881,6 +902,10 @@ func (ko *KubernetesOperations) GetService(ctx context.Context, namespace, name 
 
 func (ko *KubernetesOperations) GetDeployment(ctx context.Context, namespace, name string) (*appsv1.Deployment, error) {
 	return ko.client.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (ko *KubernetesOperations) GetStatefulSet(ctx context.Context, namespace, name string) (*appsv1.StatefulSet, error) {
+	return ko.client.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
 func (ko *KubernetesOperations) GetLoadBalancerEndpoint(ctx context.Context) (string, error) {
@@ -1196,6 +1221,8 @@ func (ko *KubernetesOperations) generateVectorConfigMap(config *VectorConfig, ka
 			sinkConfig["encoding"] = map[string]interface{}{
 				"codec": "json",
 			}
+			// When using IAM roles, no explicit credentials needed
+			// The AWS SDK will automatically use the pod's IAM role
 
 		case "http":
 			sinkConfig["uri"] = config.Sink.Endpoint
@@ -1214,8 +1241,13 @@ func (ko *KubernetesOperations) generateVectorConfigMap(config *VectorConfig, ka
 			if containerName, ok := config.Sink.Config["container_name"]; ok {
 				sinkConfig["container_name"] = containerName
 			}
-			if apiKey != "" {
+			// Check if using Managed Identity
+			useManagedIdentity, _ := config.Sink.Config["use_managed_identity"].(bool)
+			if !useManagedIdentity && apiKey != "" {
 				sinkConfig["connection_string"] = apiKey
+			} else if storageAccount, ok := config.Sink.Config["storage_account"]; ok {
+				// When using Managed Identity, specify storage account
+				sinkConfig["storage_account"] = storageAccount
 			}
 			sinkConfig["compression"] = "gzip"
 			sinkConfig["encoding"] = map[string]interface{}{
@@ -1226,9 +1258,14 @@ func (ko *KubernetesOperations) generateVectorConfigMap(config *VectorConfig, ka
 			if bucket, ok := config.Sink.Config["bucket"]; ok {
 				sinkConfig["bucket"] = bucket
 			}
-			if credentialsPath, ok := config.Sink.Config["credentials_path"]; ok {
-				sinkConfig["credentials_path"] = credentialsPath
+			// Check if using Workload Identity
+			useWorkloadIdentity, _ := config.Sink.Config["use_workload_identity"].(bool)
+			if !useWorkloadIdentity {
+				if credentialsPath, ok := config.Sink.Config["credentials_path"]; ok {
+					sinkConfig["credentials_path"] = credentialsPath
+				}
 			}
+			// When using Workload Identity, GCP SDK will automatically use the pod's service account
 			sinkConfig["compression"] = "gzip"
 			sinkConfig["encoding"] = map[string]interface{}{
 				"codec": "json",
