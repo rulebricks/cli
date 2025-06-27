@@ -1,141 +1,28 @@
-// shared_types.go - Shared types and helper functions
 package main
 
 import (
 	"fmt"
-	"io/ioutil"
-	"os"
 	"os/exec"
-	"regexp"
-	"strings"
-	"gopkg.in/yaml.v3"
+	"time"
 )
 
 // SharedSecrets holds secrets used across deployments
 type SharedSecrets struct {
-	LicenseKey        string
-	DBPassword        string
-	SMTPPassword      string
-	EmailAPIKey       string
-	SupabaseAnonKey   string
+	LicenseKey         string
+	DBPassword         string
+	SMTPPassword       string
+	SupabaseAnonKey    string
 	SupabaseServiceKey string
-	JWTSecret         string
-	DashboardPassword string
+	JWTSecret          string
+	DashboardPassword  string
 }
 
-// EmailTemplateConfig holds email template configuration
-type EmailTemplateConfig struct {
-	SubjectInvite       string
-	SubjectConfirmation string
-	SubjectRecovery     string
-	SubjectEmailChange  string
-	TemplateInvite      string
-	TemplateConfirmation string
-	TemplateRecovery    string
-	TemplateEmailChange string
-}
-
-// GetDefaultEmailTemplates returns the default email template configuration
-func GetDefaultEmailTemplates() EmailTemplateConfig {
-	return EmailTemplateConfig{
-		SubjectInvite:       "You've been invited",
-		SubjectConfirmation: "Confirm Your Email",
-		SubjectRecovery:     "Reset Your Password",
-		SubjectEmailChange:  "Confirm Email Change",
-		TemplateInvite:      "https://prefix-files.s3.us-west-2.amazonaws.com/templates/invite.html",
-		TemplateConfirmation: "https://prefix-files.s3.us-west-2.amazonaws.com/templates/verify.html",
-		TemplateRecovery:    "https://prefix-files.s3.us-west-2.amazonaws.com/templates/password_change.html",
-		TemplateEmailChange: "https://prefix-files.s3.us-west-2.amazonaws.com/templates/email_change.html",
-	}
-}
-
-// sanitizeJWT removes ANSI sequences and validates JWT format
-func sanitizeJWT(jwt string) string {
-	// Remove ANSI escape sequences
-	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-	cleanJWT := ansiRegex.ReplaceAllString(jwt, "")
-
-	// Trim whitespace
-	cleanJWT = strings.TrimSpace(cleanJWT)
-
-	// Verify it looks like a JWT (three dot-separated base64url segments)
-	jwtRegex := regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
-	if !jwtRegex.MatchString(cleanJWT) {
-		// Log warning but return cleaned string anyway
-		fmt.Fprintf(os.Stderr, "Warning: JWT may be corrupted after sanitization\n")
-	}
-
-	return cleanJWT
-}
-
-// createTempValuesFile creates a temporary YAML values file
-func createTempValuesFile(name string, values map[string]interface{}) (string, error) {
-	data, err := yaml.Marshal(values)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal values: %w", err)
-	}
-
-	tmpfile, err := ioutil.TempFile("", fmt.Sprintf("%s-values-*.yaml", name))
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp file: %w", err)
-	}
-
-	if _, err := tmpfile.Write(data); err != nil {
-		tmpfile.Close()
-		os.Remove(tmpfile.Name())
-		return "", fmt.Errorf("failed to write values: %w", err)
-	}
-
-	if err := tmpfile.Close(); err != nil {
-		os.Remove(tmpfile.Name())
-		return "", fmt.Errorf("failed to close temp file: %w", err)
-	}
-
-	return tmpfile.Name(), nil
-}
-
-// resolveSecretValue resolves a secret from various sources
-func resolveSecretValue(source string) (string, error) {
-	if strings.HasPrefix(source, "env:") {
-		envVar := strings.TrimPrefix(source, "env:")
-		if value := os.Getenv(envVar); value != "" {
-			return value, nil
-		}
-		return "", fmt.Errorf("environment variable %s not set", envVar)
-	} else if strings.HasPrefix(source, "file:") {
-		filePath := strings.TrimPrefix(source, "file:")
-		content, err := ioutil.ReadFile(filePath)
-		if err != nil {
-			return "", fmt.Errorf("failed to read file %s: %w", filePath, err)
-		}
-		return strings.TrimSpace(string(content)), nil
-	} else if strings.HasPrefix(source, "plain:") {
-		// Temporary for wizard, should be migrated to proper secret storage
-		return strings.TrimPrefix(source, "plain:"), nil
-	}
-
-	// Assume it's a plain value
-	return source, nil
-}
-
-// HelmChartPaths defines paths to Helm charts
-type HelmChartPaths struct {
-	Traefik    string
-	CertManager string
-	Prometheus string
-	Supabase   string
-	Rulebricks string
-}
-
-// GetDefaultHelmChartPaths returns default Helm chart paths
-func GetDefaultHelmChartPaths() HelmChartPaths {
-	return HelmChartPaths{
-		Traefik:    "traefik/traefik",
-		CertManager: "jetstack/cert-manager",
-		Prometheus: "prometheus-community/kube-prometheus-stack",
-		Supabase:   "./charts/supabase",
-		Rulebricks: "./charts/rulebricks",
-	}
+// KafkaConfig holds Kafka configuration
+type KafkaConfig struct {
+	Partitions        int
+	ReplicationFactor int
+	RetentionHours    int
+	StorageSize       string
 }
 
 // CloudProviderRegions contains region information for each cloud provider
@@ -247,23 +134,6 @@ var RequiredCommands = map[string][]string{
 	},
 }
 
-// GetRequiredCommands returns all required commands based on configuration
-func GetRequiredCommands(config Config) []string {
-	commands := RequiredCommands["base"]
-
-	// Add cloud provider specific commands
-	if providerCmds, ok := RequiredCommands[config.Cloud.Provider]; ok {
-		commands = append(commands, providerCmds...)
-	}
-
-	// Add Supabase CLI if using managed deployment
-	if config.Database.Type == "managed" {
-		commands = append(commands, RequiredCommands["managed-supabase"]...)
-	}
-
-	return uniqueStringSlice(commands)
-}
-
 // TerraformBackendConfigs contains example backend configurations
 var TerraformBackendConfigs = map[string]map[string]string{
 	"s3": {
@@ -285,8 +155,71 @@ var TerraformBackendConfigs = map[string]map[string]string{
 	},
 }
 
+// HelmChartPaths defines paths to Helm charts
+type HelmChartPaths struct {
+	Traefik     string
+	CertManager string
+	Prometheus  string
+	Supabase    string
+	Rulebricks  string
+}
+
+// GetDefaultHelmChartPaths returns default Helm chart paths
+func GetDefaultHelmChartPaths() HelmChartPaths {
+	return HelmChartPaths{
+		Traefik:     "traefik/traefik",
+		CertManager: "jetstack/cert-manager",
+		Prometheus:  "prometheus-community/kube-prometheus-stack",
+		Supabase:    "./charts/supabase",
+		Rulebricks:  "./charts/rulebricks",
+	}
+}
+
+// EmailTemplateConfig holds email template configuration
+type EmailTemplateConfig struct {
+	SubjectInvite        string
+	SubjectConfirmation  string
+	SubjectRecovery      string
+	SubjectEmailChange   string
+	TemplateInvite       string
+	TemplateConfirmation string
+	TemplateRecovery     string
+	TemplateEmailChange  string
+}
+
+// GetDefaultEmailTemplates returns the default email template configuration
+func GetDefaultEmailTemplates() EmailTemplateConfig {
+	return EmailTemplateConfig{
+		SubjectInvite:        "You've been invited",
+		SubjectConfirmation:  "Confirm Your Email",
+		SubjectRecovery:      "Reset Your Password",
+		SubjectEmailChange:   "Confirm Email Change",
+		TemplateInvite:       "https://prefix-files.s3.us-west-2.amazonaws.com/templates/invite.html",
+		TemplateConfirmation: "https://prefix-files.s3.us-west-2.amazonaws.com/templates/verify.html",
+		TemplateRecovery:     "https://prefix-files.s3.us-west-2.amazonaws.com/templates/password_change.html",
+		TemplateEmailChange:  "https://prefix-files.s3.us-west-2.amazonaws.com/templates/email_change.html",
+	}
+}
+
+// GetRequiredCommands returns all required commands based on configuration
+func GetRequiredCommands(config *Config) []string {
+	commands := RequiredCommands["base"]
+
+	// Add cloud provider specific commands
+	if providerCmds, ok := RequiredCommands[config.Cloud.Provider]; ok {
+		commands = append(commands, providerCmds...)
+	}
+
+	// Add Supabase CLI if using managed deployment
+	if config.Database.Type == "managed" {
+		commands = append(commands, RequiredCommands["managed-supabase"]...)
+	}
+
+	return uniqueStringSlice(commands)
+}
+
 // ValidateCloudProviderConfig validates cloud-specific configuration
-func ValidateCloudProviderConfig(config Config) error {
+func ValidateCloudProviderConfig(config *Config) error {
 	switch config.Cloud.Provider {
 	case "aws":
 		if config.Cloud.Region == "" {
@@ -309,7 +242,7 @@ func ValidateCloudProviderConfig(config Config) error {
 		if !stringSliceContains(CloudProviderRegions["gcp"], config.Cloud.Region) {
 			return fmt.Errorf("invalid GCP region: %s", config.Cloud.Region)
 		}
-		if config.Cloud.GCP.ProjectID == "" {
+		if config.Cloud.GCP == nil || config.Cloud.GCP.ProjectID == "" {
 			return fmt.Errorf("GCP project ID is required")
 		}
 	default:
@@ -320,7 +253,7 @@ func ValidateCloudProviderConfig(config Config) error {
 }
 
 // GetSupabaseURL returns the Supabase URL based on deployment type
-func GetSupabaseURL(config Config, projectRef string) string {
+func GetSupabaseURL(config *Config, projectRef string) string {
 	switch config.Database.Type {
 	case "managed":
 		return fmt.Sprintf("https://%s.supabase.co", projectRef)
@@ -332,11 +265,11 @@ func GetSupabaseURL(config Config, projectRef string) string {
 }
 
 // GetDatabaseURL constructs the database URL based on configuration
-func GetDatabaseURL(config Config, password string) string {
+func GetDatabaseURL(config *Config, password string) string {
 	switch config.Database.Type {
 	case "self-hosted":
-		return fmt.Sprintf("postgresql://postgres:%s@supabase-db.supabase.svc.cluster.local:5432/postgres?sslmode=disable",
-			password)
+		return fmt.Sprintf("postgresql://postgres:%s@supabase-db.%s.svc.cluster.local:5432/postgres?sslmode=disable",
+			password, config.GetNamespace("supabase"))
 	case "external":
 		return fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=%s",
 			config.Database.External.Username,
@@ -360,45 +293,64 @@ func CommandExists(cmd string) bool {
 	return err == nil
 }
 
-// RunCommandWithSpinner runs a command with a spinner for visual feedback
-func RunCommandWithSpinner(cmd *exec.Cmd, message string) error {
-	// In a real implementation, this would show a spinner
-	// For now, just print the message and run the command
-	fmt.Printf("%s...\n", message)
-	return cmd.Run()
-}
+// Environment variables
+const (
+	EnvPrefix      = "RULEBRICKS"
+	EnvLicenseKey  = "RULEBRICKS_LICENSE_KEY"
+	EnvAPIKey      = "RULEBRICKS_API_KEY"
+	EnvDebug       = "RULEBRICKS_DEBUG"
+)
 
-// PromptConfirmation asks for user confirmation
-func PromptConfirmation(message string) bool {
-	fmt.Printf("%s (y/N): ", message)
-	var response string
-	fmt.Scanln(&response)
-	return strings.ToLower(response) == "y" || strings.ToLower(response) == "yes"
-}
+// Docker registry constants
+const (
+	DefaultDockerRegistry = "docker.io"
+	DefaultDockerOrg      = "rulebricks"
+	DefaultAppImage       = "rulebricks/app"
+	DefaultHPSImage       = "rulebricks/hps"
+)
 
-// GetDefaultNamespace returns the default namespace for components
-func GetDefaultNamespace(projectName, component string) string {
-	// Sanitize project name for use in namespace (lowercase, replace non-alphanumeric with dash)
-	prefix := strings.ToLower(projectName)
-	prefix = regexp.MustCompile(`[^a-z0-9-]`).ReplaceAllString(prefix, "-")
-	prefix = strings.Trim(prefix, "-")
+// Chart versions
+const (
+	MinChartVersion     = "1.0.0"
+	DefaultChartVersion = "latest"
+)
 
-	switch component {
-	case "traefik":
-		return fmt.Sprintf("%s-traefik", prefix)
-	case "cert-manager":
-		return fmt.Sprintf("%s-cert-manager", prefix)
-	case "monitoring", "prometheus", "grafana":
-		return fmt.Sprintf("%s-monitoring", prefix)
-	case "supabase":
-		return fmt.Sprintf("%s-supabase", prefix)
-	case "logging", "vector":
-		return fmt.Sprintf("%s-logging", prefix)
-	case "execution", "kafka", "workers", "keda":
-		return fmt.Sprintf("%s-execution", prefix)
-	case "rulebricks", "app":
-		return fmt.Sprintf("%s-app", prefix)
+// Timeouts
+const (
+	DefaultTimeout      = 5 * time.Minute
+	InfraTimeout        = 30 * time.Minute
+	KubernetesTimeout   = 10 * time.Minute
+	ApplicationTimeout  = 15 * time.Minute
+	DNSTimeout          = 5 * time.Minute
+	CertificateTimeout  = 10 * time.Minute
+)
+
+// Resource defaults
+const (
+	DefaultHPSReplicas          = 1
+	DefaultHPSMaxReplicas       = 5
+	DefaultWorkerReplicas       = 1
+	DefaultWorkerMaxReplicas    = 10
+	DefaultKafkaPartitions      = 10
+	DefaultKafkaRetentionHours  = 24
+	DefaultKafkaReplicationFactor = 1
+)
+
+// Volume levels
+const (
+	VolumeLevelSmall  = "small"
+	VolumeLevelMedium = "medium"
+	VolumeLevelLarge  = "large"
+)
+
+// GetVolumeSize returns the volume size based on level
+func GetVolumeSize(level string) string {
+	switch level {
+	case VolumeLevelSmall:
+		return "10Gi"
+	case VolumeLevelLarge:
+		return "100Gi"
 	default:
-		return fmt.Sprintf("%s-default", prefix)
+		return "50Gi"
 	}
 }

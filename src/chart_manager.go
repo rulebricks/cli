@@ -19,20 +19,20 @@ import (
 
 // ChartManager handles downloading, caching, and managing Helm charts
 type ChartManager struct {
-	cacheDir    string
-	baseURL     string
-	httpClient  *http.Client
-	verbose     bool
+	cacheDir   string
+	baseURL    string
+	httpClient *http.Client
+	verbose    bool
 }
 
 // ChartInfo contains information about a chart
 type ChartInfo struct {
-	Name        string
-	Version     string
-	URL         string
-	SHA256      string
-	Downloaded  bool
-	CachedPath  string
+	Name       string
+	Version    string
+	URL        string
+	SHA256     string
+	Downloaded bool
+	CachedPath string
 }
 
 // NewChartManager creates a new chart manager instance
@@ -61,18 +61,37 @@ func NewChartManager(cacheDir string, verbose bool) (*ChartManager, error) {
 	}, nil
 }
 
-// GetChart downloads or retrieves a chart from cache
-func (cm *ChartManager) GetChart(version string) (*ChartInfo, error) {
-	return cm.getChartByName("rulebricks", version)
+// PullChart downloads or retrieves a chart from cache
+func (cm *ChartManager) PullChart(version string) (*ChartInfo, error) {
+	if version == "" || version == "latest" {
+		var err error
+		version, err = cm.GetLatestVersion()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get latest version: %w", err)
+		}
+		if cm.verbose {
+			fmt.Printf("📌 Latest version: %s\n", version)
+		}
+	}
+
+	return cm.getChart("rulebricks", version)
 }
 
-// GetSupabaseChart downloads or retrieves the Supabase chart from cache
-func (cm *ChartManager) GetSupabaseChart(version string) (*ChartInfo, error) {
-	return cm.getChartByName("supabase", version)
+// PullSupabaseChart downloads or retrieves the Supabase chart from cache
+func (cm *ChartManager) PullSupabaseChart(version string) (*ChartInfo, error) {
+	if version == "" || version == "latest" {
+		var err error
+		version, err = cm.GetLatestVersion()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get latest version: %w", err)
+		}
+	}
+
+	return cm.getChart("supabase", version)
 }
 
-// getChartByName is the generic method for downloading any chart type
-func (cm *ChartManager) getChartByName(name, version string) (*ChartInfo, error) {
+// getChart is the generic method for downloading any chart type
+func (cm *ChartManager) getChart(name, version string) (*ChartInfo, error) {
 	chartName := fmt.Sprintf("%s-%s.tgz", name, version)
 	chartPath := filepath.Join(cm.cacheDir, chartName)
 
@@ -138,7 +157,6 @@ func (cm *ChartManager) GetLatestVersion() (string, error) {
 	}
 
 	// Parse JSON response to get tag_name
-	// For simplicity, we'll use a regex to extract the version
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
@@ -151,60 +169,6 @@ func (cm *ChartManager) GetLatestVersion() (string, error) {
 	}
 
 	return string(matches[1]), nil
-}
-
-// ListCachedVersions returns all cached chart versions for rulebricks
-func (cm *ChartManager) ListCachedVersions() ([]string, error) {
-	return cm.ListCachedVersionsByName("rulebricks")
-}
-
-// ListCachedVersionsByName returns all cached chart versions for a specific chart
-func (cm *ChartManager) ListCachedVersionsByName(name string) ([]string, error) {
-	entries, err := os.ReadDir(cm.cacheDir)
-	if err != nil {
-		return nil, err
-	}
-
-	var versions []string
-	re := regexp.MustCompile(fmt.Sprintf(`^%s-(.+)\.tgz$`, name))
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		matches := re.FindStringSubmatch(entry.Name())
-		if len(matches) == 2 {
-			versions = append(versions, matches[1])
-		}
-	}
-
-	return versions, nil
-}
-
-// CleanCache removes old cached charts
-func (cm *ChartManager) CleanCache(keepVersions int) error {
-	versions, err := cm.ListCachedVersions()
-	if err != nil {
-		return err
-	}
-
-	if len(versions) <= keepVersions {
-		return nil
-	}
-
-	// Sort versions (simple string sort, assumes semantic versioning)
-	// In production, use proper semver sorting
-	for i := 0; i < len(versions)-keepVersions; i++ {
-		chartPath := filepath.Join(cm.cacheDir, fmt.Sprintf("rulebricks-%s.tgz", versions[i]))
-		if err := os.Remove(chartPath); err != nil {
-			color.Yellow("Failed to remove %s: %v", chartPath, err)
-		} else if cm.verbose {
-			fmt.Printf("🧹 Removed old chart: %s\n", chartPath)
-		}
-	}
-
-	return nil
 }
 
 // ExtractChart extracts a chart to a temporary directory
@@ -267,6 +231,60 @@ func (cm *ChartManager) ExtractChart(chartPath string) (string, error) {
 	}
 
 	return tempDir, nil
+}
+
+// ListCachedVersions returns all cached chart versions
+func (cm *ChartManager) ListCachedVersions() ([]string, error) {
+	return cm.listCachedVersionsByName("rulebricks")
+}
+
+// listCachedVersionsByName returns all cached chart versions for a specific chart
+func (cm *ChartManager) listCachedVersionsByName(name string) ([]string, error) {
+	entries, err := os.ReadDir(cm.cacheDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var versions []string
+	re := regexp.MustCompile(fmt.Sprintf(`^%s-(.+)\.tgz$`, name))
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		matches := re.FindStringSubmatch(entry.Name())
+		if len(matches) == 2 {
+			versions = append(versions, matches[1])
+		}
+	}
+
+	return versions, nil
+}
+
+// CleanCache removes old cached charts
+func (cm *ChartManager) CleanCache(keepVersions int) error {
+	versions, err := cm.ListCachedVersions()
+	if err != nil {
+		return err
+	}
+
+	if len(versions) <= keepVersions {
+		return nil
+	}
+
+	// Sort versions (simple string sort, assumes semantic versioning)
+	// In production, use proper semver sorting
+	for i := 0; i < len(versions)-keepVersions; i++ {
+		chartPath := filepath.Join(cm.cacheDir, fmt.Sprintf("rulebricks-%s.tgz", versions[i]))
+		if err := os.Remove(chartPath); err != nil {
+			color.Yellow("Failed to remove %s: %v", chartPath, err)
+		} else if cm.verbose {
+			fmt.Printf("🧹 Removed old chart: %s\n", chartPath)
+		}
+	}
+
+	return nil
 }
 
 // downloadFile downloads a file from URL to destination
@@ -365,7 +383,10 @@ func (cm *ChartManager) copyWithProgress(dst io.Writer, src io.Reader, total int
 			// Print progress
 			if total > 0 {
 				percent := float64(written) / float64(total) * 100
-				fmt.Printf("\r📊 Progress: %.1f%% (%d/%d bytes)", percent, written, total)
+				fmt.Printf("\r📊 Progress: %.1f%% (%s/%s)",
+					percent,
+					formatBytes(written),
+					formatBytes(total))
 			}
 		}
 		if er != nil {
@@ -381,47 +402,4 @@ func (cm *ChartManager) copyWithProgress(dst io.Writer, src io.Reader, total int
 	}
 
 	return nil
-}
-
-// PullChart is a convenience method that downloads a specific version or latest
-func (cm *ChartManager) PullChart(version string) (*ChartInfo, error) {
-	if version == "" || version == "latest" {
-		var err error
-		version, err = cm.GetLatestVersion()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get latest version: %w", err)
-		}
-		fmt.Printf("📌 Latest version: %s\n", version)
-	}
-
-	return cm.GetChart(version)
-}
-
-// PullSupabaseChart is a convenience method that downloads a specific version or latest of Supabase chart
-func (cm *ChartManager) PullSupabaseChart(version string) (*ChartInfo, error) {
-	if version == "" || version == "latest" {
-		var err error
-		version, err = cm.GetLatestVersion()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get latest version: %w", err)
-		}
-		fmt.Printf("📌 Latest version: %s\n", version)
-	}
-
-	return cm.GetSupabaseChart(version)
-}
-
-// GetChartURL returns the URL for a specific chart version
-func (cm *ChartManager) GetChartURL(version string) string {
-	return cm.GetChartURLByName("rulebricks", version)
-}
-
-// GetChartURLByName returns the URL for a specific chart and version
-func (cm *ChartManager) GetChartURLByName(name, version string) string {
-	return fmt.Sprintf("%s/v%s/%s-%s.tgz", cm.baseURL, version, name, version)
-}
-
-// SetBaseURL allows overriding the default base URL (useful for testing or mirrors)
-func (cm *ChartManager) SetBaseURL(url string) {
-	cm.baseURL = strings.TrimSuffix(url, "/")
 }
