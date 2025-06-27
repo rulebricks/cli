@@ -16,7 +16,7 @@
 
 The Rulebricks CLI is a powerful deployment and management tool that automates the creation and maintenance of production-ready Rulebricks rule engine clusters. It handles the complete infrastructure lifecycle across multiple cloud providers, from initial setup to ongoing operations.
 
-This CLI is designed and tested primarily for use with AWS, though we make infrastructure decisions that ensure we can easily adapt to Azure and Google Cloud in the future.
+This CLI has been tested primarily for use with AWS, though we make every infrastructure decision to ensure we can easily adapt to Azure and Google Cloud in the very near future.
 
 ### Key Features
 
@@ -431,268 +431,49 @@ Three deployment options:
 - Rate limiting and DDoS protection
 - Web Application Firewall (WAF) rules
 
-### Resource Requirements
+## Resource Requirements
 
-#### Performance Tiers
+### Choose Your Performance Tier
 
-The CLI provides three performance tiers that align with resource allocations:
+| Tier | Use Case | Expected Load | Total Resources Needed |
+|------|----------|---------------|------------------------|
+| **Small** | Development/Testing | <100 rules/sec | 2-4 CPUs, 4-8GB RAM, 1-2 nodes |
+| **Medium** | Production | 100-1,000 rules/sec | 6-12 CPUs, 12-24GB RAM, 3+ nodes |
+| **Large** | High Performance | >1,000 rules/sec | 15+ CPUs, 30+ GB RAM, 5+ nodes |
 
-| Tier | Volume Level | Use Case | Typical Load |
-|------|--------------|----------|--------------|
-| **Small** | `small` | Development/Testing | <100 rules/sec |
-| **Medium** | `medium` | Production | 100-1000 rules/sec |
-| **Large** | `large` | High Performance | >1000 rules/sec |
+### What's Running in Your Cluster
 
-#### Minimum Requirements by Tier
+**Core Services** (always required):
+- **Rulebricks App**: Web interface and API (1-6 replicas)
+- **HPS Service**: Rule processing engine (1-8 replicas)
+- **HPS Workers**: Background job processors (3-50 replicas)
+- **Redis**: Caching layer (single instance)
+- **Kafka**: Message queue (1-3 brokers)
 
-**Small (Development)**
-- **Nodes**: 1-2 nodes
-- **CPU**: 2 vCPUs per node
-- **Memory**: 4GB RAM per node
-- **Storage**: 20GB SSD per node
-- **Total Minimum**: ~2 CPUs, 4GB RAM
+**Optional Components**:
+- Database (if self-hosting Supabase): 2-4 CPUs, 8-16GB RAM
+- Monitoring stack: +2-4 CPUs, +4-16GB RAM
 
-**Medium (Production)**
-- **Nodes**: 3 nodes (for HA)
-- **CPU**: 4 vCPUs per node
-- **Memory**: 8GB RAM per node
-- **Storage**: 50GB SSD per node
-- **Total Minimum**: ~12 CPUs, 24GB RAM
+### Auto-Scaling Behavior
 
-**Large (High Performance)**
-- **Nodes**: 5+ nodes with autoscaling
-- **CPU**: 8 vCPUs per node
-- **Memory**: 16GB RAM per node
-- **Storage**: 100GB+ SSD per node
-- **Total Minimum**: ~40 CPUs, 80GB RAM
+- **HPS Service & App**: Scale based on CPU/memory usage (50% CPU, 80% memory targets)
+- **Workers**: Scale based on Kafka message backlog (default: 100 messages)
+- **Kafka**: Manual scaling - add brokers for high throughput (1 broker per 50MB/s)
 
-#### Service Resource Breakdown
+### Important Notes
 
-**Core Services (Required):**
-| Service | CPU Request | Memory Request | CPU Limit | Memory Limit | Replicas |
-|---------|-------------|----------------|-----------|--------------|----------|
-| Rulebricks App | 256m | 256Mi | 512m | 1Gi | 1-6 (HPA) |
-| HPS Service | 250m | 256Mi | 1000m | 1Gi | 1-8 (HPA) |
-| HPS Workers | 100m | 128Mi | 500m | 512Mi | 3-50 (KEDA) |
-| Redis | 200m | 256Mi | 500m | 4Gi | 1 |
-| Serverless Redis | - | - | - | - | 1 |
+- **ARM processors required** (AWS Graviton, Azure Ampere, GCP Tau)
+- Use **c8g/c8gd instances** for CPU-heavy workloads
+- Use **spot instances** for workers to save 70-90% on costs
+- Plan for 20-30% overhead beyond the minimums listed above
 
-**Kafka Cluster:**
-| Component | CPU Request | Memory Request | CPU Limit | Memory Limit | Count |
-|-----------|-------------|----------------|-----------|--------------|-------|
-| Kafka Broker | 250m | 512Mi | 500m | 2Gi | 1-3 |
+### Quick Start Recommendations
 
-**Monitoring Stack (Optional):**
-| Component | Typical CPU | Typical Memory | Storage |
-|-----------|-------------|----------------|---------|
-| Prometheus | 500m-2000m | 4GB-16GB | 50GB-500GB |
-| Grafana | 100m-500m | 512Mi-2Gi | 1GB |
-| Node Exporter | 100m | 128Mi | - |
+- **Development**: 2x t4g.medium instances
+- **Production**: 3x c8g.xlarge instances
+- **High Performance**: 5x c8g.2xlarge instances
 
-**Ingress & Security:**
-| Component | CPU Request | Memory Request | Notes |
-|-----------|-------------|----------------|-------|
-| Traefik | 100m | 128Mi | Auto-scales with traffic |
-| KEDA | 100m | 100Mi | Per operator component |
-
-**Logging (Optional):**
-| Component | CPU Request | Memory Request | CPU Limit | Memory Limit | Replicas |
-|-----------|-------------|----------------|-----------|--------------|----------|
-| Vector | 50m | 128Mi | 200m | 256Mi | 2 |
-
-**Database Options:**
-
-*Self-Hosted Supabase (default):*
-- No specific resource limits set by default
-- Recommended: 2-4 CPU, 8-16GB RAM for PostgreSQL
-- Storage: 10Gi minimum, scales with data
-
-*External Database:*
-- No cluster resources required
-- Ensure database can handle connection pool size
-
-*Managed Supabase:*
-- No cluster resources required
-- Billed separately by Supabase
-
-#### Scaling Considerations
-
-**Autoscaling Targets:**
-- HPS: 50% CPU, 80% Memory utilization
-- Workers: Based on Kafka lag (default: 100 messages)
-- Apps: 50% CPU, 80% Memory utilization
-
-**Performance Configuration Example:**
-```yaml
-performance:
-  volume_level: medium
-  hps_replicas: 2
-  hps_max_replicas: 8
-  hps_worker_replicas: 5
-  hps_worker_max_replicas: 30
-  kafka_partitions: 36
-  kafka_replication_factor: 2
-```
-
-#### Total Cluster Resource Summary
-
-Here's the total minimum resource allocation needed for each tier:
-
-| Performance Tier | Total CPU (Requests) | Total Memory (Requests) | Storage | Recommended Nodes |
-|-----------------|---------------------|------------------------|---------|-------------------|
-| **Small** | ~2.5 CPUs | ~4GB | 50GB | 1-2 x t4g.medium or equivalent |
-| **Medium** | ~6 CPUs | ~12GB | 200GB | 3 x c8g.xlarge or equivalent |
-| **Large** | ~15 CPUs | ~30GB | 500GB+ | 5+ x c8g.2xlarge or equivalent |
-
-**Notes:**
-- CPU values are in Kubernetes resource units (1000m = 1 CPU core)
-- Memory includes all services (app, workers, Kafka, monitoring if enabled)
-- Storage includes persistent volumes for Redis, Kafka, and database
-- Node recommendations assume 80% resource utilization target
-- Add 20-30% overhead for system pods and burst capacity
-- **Important**: All instances must be ARM-based (Graviton on AWS, Ampere on Azure/GCP)
-
-### Resource Tuning Guide
-
-#### Component-Specific Tuning
-
-**Rulebricks Application**
-
-The main application serves the API and web interface.
-
-- Default CPU Request: 256m, Limit: 512m
-- Default Memory Request: 256Mi, Limit: 1Gi
-- Scales based on 50% CPU and 80% memory utilization
-
-Tuning example:
-```yaml
-advanced:
-  custom_values:
-    app:
-      resources:
-        requests:
-          cpu: "500m"
-          memory: "512Mi"
-        limits:
-          cpu: "2000m"
-          memory: "2Gi"
-```
-
-**HPS (High-Performance Service)**
-
-Handles rule evaluation and processing.
-
-- Default CPU Request: 250m, Limit: 1000m
-- Default Memory Request: 256Mi, Limit: 1Gi
-- CPU-intensive service - prioritize CPU allocation
-
-Tuning via performance settings:
-```yaml
-performance:
-  hps_resources:
-    requests:
-      cpu: "500m"
-      memory: "512Mi"
-    limits:
-      cpu: "2000m"
-      memory: "2Gi"
-```
-
-**HPS Workers**
-
-Process asynchronous jobs from Kafka.
-
-- Default CPU Request: 100m, Limit: 500m
-- Default Memory Request: 128Mi, Limit: 512Mi
-- Scale based on Kafka lag (default threshold: 100 messages)
-
-**Kafka**
-
-- Default per broker: 250m CPU, 512Mi Memory
-- Partition calculation: `max(throughput_mb_per_sec / 10, num_consumers * 3)`
-- Scale brokers for throughput (1 broker per 50MB/s)
-
-**Redis**
-
-- Default: 200m CPU, 256Mi Memory (limit 4Gi)
-- Memory limit should be 2x expected dataset
-
-#### Common Performance Scenarios
-
-**High API Traffic**
-```yaml
-performance:
-  hps_replicas: 5
-  hps_max_replicas: 20
-advanced:
-  custom_values:
-    app:
-      autoscaling:
-        minReplicas: 5
-        maxReplicas: 15
-```
-
-**Large Batch Processing**
-```yaml
-performance:
-  hps_worker_replicas: 20
-  hps_worker_max_replicas: 100
-  kafka_partitions: 100
-  kafka_lag_threshold: 50
-```
-
-**Memory-Intensive Rules**
-```yaml
-performance:
-  hps_resources:
-    requests:
-      memory: "2Gi"
-    limits:
-      memory: "4Gi"
-```
-
-#### Cost Optimization
-
-**Right-Sizing ARM Nodes**
-- **CPU-optimized**: c8g, c8gd (for evaluation-heavy workloads, Graviton4)
-- **Memory-optimized**: r8g, r8gd (for large rule sets, Graviton4)
-- **General purpose**: m8g, m8gd (balanced workloads, Graviton4)
-- **Burstable**: t4g (development/testing, Graviton2)
-
-**Autoscaling Best Practices**
-1. Set appropriate minimums based on baseline load
-2. Configure scale-down delays to avoid flapping:
-   ```yaml
-   performance:
-     scale_down_stabilization: 300  # 5 minutes
-   ```
-3. Use spot instances for workers (70-90% cost savings)
-
-**Storage Optimization**
-- Adjust Kafka retention based on needs
-- Use gp3 for general purpose (cost-effective)
-- Enable compression for Kafka and PostgreSQL
-
-#### Monitoring Resource Usage
-
-Key metrics to watch:
-- CPU/Memory utilization: `kubectl top pods -n <namespace>`
-- Kafka lag: Check consumer group lag
-- Database connections: Monitor connection pool usage
-- Response times: Track P50/P90/P99 latencies
-
-When monitoring is enabled, Grafana provides dashboards for:
-- Kubernetes resource overview
-- Application metrics
-- Kafka throughput and lag
-- Database performance
-
-### Networking Architecture
-
-- **VPC**: Isolated network per deployment
-- **Subnets**: Public (LB) and private (nodes)
-- **Security Groups**: Least-privilege access
-- **Network Policies**: Pod-to-pod communication rules
+All resource limits apply per pod/replica, not total across replicas.
 
 ## Configuration
 
