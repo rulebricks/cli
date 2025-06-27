@@ -1,13 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -136,7 +139,7 @@ var logsCmd = &cobra.Command{
 	Use:   "logs [component]",
 	Short: "View component logs",
 	Long: `View logs from Rulebricks components.
-Available components: app, database, supabase, traefik, kong, auth, realtime, storage, prometheus, grafana, all`,
+Available components: app, hps, workers, redis, database, supabase, traefik, prometheus, grafana, all`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		config, err := LoadConfig(cfgFile)
@@ -426,7 +429,12 @@ func createVectorSubcommands() []*cobra.Command {
 
 			clusterName, _ := cmd.Flags().GetString("cluster")
 			if clusterName == "" {
-				clusterName = config.Kubernetes.ClusterName
+				// Always use actual cluster name for vector commands since they operate on existing deployments
+				var err error
+				clusterName, err = getClusterNameWithFallback()
+				if err != nil {
+					return fmt.Errorf("failed to determine cluster name: %w", err)
+				}
 			}
 
 			namespace := config.GetNamespace("logging")
@@ -480,7 +488,12 @@ func createVectorSubcommands() []*cobra.Command {
 
 			clusterName, _ := cmd.Flags().GetString("cluster")
 			if clusterName == "" {
-				clusterName = config.Kubernetes.ClusterName
+				// Always use actual cluster name for vector commands since they operate on existing deployments
+				var err error
+				clusterName, err = getClusterNameWithFallback()
+				if err != nil {
+					return fmt.Errorf("failed to determine cluster name: %w", err)
+				}
 			}
 
 			namespace := config.GetNamespace("logging")
@@ -535,7 +548,12 @@ func createVectorSubcommands() []*cobra.Command {
 
 			clusterName, _ := cmd.Flags().GetString("cluster")
 			if clusterName == "" {
-				clusterName = config.Kubernetes.ClusterName
+				// Always use actual cluster name for vector commands since they operate on existing deployments
+				var err error
+				clusterName, err = getClusterNameWithFallback()
+				if err != nil {
+					return fmt.Errorf("failed to determine cluster name: %w", err)
+				}
 			}
 
 			namespace := config.GetNamespace("logging")
@@ -576,7 +594,12 @@ func createVectorSubcommands() []*cobra.Command {
 				}
 			}
 
-			clusterName := config.Kubernetes.ClusterName
+			// Always use actual cluster name for vector commands since they operate on existing deployments
+			clusterName, err := getClusterNameWithFallback()
+			if err != nil {
+				return fmt.Errorf("failed to determine cluster name: %w", err)
+			}
+
 			namespace := config.GetNamespace("logging")
 			setup := NewVectorIAMSetup(config, namespace, clusterName, verbose, nonInteractive)
 			return setup.GenerateIAMConfig(sinkType, bucket)
@@ -591,4 +614,84 @@ func createVectorSubcommands() []*cobra.Command {
 // NewVectorIAMSetup creates a new Vector IAM setup instance
 func NewVectorIAMSetup(config interface{}, namespace, clusterName string, verbose, nonInteractive bool) *IAMSetup {
 	return NewIAMSetup(config, namespace, clusterName, verbose, nonInteractive)
+}
+
+// getClusterNameWithFallback attempts to get the cluster name from multiple sources
+func getClusterNameWithFallback() (string, error) {
+	if verbose {
+		fmt.Println("🔍 Detecting cluster name from available sources...")
+	}
+
+	// First try to get from kubectl context (most reliable for deployed clusters)
+	cmd := exec.Command("kubectl", "config", "current-context")
+	output, err := cmd.Output()
+	if err == nil {
+		context := strings.TrimSpace(string(output))
+		if verbose {
+			fmt.Printf("  Current kubectl context: %s\n", context)
+		}
+		// Extract cluster name from ARN if it's an EKS ARN
+		if strings.Contains(context, "arn:aws:eks") {
+			parts := strings.Split(context, "/")
+			if len(parts) >= 2 {
+				clusterName := parts[1]
+				if verbose {
+					fmt.Printf("  ✓ Extracted cluster name from EKS ARN: %s\n", clusterName)
+				}
+				return clusterName, nil
+			}
+		}
+		// For Azure AKS context format
+		if strings.Contains(context, "aks-") {
+			// AKS contexts are typically just the cluster name
+			return context, nil
+		}
+		// For GKE context format (typically gke_PROJECT_ZONE_CLUSTER)
+		if strings.HasPrefix(context, "gke_") {
+			parts := strings.Split(context, "_")
+			if len(parts) >= 4 {
+				return parts[3], nil
+			}
+		}
+	}
+
+	// Fallback to deployment state
+	statePath := ".rulebricks-state.yaml"
+	if verbose {
+		fmt.Printf("  Checking deployment state file: %s\n", statePath)
+	}
+	if data, err := os.ReadFile(statePath); err == nil {
+		var state DeploymentState
+		if err := yaml.Unmarshal(data, &state); err == nil && state.Infrastructure.ClusterName != "" {
+			if verbose {
+				fmt.Printf("  ⚠️  Found cluster name in state file: %s (may be outdated)\n", state.Infrastructure.ClusterName)
+			}
+			return state.Infrastructure.ClusterName, nil
+		}
+	} else if verbose {
+		fmt.Printf("  State file not found or not readable: %v\n", err)
+	}
+
+	// Try eksctl as another fallback for EKS clusters
+	if verbose {
+		fmt.Println("  Trying eksctl to list clusters...")
+	}
+	cmd = exec.Command("eksctl", "get", "cluster", "--output", "json")
+	output, err = cmd.Output()
+	if err == nil {
+		var clusters []map[string]interface{}
+		if err := json.Unmarshal(output, &clusters); err == nil && len(clusters) > 0 {
+			// Return the first cluster name (should ideally filter by region/config)
+			if name, ok := clusters[0]["Name"].(string); ok {
+				if verbose {
+					fmt.Printf("  ✓ Found cluster via eksctl: %s\n", name)
+				}
+				return name, nil
+			}
+		}
+	} else if verbose {
+		fmt.Printf("  eksctl command failed: %v\n", err)
+	}
+
+	return "", fmt.Errorf("unable to determine cluster name from kubectl context, state file, or cloud provider CLI")
 }

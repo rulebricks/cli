@@ -34,6 +34,12 @@ func NewIAMSetup(config interface{}, namespace, clusterName string, verbose, non
 func (s *IAMSetup) SetupS3(bucket, region string) error {
 	fmt.Println("🔧 Setting up AWS S3 permissions...")
 
+	// Check for required dependencies
+	depChecker := NewDependencyChecker("aws")
+	if err := depChecker.CheckDependencies(); err != nil {
+		return err
+	}
+
 	// Get AWS account ID
 	accountID, err := s.getAWSAccountID()
 	if err != nil {
@@ -75,14 +81,13 @@ func (s *IAMSetup) SetupS3(bucket, region string) error {
 		return fmt.Errorf("failed to update Vector: %w", err)
 	}
 
-	// Verify access
-	if !s.nonInteractive {
-		fmt.Println("\n  ✓ Verifying S3 access...")
-		if err := s.verifyS3Access(bucket); err != nil {
-			color.Yellow("  ⚠️  Warning: Could not verify S3 access: %v", err)
-		} else {
-			color.Green("  ✅ S3 access verified successfully!")
-		}
+	// Restart Vector pods to pick up new service account
+	fmt.Println("\n  ✓ Restarting Vector pods...")
+	deploymentName := fmt.Sprintf("vector-%s", s.config.(*Config).Project.Name)
+	cmd := exec.Command("kubectl", "rollout", "restart", "deployment", deploymentName, "-n", s.namespace)
+	if err := cmd.Run(); err != nil {
+		color.Yellow("  ⚠️  Warning: Could not restart Vector pods: %v", err)
+		fmt.Println("     You may need to manually restart the pods for changes to take effect")
 	}
 
 	color.Green("\n✅ S3 logging configured successfully!")
@@ -94,6 +99,12 @@ func (s *IAMSetup) SetupS3(bucket, region string) error {
 // SetupGCS configures GCP IAM for Cloud Storage sink
 func (s *IAMSetup) SetupGCS(bucket, projectID string) error {
 	fmt.Println("🔧 Setting up GCP Cloud Storage permissions...")
+
+	// Check for required dependencies
+	depChecker := NewDependencyChecker("gcp")
+	if err := depChecker.CheckDependencies(); err != nil {
+		return err
+	}
 
 	// Check if Workload Identity is enabled
 	wiEnabled, err := s.checkWorkloadIdentity(projectID)
@@ -154,14 +165,13 @@ func (s *IAMSetup) SetupGCS(bucket, projectID string) error {
 		return fmt.Errorf("failed to update Vector: %w", err)
 	}
 
-	// Verify access
-	if !s.nonInteractive {
-		fmt.Println("\n  ✓ Verifying GCS access...")
-		if err := s.verifyGCSAccess(bucket); err != nil {
-			color.Yellow("  ⚠️  Warning: Could not verify GCS access: %v", err)
-		} else {
-			color.Green("  ✅ GCS access verified successfully!")
-		}
+	// Restart Vector pods to pick up new service account
+	fmt.Println("\n  ✓ Restarting Vector pods...")
+	deploymentName := fmt.Sprintf("vector-%s", s.config.(*Config).Project.Name)
+	cmd := exec.Command("kubectl", "rollout", "restart", "deployment", deploymentName, "-n", s.namespace)
+	if err := cmd.Run(); err != nil {
+		color.Yellow("  ⚠️  Warning: Could not restart Vector pods: %v", err)
+		fmt.Println("     You may need to manually restart the pods for changes to take effect")
 	}
 
 	color.Green("\n✅ GCS logging configured successfully!")
@@ -171,10 +181,16 @@ func (s *IAMSetup) SetupGCS(bucket, projectID string) error {
 }
 
 // SetupAzure configures Azure IAM for Blob Storage sink
-func (s *IAMSetup) SetupAzure(storageAccount, container, resourceGroup string) error {
+func (s *IAMSetup) SetupAzure(container, storageAccount, resourceGroup string) error {
 	fmt.Println("🔧 Setting up Azure Blob Storage permissions...")
 
-	// Check if Pod Identity is available
+	// Check for required dependencies
+	depChecker := NewDependencyChecker("azure")
+	if err := depChecker.CheckDependencies(); err != nil {
+		return err
+	}
+
+	// Check if Azure Pod Identity is available
 	podIdentityAvailable, err := s.checkPodIdentity()
 	if err != nil {
 		return fmt.Errorf("failed to check Pod Identity: %w", err)
@@ -229,14 +245,13 @@ func (s *IAMSetup) SetupAzure(storageAccount, container, resourceGroup string) e
 		return fmt.Errorf("failed to update Vector: %w", err)
 	}
 
-	// Verify access
-	if !s.nonInteractive {
-		fmt.Println("\n  ✓ Verifying Azure Blob access...")
-		if err := s.verifyAzureAccess(storageAccount, container); err != nil {
-			color.Yellow("  ⚠️  Warning: Could not verify Azure access: %v", err)
-		} else {
-			color.Green("  ✅ Azure Blob access verified successfully!")
-		}
+	// Restart Vector pods to pick up new pod identity
+	fmt.Println("\n  ✓ Restarting Vector pods...")
+	deploymentName := fmt.Sprintf("vector-%s", s.config.(*Config).Project.Name)
+	cmd := exec.Command("kubectl", "rollout", "restart", "deployment", deploymentName, "-n", s.namespace)
+	if err := cmd.Run(); err != nil {
+		color.Yellow("  ⚠️  Warning: Could not restart Vector pods: %v", err)
+		fmt.Println("     You may need to manually restart the pods for changes to take effect")
 	}
 
 	color.Green("\n✅ Azure Blob logging configured successfully!")
@@ -512,71 +527,36 @@ func (s *IAMSetup) setupAzureWithConnectionString(storageAccount, container stri
 // Update methods
 func (s *IAMSetup) updateVectorServiceAccount(serviceAccount string) error {
 	// Patch Vector deployment to use the service account
-	cmd := exec.Command("kubectl", "patch", "deployment", "vector",
+	deploymentName := fmt.Sprintf("vector-%s", s.config.(*Config).Project.Name)
+	cmd := exec.Command("kubectl", "patch", "deployment", deploymentName,
 		"-n", s.namespace,
 		"--type", "json",
 		"-p", fmt.Sprintf(`[{"op": "add", "path": "/spec/template/spec/serviceAccountName", "value": "%s"}]`, serviceAccount))
-	return cmd.Run()
+
+	if s.verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("kubectl patch failed: %w\nOutput: %s", err, string(output))
+	}
+	return nil
 }
 
 func (s *IAMSetup) updateVectorPodIdentity(identityName string) error {
-	// Add pod identity label
-	cmd := exec.Command("kubectl", "label", "deployment", "vector",
+	// Label Vector deployment for Azure Pod Identity
+	deploymentName := fmt.Sprintf("vector-%s", s.config.(*Config).Project.Name)
+	cmd := exec.Command("kubectl", "label", "deployment", deploymentName,
 		"-n", s.namespace,
 		fmt.Sprintf("aadpodidbinding=%s", identityName),
 		"--overwrite")
 	return cmd.Run()
 }
 
-// Verification methods
-func (s *IAMSetup) verifyS3Access(bucket string) error {
-	// Get a Vector pod
-	podName, err := s.getVectorPod()
-	if err != nil {
-		return err
-	}
-
-	// Test S3 access
-	cmd := exec.Command("kubectl", "exec", podName, "-n", s.namespace, "--",
-		"aws", "s3", "ls", fmt.Sprintf("s3://%s", bucket))
-	return cmd.Run()
-}
-
-func (s *IAMSetup) verifyGCSAccess(bucket string) error {
-	podName, err := s.getVectorPod()
-	if err != nil {
-		return err
-	}
-
-	cmd := exec.Command("kubectl", "exec", podName, "-n", s.namespace, "--",
-		"gsutil", "ls", fmt.Sprintf("gs://%s", bucket))
-	return cmd.Run()
-}
-
-func (s *IAMSetup) verifyAzureAccess(storageAccount, container string) error {
-	podName, err := s.getVectorPod()
-	if err != nil {
-		return err
-	}
-
-	cmd := exec.Command("kubectl", "exec", podName, "-n", s.namespace, "--",
-		"az", "storage", "blob", "list",
-		"--account-name", storageAccount,
-		"--container-name", container,
-		"--auth-mode", "login")
-	return cmd.Run()
-}
-
-func (s *IAMSetup) getVectorPod() (string, error) {
-	cmd := exec.Command("kubectl", "get", "pods", "-n", s.namespace,
-		"-l", "app.kubernetes.io/name=vector",
-		"-o", "jsonpath={.items[0].metadata.name}")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(output)), nil
-}
+// Helper methods
 
 // GenerateIAMConfig generates IAM configuration for manual setup
 func (s *IAMSetup) GenerateIAMConfig(sinkType, bucket string) error {
@@ -640,7 +620,7 @@ func (s *IAMSetup) generateS3Config(bucket string) error {
 	fmt.Printf("     --approve\n")
 
 	fmt.Printf("\n5. Update Vector deployment:\n")
-	fmt.Printf("   kubectl patch deployment vector -n %s --type=json -p '[{\"op\": \"add\", \"path\": \"/spec/template/spec/serviceAccountName\", \"value\": \"vector-s3-access\"}]'\n", s.namespace)
+	fmt.Printf("   kubectl patch deployment vector-%s -n %s --type=json -p '[{\"op\": \"add\", \"path\": \"/spec/template/spec/serviceAccountName\", \"value\": \"vector-s3-access\"}]'\n", s.config.(*Config).Project.Name, s.namespace)
 
 	return nil
 }
@@ -671,7 +651,7 @@ func (s *IAMSetup) generateGCSConfig(bucket string) error {
 	fmt.Printf("     iam.gke.io/gcp-service-account=vector-gcs-access@PROJECT_ID.iam.gserviceaccount.com\n")
 
 	fmt.Printf("\n6. Update Vector deployment:\n")
-	fmt.Printf("   kubectl patch deployment vector -n %s --type=json -p '[{\"op\": \"add\", \"path\": \"/spec/template/spec/serviceAccountName\", \"value\": \"vector-gcs-access\"}]'\n", s.namespace)
+	fmt.Printf("   kubectl patch deployment vector-%s -n %s --type=json -p '[{\"op\": \"add\", \"path\": \"/spec/template/spec/serviceAccountName\", \"value\": \"vector-gcs-access\"}]'\n", s.config.(*Config).Project.Name, s.namespace)
 
 	return nil
 }
@@ -699,7 +679,7 @@ func (s *IAMSetup) generateAzureConfig(bucket string) error {
 	fmt.Printf("     --identity-resource-id /subscriptions/SUBSCRIPTION_ID/resourceGroups/RESOURCE_GROUP/providers/Microsoft.ManagedIdentity/userAssignedIdentities/vector-blob-access\n")
 
 	fmt.Printf("\n5. Update Vector deployment:\n")
-	fmt.Printf("   kubectl label deployment vector -n %s aadpodidbinding=vector-blob-access --overwrite\n", s.namespace)
+	fmt.Printf("   kubectl label deployment vector-%s -n %s aadpodidbinding=vector-blob-access --overwrite\n", s.config.(*Config).Project.Name, s.namespace)
 
 	fmt.Println("\n⚠️  Replace SUBSCRIPTION_ID, RESOURCE_GROUP, and STORAGE_ACCOUNT with your actual values")
 

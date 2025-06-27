@@ -27,6 +27,38 @@ This CLI is designed and tested primarily for use with AWS, though we make infra
 - **📊 Observability**: Integrated Prometheus, Grafana, and centralized logging
 - **⚡ High Performance**: Auto-scaling, Kafka event streaming, and optimized resource utilization
 
+## Prerequisites
+
+The Rulebricks CLI requires the following tools to be installed based on your cloud provider:
+
+### Common Requirements
+- **kubectl**: Kubernetes command-line tool
+  - macOS: `brew install kubectl`
+  - Linux: See [official docs](https://kubernetes.io/docs/tasks/tools/)
+
+### AWS Requirements
+For AWS deployments and Vector S3 sink setup:
+- **AWS CLI**: AWS command-line interface
+  - macOS: `brew install awscli`
+  - Linux: See [AWS CLI installation](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+- **eksctl**: EKS cluster management tool
+  - macOS: `brew tap weaveworks/tap && brew install weaveworks/tap/eksctl`
+  - Linux: See [eksctl installation](https://eksctl.io/installation/)
+
+### GCP Requirements
+For GCP deployments and Vector GCS sink setup:
+- **Google Cloud SDK**: Google Cloud command-line tools
+  - macOS: `brew install --cask google-cloud-sdk`
+  - Linux: See [Google Cloud SDK installation](https://cloud.google.com/sdk/docs/install)
+
+### Azure Requirements
+For Azure deployments and Vector Azure Blob sink setup:
+- **Azure CLI**: Azure command-line interface
+  - macOS: `brew install azure-cli`
+  - Linux: See [Azure CLI installation](https://docs.microsoft.com/en-us/cli/azure/install-azure-cli)
+
+> **Note**: The CLI will check for required dependencies and provide installation instructions if any are missing.
+
 ## Installation
 
 ### Quick Install (Recommended)
@@ -203,6 +235,13 @@ rulebricks vector <subcommand>
 ```
 
 Configure IAM permissions for Vector logging sinks that require cloud provider authentication.
+
+> **Note**: Vector setup commands require cloud provider CLI tools to be installed:
+> - For S3: `kubectl`, `aws`, and `eksctl`
+> - For GCS: `kubectl` and `gcloud`
+> - For Azure: `kubectl` and `az`
+>
+> The CLI will check for these dependencies and provide installation instructions if they're missing.
 
 **Subcommands:**
 
@@ -442,7 +481,6 @@ The CLI provides three performance tiers that align with resource allocations:
 | Component | CPU Request | Memory Request | CPU Limit | Memory Limit | Count |
 |-----------|-------------|----------------|-----------|--------------|-------|
 | Kafka Broker | 250m | 512Mi | 500m | 2Gi | 1-3 |
-| Zookeeper (if used) | 100m | 128Mi | 150m | 192Mi | 1-3 |
 
 **Monitoring Stack (Optional):**
 | Component | Typical CPU | Typical Memory | Storage |

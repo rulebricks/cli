@@ -90,17 +90,37 @@ func (lv *LogViewer) getComponentMap() map[string]componentInfo {
 	return map[string]componentInfo{
 		"app": {
 			namespace: lv.config.GetNamespace("app"),
-			labels:    "app.kubernetes.io/name=rulebricks",
-			container: "rulebricks",
+			labels:    "app=rulebricks-app",
+			container: "rulebricks-app",
 		},
 		"application": {
 			namespace: lv.config.GetNamespace("app"),
-			labels:    "app.kubernetes.io/name=rulebricks",
-			container: "rulebricks",
+			labels:    "app=rulebricks-app",
+			container: "rulebricks-app",
+		},
+		"hps": {
+			namespace: lv.config.GetNamespace("app"),
+			labels:    "app=rulebricks-hps",
+			container: "rulebricks-hps",
+		},
+		"workers": {
+			namespace: lv.config.GetNamespace("app"),
+			labels:    "app=rulebricks-hps-worker",
+			container: "generic-worker",
+		},
+		"redis": {
+			namespace: lv.config.GetNamespace("app"),
+			labels:    "app=redis",
+			container: "redis",
+		},
+		"kafka": {
+			namespace: lv.config.GetNamespace("execution"),
+			labels:    "app.kubernetes.io/name=kafka",
+			container: "kafka",
 		},
 		"database": {
 			namespace: lv.config.GetNamespace("supabase"),
-			labels:    "app.kubernetes.io/name=supabase-db",
+			labels:    "app.kubernetes.io/name=supabase-db,app.kubernetes.io/instance=supabase",
 			container: "postgres",
 		},
 		"supabase": {
@@ -115,12 +135,12 @@ func (lv *LogViewer) getComponentMap() map[string]componentInfo {
 		},
 		"prometheus": {
 			namespace: lv.config.GetNamespace("monitoring"),
-			labels:    "app.kubernetes.io/name=prometheus",
+			labels:    "app=prometheus-kube-prometheus-prometheus",
 			container: "prometheus",
 		},
 		"grafana": {
 			namespace: lv.config.GetNamespace("monitoring"),
-			labels:    "app.kubernetes.io/name=grafana",
+			labels:    "app.kubernetes.io/instance=prometheus,app.kubernetes.io/name=grafana",
 			container: "grafana",
 		},
 	}
@@ -128,7 +148,7 @@ func (lv *LogViewer) getComponentMap() map[string]componentInfo {
 
 // getAvailableComponents returns a comma-separated list of available components
 func (lv *LogViewer) getAvailableComponents() string {
-	components := []string{"app", "database", "supabase", "traefik", "prometheus", "grafana", "all"}
+	components := []string{"app", "hps", "workers", "redis", "kafka", "database", "supabase", "traefik", "prometheus", "grafana", "all"}
 	return strings.Join(components, ", ")
 }
 
@@ -199,7 +219,7 @@ func (lv *LogViewer) viewAllLogs(componentMap map[string]componentInfo, follow b
 	color.Cyan("📋 Logs from all components\n")
 	fmt.Println(strings.Repeat("=", 60))
 
-	components := []string{"app", "database", "traefik"}
+	components := []string{"app", "hps", "workers", "redis", "kafka", "traefik"}
 
 	// Add monitoring if enabled
 	if lv.config.Monitoring.Enabled {
@@ -208,7 +228,7 @@ func (lv *LogViewer) viewAllLogs(componentMap map[string]componentInfo, follow b
 
 	// Add Supabase components if self-hosted
 	if lv.config.Database.Type == "self-hosted" {
-		components = append(components, "supabase")
+		components = append(components, "database", "supabase")
 	}
 
 	for _, comp := range components {

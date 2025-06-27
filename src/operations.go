@@ -93,8 +93,16 @@ func (co *CloudOperations) CreateInfrastructure(ctx context.Context) error {
 	return nil
 }
 
-// DestroyInfrastructure destroys cloud infrastructure
+// DestroyInfrastructure destroys the cloud infrastructure
 func (co *CloudOperations) DestroyInfrastructure(ctx context.Context) error {
+	// Set provider-specific terraform directory (same as CreateInfrastructure)
+	co.terraformDir = filepath.Join(co.terraformDir, co.config.Cloud.Provider)
+
+	// Ensure terraform directory exists
+	if _, err := os.Stat(co.terraformDir); os.IsNotExist(err) {
+		return fmt.Errorf("terraform configuration not found for %s provider at %s", co.config.Cloud.Provider, co.terraformDir)
+	}
+
 	return co.terraformDestroy(ctx)
 }
 
@@ -191,7 +199,10 @@ func (co *CloudOperations) terraformInit(ctx context.Context) error {
 }
 
 func (co *CloudOperations) terraformPlan(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "terraform", "plan", "-out=tfplan")
+	args := []string{"plan", "-out=tfplan"}
+	args = append(args, co.getTerraformVariables()...)
+
+	cmd := exec.CommandContext(ctx, "terraform", args...)
 	cmd.Dir = co.terraformDir
 	return co.runCommand(cmd, "Planning infrastructure changes")
 }
@@ -203,7 +214,10 @@ func (co *CloudOperations) terraformApply(ctx context.Context) error {
 }
 
 func (co *CloudOperations) terraformDestroy(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "terraform", "destroy", "-auto-approve")
+	args := []string{"destroy", "-auto-approve"}
+	args = append(args, co.getTerraformVariables()...)
+
+	cmd := exec.CommandContext(ctx, "terraform", args...)
 	cmd.Dir = co.terraformDir
 	return co.runCommand(cmd, "Destroying infrastructure")
 }
@@ -327,6 +341,100 @@ func (co *CloudOperations) getTerraformOutputs() (map[string]string, error) {
 	}
 
 	return outputs, nil
+}
+
+// getTerraformVariables generates terraform variable arguments from config
+func (co *CloudOperations) getTerraformVariables() []string {
+	var args []string
+
+	// Cluster name is common across all providers
+	if co.config.Kubernetes.ClusterName != "" {
+		args = append(args, "-var", fmt.Sprintf("cluster_name=%s", co.config.Kubernetes.ClusterName))
+	}
+
+	// Provider-specific variables
+	switch co.config.Cloud.Provider {
+	case "aws":
+		// AWS-specific variables
+		if co.config.Cloud.Region != "" {
+			args = append(args, "-var", fmt.Sprintf("region=%s", co.config.Cloud.Region))
+		}
+		if co.config.Kubernetes.NodeCount > 0 {
+			args = append(args, "-var", fmt.Sprintf("desired_capacity=%d", co.config.Kubernetes.NodeCount))
+		}
+		if co.config.Kubernetes.MinNodes > 0 {
+			args = append(args, "-var", fmt.Sprintf("min_capacity=%d", co.config.Kubernetes.MinNodes))
+		}
+		if co.config.Kubernetes.MaxNodes > 0 {
+			args = append(args, "-var", fmt.Sprintf("max_capacity=%d", co.config.Kubernetes.MaxNodes))
+		}
+		if co.config.Cloud.AWS != nil {
+			if co.config.Cloud.AWS.VPCCidr != "" {
+				args = append(args, "-var", fmt.Sprintf("vpc_cidr=%s", co.config.Cloud.AWS.VPCCidr))
+			}
+			if co.config.Cloud.AWS.InstanceType != "" {
+				args = append(args, "-var", fmt.Sprintf("node_instance_type=%s", co.config.Cloud.AWS.InstanceType))
+			}
+		}
+
+	case "azure":
+		// Azure-specific variables
+		if co.config.Cloud.Region != "" {
+			args = append(args, "-var", fmt.Sprintf("location=%s", co.config.Cloud.Region))
+		}
+		if co.config.Kubernetes.NodeCount > 0 {
+			args = append(args, "-var", fmt.Sprintf("node_count=%d", co.config.Kubernetes.NodeCount))
+		}
+		if co.config.Kubernetes.MinNodes > 0 {
+			args = append(args, "-var", fmt.Sprintf("min_count=%d", co.config.Kubernetes.MinNodes))
+		}
+		if co.config.Kubernetes.MaxNodes > 0 {
+			args = append(args, "-var", fmt.Sprintf("max_count=%d", co.config.Kubernetes.MaxNodes))
+		}
+		if co.config.Cloud.Azure != nil {
+			if co.config.Cloud.Azure.ResourceGroup != "" {
+				args = append(args, "-var", fmt.Sprintf("resource_group_name=%s", co.config.Cloud.Azure.ResourceGroup))
+			}
+			if co.config.Cloud.Azure.VMSize != "" {
+				args = append(args, "-var", fmt.Sprintf("vm_size=%s", co.config.Cloud.Azure.VMSize))
+			}
+		}
+
+	case "gcp":
+		// GCP-specific variables
+		if co.config.Cloud.Region != "" {
+			args = append(args, "-var", fmt.Sprintf("region=%s", co.config.Cloud.Region))
+		}
+		if co.config.Kubernetes.NodeCount > 0 {
+			args = append(args, "-var", fmt.Sprintf("initial_node_count=%d", co.config.Kubernetes.NodeCount))
+		}
+		if co.config.Kubernetes.MinNodes > 0 {
+			args = append(args, "-var", fmt.Sprintf("min_node_count=%d", co.config.Kubernetes.MinNodes))
+		}
+		if co.config.Kubernetes.MaxNodes > 0 {
+			args = append(args, "-var", fmt.Sprintf("max_node_count=%d", co.config.Kubernetes.MaxNodes))
+		}
+		if co.config.Cloud.GCP != nil {
+			if co.config.Cloud.GCP.ProjectID != "" {
+				args = append(args, "-var", fmt.Sprintf("project_id=%s", co.config.Cloud.GCP.ProjectID))
+			}
+			if co.config.Cloud.GCP.Zone != "" {
+				args = append(args, "-var", fmt.Sprintf("zone=%s", co.config.Cloud.GCP.Zone))
+			}
+			if co.config.Cloud.GCP.MachineType != "" {
+				args = append(args, "-var", fmt.Sprintf("machine_type=%s", co.config.Cloud.GCP.MachineType))
+			}
+		}
+	}
+
+	// Advanced terraform variables
+	if co.config.Advanced.Terraform != nil && co.config.Advanced.Terraform.Variables != nil {
+		for k, v := range co.config.Advanced.Terraform.Variables {
+			args = append(args, "-var", fmt.Sprintf("%s=%v", k, v))
+		}
+	}
+
+	return args
 }
 
 // KubernetesOperations handles Kubernetes cluster operations
@@ -1064,7 +1172,12 @@ func (ko *KubernetesOperations) installHelmChart(ctx context.Context, release, c
 		return cmd.Run()
 	}
 
-	spinner := ko.progress.StartSpinner(fmt.Sprintf("Installing %s", release))
+	// Display friendly name for vector (strip project suffix)
+	displayName := release
+	if strings.HasPrefix(release, "vector-") {
+		displayName = "vector"
+	}
+	spinner := ko.progress.StartSpinner(fmt.Sprintf("Installing %s", displayName))
 	err := cmd.Run()
 	if err != nil {
 		spinner.Fail()
