@@ -1761,7 +1761,13 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 						},
 					},
 				},
-				"tls": true,
+				"tls": []map[string]interface{}{
+					{
+						"hosts": []string{
+							fmt.Sprintf("supabase.%s", so.config.Project.Domain),
+						},
+					},
+				},
 			},
 		},
 		"analytics": map[string]interface{}{
@@ -2660,7 +2666,13 @@ func (so *SupabaseOperations) createExternalDBValues() map[string]interface{} {
 						},
 					},
 				},
-				"tls": true,
+				"tls": []map[string]interface{}{
+					{
+						"hosts": []string{
+							fmt.Sprintf("supabase.%s", so.config.Project.Domain),
+						},
+					},
+				},
 			},
 		},
 		"analytics": map[string]interface{}{
