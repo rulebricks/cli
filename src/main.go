@@ -96,8 +96,8 @@ var destroyCmd = &cobra.Command{
 		destroyCluster, _ := cmd.Flags().GetBool("cluster")
 		force, _ := cmd.Flags().GetBool("force")
 
-		// Confirm destruction
-		if !nonInteractive && !confirmDestruction(destroyCluster) {
+		// Confirm destruction (skip if force flag is set)
+		if !nonInteractive && !force && !confirmDestruction(destroyCluster) {
 			color.Yellow("Destruction cancelled")
 			return nil
 		}
@@ -693,5 +693,25 @@ func getClusterNameWithFallback() (string, error) {
 		fmt.Printf("  eksctl command failed: %v\n", err)
 	}
 
-	return "", fmt.Errorf("unable to determine cluster name from kubectl context, state file, or cloud provider CLI")
+	// Try to load config as final fallback
+	if verbose {
+		fmt.Println("  Trying to load cluster name from config...")
+	}
+
+	if cfgFile != "" {
+		config, err := LoadConfig(cfgFile)
+		if err == nil && config.Kubernetes.ClusterName != "" {
+			if verbose {
+				fmt.Printf("  ✓ Found cluster name in config: %s\n", config.Kubernetes.ClusterName)
+			}
+			return config.Kubernetes.ClusterName, nil
+		}
+	}
+
+	// Use default cluster name as last resort
+	defaultClusterName := "rulebricks-cluster"
+	if verbose {
+		fmt.Printf("  ℹ️  Using default cluster name: %s\n", defaultClusterName)
+	}
+	return defaultClusterName, nil
 }

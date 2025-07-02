@@ -421,7 +421,7 @@ func (c *Config) ApplyDefaults() {
 
 	// Apply Kubernetes defaults
 	if c.Kubernetes.ClusterName == "" {
-		c.Kubernetes.ClusterName = fmt.Sprintf("%s-cluster", sanitizeName(c.Project.Name))
+		c.Kubernetes.ClusterName = "rulebricks-cluster"
 	}
 	if c.Kubernetes.NodeCount == 0 {
 		c.Kubernetes.NodeCount = 3

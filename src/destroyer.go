@@ -70,9 +70,7 @@ func (d *Destroyer) Execute() error {
 	// Display destruction plan
 	d.displayPlan()
 
-	if !d.options.Force && !nonInteractive && !d.confirmDestruction() {
-		return fmt.Errorf("destruction cancelled by user")
-	}
+	// Confirmation already handled in main.go
 
 	d.progress.Section("Starting Destruction")
 
@@ -144,8 +142,7 @@ func (d *Destroyer) initializeOperations() error {
 
 	// Initialize cloud operations if destroying cluster
 	if d.options.DestroyCluster {
-		homeDir, _ := os.UserHomeDir()
-		terraformDir := filepath.Join(homeDir, ".rulebricks", "deploy", d.config.Project.Name, "terraform")
+		terraformDir := "terraform"
 
 		cloudOps, err := NewCloudOperations(d.config, terraformDir, d.options.Verbose)
 		if err != nil {
@@ -235,22 +232,7 @@ func (d *Destroyer) displayPlan() {
 	fmt.Println(strings.Repeat("─", 50))
 }
 
-// confirmDestruction asks for confirmation
-func (d *Destroyer) confirmDestruction() bool {
-	if d.options.DestroyCluster {
-		color.Red("\n⚠️  WARNING: This will destroy your entire cluster and all data!")
-		fmt.Printf("\nType 'destroy-all' to confirm: ")
-		var response string
-		fmt.Scanln(&response)
-		return response == "destroy-all"
-	}
 
-	color.Yellow("\n⚠️  This will remove the Rulebricks deployment")
-	fmt.Printf("\nContinue? (y/N): ")
-	var response string
-	fmt.Scanln(&response)
-	return strings.ToLower(response) == "y" || strings.ToLower(response) == "yes"
-}
 
 // quickDeletion performs fast deletion of major components
 func (d *Destroyer) quickDeletion() error {

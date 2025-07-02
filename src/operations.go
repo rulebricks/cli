@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -96,7 +97,7 @@ func (co *CloudOperations) CreateInfrastructure(ctx context.Context) error {
 // DestroyInfrastructure destroys the cloud infrastructure
 func (co *CloudOperations) DestroyInfrastructure(ctx context.Context) error {
 	// Set provider-specific terraform directory (same as CreateInfrastructure)
-	co.terraformDir = filepath.Join(co.terraformDir, co.config.Cloud.Provider)
+	co.terraformDir = filepath.Join("terraform", co.config.Cloud.Provider)
 
 	// Ensure terraform directory exists
 	if _, err := os.Stat(co.terraformDir); os.IsNotExist(err) {
@@ -219,7 +220,14 @@ func (co *CloudOperations) terraformDestroy(ctx context.Context) error {
 
 	cmd := exec.CommandContext(ctx, "terraform", args...)
 	cmd.Dir = co.terraformDir
-	return co.runCommand(cmd, "Destroying infrastructure")
+
+	// Don't create a new spinner since destroyer already has one running
+	if co.verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		co.progress.Debug("Running: %s", strings.Join(cmd.Args, " "))
+	}
+	return cmd.Run()
 }
 
 func (co *CloudOperations) updateKubeconfig(ctx context.Context) error {
@@ -1740,6 +1748,7 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 					"traefik.ingress.kubernetes.io/router.entrypoints":   "websecure",
 					"traefik.ingress.kubernetes.io/router.tls":           "true",
 					"traefik.ingress.kubernetes.io/router.tls.certresolver": "le",
+					"traefik.ingress.kubernetes.io/router.middlewares": fmt.Sprintf("%s-supabase-kong-websocket@kubernetescrd", namespace),
 				},
 				"hosts": []map[string]interface{}{
 					{
@@ -1752,13 +1761,7 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 						},
 					},
 				},
-				"tls": []map[string]interface{}{
-					{
-						"hosts": []string{
-							fmt.Sprintf("supabase.%s", so.config.Project.Domain),
-						},
-					},
-				},
+				"tls": true,
 			},
 		},
 		"analytics": map[string]interface{}{
@@ -2637,6 +2640,28 @@ func (so *SupabaseOperations) createExternalDBValues() map[string]interface{} {
 				"KONG_DATABASE":           "off",
 				"KONG_LOG_LEVEL":          "info",
 			},
+			"ingress": map[string]interface{}{
+				"enabled":   true,
+				"className": "traefik",
+				"annotations": map[string]interface{}{
+					"traefik.ingress.kubernetes.io/router.entrypoints":   "websecure",
+					"traefik.ingress.kubernetes.io/router.tls":           "true",
+					"traefik.ingress.kubernetes.io/router.tls.certresolver": "le",
+					"traefik.ingress.kubernetes.io/router.middlewares": fmt.Sprintf("%s-supabase-kong-websocket@kubernetescrd", so.config.GetNamespace("supabase")),
+				},
+				"hosts": []map[string]interface{}{
+					{
+						"host": fmt.Sprintf("supabase.%s", so.config.Project.Domain),
+						"paths": []map[string]interface{}{
+							{
+								"path":     "/",
+								"pathType": "Prefix",
+							},
+						},
+					},
+				},
+				"tls": true,
+			},
 		},
 		"analytics": map[string]interface{}{
 			"enabled": true,
@@ -2672,12 +2697,13 @@ func (so *SupabaseOperations) createExternalDBValues() map[string]interface{} {
 
 	// Update realtime service
 	values["realtime"].(map[string]interface{})["environment"] = map[string]interface{}{
-		"DB_HOST":     so.config.Database.External.Host,
-		"DB_PORT":     fmt.Sprintf("%d", so.config.Database.External.Port),
-		"DB_USER":     so.config.Database.External.Username,
-		"DB_PASSWORD": dbPassword,
-		"DB_NAME":     so.config.Database.External.Database,
-		"DB_SSL":      so.config.Database.External.SSLMode != "disable",
+		"DB_HOST":          so.config.Database.External.Host,
+		"DB_PORT":          fmt.Sprintf("%d", so.config.Database.External.Port),
+		"DB_USER":          so.config.Database.External.Username,
+		"DB_PASSWORD":      dbPassword,
+		"DB_NAME":          so.config.Database.External.Database,
+		"DB_SSL":           so.config.Database.External.SSLMode != "disable",
+		"MAX_HEADER_LENGTH": "8192",
 	}
 
 	// Update storage service - merge with existing environment
@@ -2711,13 +2737,72 @@ func (so *SupabaseOperations) createExternalDBValues() map[string]interface{} {
 func (so *SupabaseOperations) ensureRealtimeTenant(ctx context.Context) error {
 	namespace := so.config.GetNamespace("supabase")
 
-	// Execute SQL to ensure realtime tenant exists
-	// Execute SQL to ensure realtime tenant exists
+	// Wait a bit for the realtime seed to complete and create the realtime-dev tenant
+	time.Sleep(5 * time.Second)
+
+	// Get the JWT secret that we need to encrypt
+	jwtSecret := so.jwtSecret
+	if jwtSecret == "" && so.options.Secrets != nil {
+		jwtSecret = so.options.Secrets.JWTSecret
+	}
+	if jwtSecret == "" {
+		// If we still don't have it, try to get it from the secret
+		cmd := exec.CommandContext(ctx, "kubectl", "get", "secret", "supabase-jwt",
+			"-n", namespace, "-o", "jsonpath={.data.secret}")
+		output, err := cmd.Output()
+		if err == nil && len(output) > 0 {
+			decoded, err := base64.StdEncoding.DecodeString(string(output))
+			if err == nil {
+				jwtSecret = string(decoded)
+			}
+		}
+	}
+
+	if jwtSecret == "" {
+		return fmt.Errorf("unable to determine JWT secret for realtime tenant")
+	}
+
+	// Execute SQL to ensure realtime tenants exist with properly encrypted JWT secret
+	// The realtime service expects JWT secrets to be encrypted using AES-ECB with DB_ENC_KEY
+	// We use PostgreSQL's encode/encrypt functions to do this
 	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace,
 		"deployment/supabase-supabase-db", "--",
 		"psql", "-U", "supabase_admin", "-d", "postgres", "-c",
-		`INSERT INTO _realtime.tenants SELECT gen_random_uuid(), 'supabase-supabase-realtime', name, jwt_secret, max_concurrent_users, max_events_per_second, postgres_cdc_default, max_bytes_per_second, max_channels_per_client, max_joins_per_second, NOW(), NOW() FROM _realtime.tenants WHERE external_id = 'realtime-dev' ON CONFLICT DO NOTHING;
-		INSERT INTO _realtime.extensions SELECT gen_random_uuid(), type, settings, 'supabase-supabase-realtime', NOW(), NOW() FROM _realtime.extensions WHERE tenant_external_id = 'realtime-dev' AND NOT EXISTS (SELECT 1 FROM _realtime.extensions WHERE tenant_external_id = 'supabase-supabase-realtime');`)
+		fmt.Sprintf(`-- Enable pgcrypto if not already enabled
+		CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+		-- Create supabase-supabase-realtime tenant with encrypted JWT secret
+		INSERT INTO _realtime.tenants (id, name, external_id, jwt_secret, max_concurrent_users,
+		       inserted_at, updated_at, max_events_per_second, postgres_cdc_default,
+		       max_bytes_per_second, max_channels_per_client, max_joins_per_second, suspend)
+		SELECT gen_random_uuid(), name, 'supabase-supabase-realtime',
+		       encode(encrypt('%s'::bytea, 'supabaserealtime'::bytea, 'aes-ecb'), 'base64'),
+		       max_concurrent_users, NOW(), NOW(), max_events_per_second, postgres_cdc_default,
+		       max_bytes_per_second, max_channels_per_client, max_joins_per_second, suspend
+		FROM _realtime.tenants WHERE external_id = 'realtime-dev'
+		ON CONFLICT (external_id) DO UPDATE SET jwt_secret = encode(encrypt('%s'::bytea, 'supabaserealtime'::bytea, 'aes-ecb'), 'base64');
+
+		-- Create supabase tenant (for JWT iss claim) with encrypted JWT secret
+		INSERT INTO _realtime.tenants (id, name, external_id, jwt_secret, max_concurrent_users,
+		       inserted_at, updated_at, max_events_per_second, postgres_cdc_default,
+		       max_bytes_per_second, max_channels_per_client, max_joins_per_second, suspend)
+		SELECT gen_random_uuid(), name, 'supabase',
+		       encode(encrypt('%s'::bytea, 'supabaserealtime'::bytea, 'aes-ecb'), 'base64'),
+		       max_concurrent_users, NOW(), NOW(), max_events_per_second, postgres_cdc_default,
+		       max_bytes_per_second, max_channels_per_client, max_joins_per_second, suspend
+		FROM _realtime.tenants WHERE external_id = 'realtime-dev'
+		ON CONFLICT (external_id) DO UPDATE SET jwt_secret = encode(encrypt('%s'::bytea, 'supabaserealtime'::bytea, 'aes-ecb'), 'base64');
+
+		-- Create extensions for both tenants
+		INSERT INTO _realtime.extensions
+		SELECT gen_random_uuid(), type, settings, 'supabase-supabase-realtime', NOW(), NOW()
+		FROM _realtime.extensions WHERE tenant_external_id = 'realtime-dev'
+		AND NOT EXISTS (SELECT 1 FROM _realtime.extensions WHERE tenant_external_id = 'supabase-supabase-realtime');
+
+		INSERT INTO _realtime.extensions
+		SELECT gen_random_uuid(), type, settings, 'supabase', NOW(), NOW()
+		FROM _realtime.extensions WHERE tenant_external_id = 'realtime-dev'
+		AND NOT EXISTS (SELECT 1 FROM _realtime.extensions WHERE tenant_external_id = 'supabase');`, jwtSecret, jwtSecret, jwtSecret, jwtSecret))
 
 	if err := cmd.Run(); err != nil {
 		// This is non-fatal - realtime may not be enabled or this might be an external database

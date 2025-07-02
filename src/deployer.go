@@ -87,7 +87,9 @@ func NewDeployer(config *Config, options DeployerOptions) (*Deployer, error) {
 		options:      options,
 		progress:     progress,
 		workDir:      workDir,
-		terraformDir: filepath.Join(workDir, "terraform"),
+		// Use local terraform directory for transparency and user control
+		// Users should have direct access to their infrastructure code
+		terraformDir: "terraform",
 		chartManager: chartManager,
 		assetManager: assetManager,
 		secrets:      &SharedSecrets{},

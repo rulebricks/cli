@@ -214,7 +214,7 @@ func (w *InitWizard) configureGCP() error {
 
 func (w *InitWizard) configureKubernetes() {
 	w.config.Kubernetes.ClusterName = w.promptString("Kubernetes cluster name",
-		fmt.Sprintf("%s-cluster", w.config.Project.Name), nil)
+		"rulebricks-cluster", nil)
 
 	w.config.Kubernetes.NodeCount = w.promptInt("Initial node count", 3, 1, 100)
 

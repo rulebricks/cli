@@ -109,7 +109,9 @@ func (cm *ChartManager) getChart(name, version string) (*ChartInfo, error) {
 	}
 
 	// Download chart
-	fmt.Printf("📥 Downloading %s chart version %s...\n", name, version)
+	if cm.verbose {
+		fmt.Printf("📥 Downloading %s chart version %s...\n", name, version)
+	}
 
 	chartURL := fmt.Sprintf("%s/v%s/%s", cm.baseURL, version, chartName)
 	checksumURL := fmt.Sprintf("%s.sha256", chartURL)
@@ -131,7 +133,9 @@ func (cm *ChartManager) getChart(name, version string) (*ChartInfo, error) {
 		return nil, fmt.Errorf("checksum verification failed: %w", err)
 	}
 
-	color.Green("✅ Chart downloaded and verified successfully")
+	if cm.verbose {
+		color.Green("✅ Chart downloaded and verified successfully")
+	}
 
 	return &ChartInfo{
 		Name:       name,

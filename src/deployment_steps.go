@@ -52,6 +52,27 @@ func (s *InfrastructureStep) Execute(ctx context.Context, d *Deployer) error {
 		return fmt.Errorf("cluster not ready: %w", err)
 	}
 
+	// Get cluster endpoint
+	clusterEndpoint, err := d.cloudOps.GetClusterEndpoint()
+	if err != nil {
+		return fmt.Errorf("failed to get cluster endpoint: %w", err)
+	}
+
+	// Update deployment state
+	d.state.Infrastructure = InfrastructureState{
+		Provider:        d.config.Cloud.Provider,
+		Region:          d.config.Cloud.Region,
+		ClusterName:     d.config.Kubernetes.ClusterName,
+		ClusterEndpoint: clusterEndpoint,
+		NodeCount:       d.config.Kubernetes.NodeCount,
+		CreatedAt:       time.Now(),
+	}
+
+	// Save state
+	if err := d.saveState(); err != nil {
+		d.progress.Warning("Failed to save infrastructure state: %v", err)
+	}
+
 	// Initialize Kubernetes operations with the new cluster
 	k8sOps, err := NewKubernetesOperations(d.config, d.options.Verbose)
 	if err != nil {
