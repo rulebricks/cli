@@ -2944,7 +2944,18 @@ func (so *SupabaseOperations) EnsureSupabaseAssets() error {
 
 	// Use asset manager if available
 	if so.options.AssetManager != nil {
-		return so.options.AssetManager.EnsureSupabaseAssets("", supabaseDir)
+		// Construct the image name
+		imageName := fmt.Sprintf("%s:%s", DefaultAppImage, so.options.ChartVersion)
+		if so.config.Advanced.DockerRegistry != nil && so.config.Advanced.DockerRegistry.AppImage != "" {
+			// Use custom registry if configured
+			baseImage := so.config.Advanced.DockerRegistry.AppImage
+			// Remove any existing tag
+			if idx := strings.LastIndex(baseImage, ":"); idx > 0 {
+				baseImage = baseImage[:idx]
+			}
+			imageName = fmt.Sprintf("%s:%s", baseImage, so.options.ChartVersion)
+		}
+		return so.options.AssetManager.EnsureSupabaseAssets(imageName, supabaseDir)
 	}
 
 	// Otherwise just check if directory exists

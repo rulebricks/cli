@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -55,8 +56,49 @@ func (am *AssetManager) EnsureSupabaseAssets(imageName, targetDir string) error 
 		return nil
 	}
 
-	color.Yellow("📦 Copying Supabase assets...")
+	color.Yellow("📦 Extracting Supabase assets...")
 
+	// If imageName is provided, extract from Docker image
+	if imageName != "" {
+		if am.verbose {
+			fmt.Printf("Extracting from Docker image: %s\n", imageName)
+		}
+
+		// Docker login for private registry access
+		dockerPassword := fmt.Sprintf("dckr_pat_%s", am.licenseKey)
+		loginCmd := exec.Command("docker", "login", "docker.io", "-u", "rulebricks", "-p", dockerPassword)
+		if err := loginCmd.Run(); err != nil {
+			// Try to continue anyway - image might be cached
+			if am.verbose {
+				fmt.Printf("Warning: Docker login failed: %v\n", err)
+			}
+		}
+
+		// Create a temporary container
+		containerName := fmt.Sprintf("rulebricks-extract-%d", time.Now().Unix())
+		createCmd := exec.Command("docker", "create", "--name", containerName, imageName)
+		if err := createCmd.Run(); err != nil {
+			return fmt.Errorf("failed to create container from image %s: %w", imageName, err)
+		}
+
+		// Ensure container is removed even if extraction fails
+		defer func() {
+			removeCmd := exec.Command("docker", "rm", "-f", containerName)
+			removeCmd.Run()
+		}()
+
+		// Copy supabase directory from container
+		copyCmd := exec.Command("docker", "cp",
+			fmt.Sprintf("%s:/opt/rulebricks/assets/supabase", containerName), targetDir)
+		if err := copyCmd.Run(); err != nil {
+			return fmt.Errorf("failed to extract supabase assets from image: %w", err)
+		}
+
+		color.Green("✓ Supabase assets extracted successfully from Docker image")
+		return nil
+	}
+
+	// Fall back to local directory copy
 	// Look for local supabase directory
 	sourceDir := "supabase"
 	if _, err := os.Stat(sourceDir); os.IsNotExist(err) {
@@ -72,7 +114,7 @@ func (am *AssetManager) EnsureSupabaseAssets(imageName, targetDir string) error 
 		return fmt.Errorf("failed to copy supabase assets: %w", err)
 	}
 
-	color.Green("✓ Supabase assets copied successfully")
+	color.Green("✓ Supabase assets copied successfully from local directory")
 	return nil
 }
 

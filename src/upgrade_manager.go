@@ -583,6 +583,16 @@ func (um *UpgradeManager) runDatabaseMigrations(ctx context.Context, extractedCh
 	// Extract Supabase assets from Docker image
 	um.progress.Info("Extracting database migrations from %s to %s", imageName, targetSupabaseDir)
 
+	// Docker login for private registry access
+	dockerPassword := fmt.Sprintf("dckr_pat_%s", um.config.Project.License)
+	loginCmd := exec.Command("docker", "login", "docker.io", "-u", "rulebricks", "-p", dockerPassword)
+	if err := loginCmd.Run(); err != nil {
+		// Try to continue anyway - image might be cached
+		if um.verbose {
+			um.progress.Warning("Docker login failed: %v", err)
+		}
+	}
+
 	// Create a temporary container
 	containerName := fmt.Sprintf("rulebricks-upgrade-extract-%d", time.Now().Unix())
 	createCmd := exec.CommandContext(ctx, "docker", "create", "--name", containerName, imageName)
@@ -598,7 +608,7 @@ func (um *UpgradeManager) runDatabaseMigrations(ctx context.Context, extractedCh
 
 	// Copy supabase directory from container
 	copyCmd := exec.CommandContext(ctx, "docker", "cp",
-		fmt.Sprintf("%s:/supabase", containerName), targetSupabaseDir)
+		fmt.Sprintf("%s:/opt/rulebricks/assets/supabase", containerName), targetSupabaseDir)
 	if err := copyCmd.Run(); err != nil {
 		return 0, fmt.Errorf("failed to extract supabase assets from image: %w", err)
 	}
