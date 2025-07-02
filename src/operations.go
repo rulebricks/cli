@@ -1748,7 +1748,6 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 					"traefik.ingress.kubernetes.io/router.entrypoints":   "websecure",
 					"traefik.ingress.kubernetes.io/router.tls":           "true",
 					"traefik.ingress.kubernetes.io/router.tls.certresolver": "le",
-					"traefik.ingress.kubernetes.io/router.middlewares": fmt.Sprintf("%s-supabase-kong-websocket@kubernetescrd", namespace),
 				},
 				"hosts": []map[string]interface{}{
 					{
@@ -1855,6 +1854,11 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("helm deployment failed: %w", err)
+	}
+
+	// Ensure realtime tenant exists
+	if err := so.ensureRealtimeTenant(ctx); err != nil {
+		so.progress.Warning("Failed to ensure realtime tenant: %v", err)
 	}
 
 	return nil
@@ -2653,7 +2657,6 @@ func (so *SupabaseOperations) createExternalDBValues() map[string]interface{} {
 					"traefik.ingress.kubernetes.io/router.entrypoints":   "websecure",
 					"traefik.ingress.kubernetes.io/router.tls":           "true",
 					"traefik.ingress.kubernetes.io/router.tls.certresolver": "le",
-					"traefik.ingress.kubernetes.io/router.middlewares": fmt.Sprintf("%s-supabase-kong-websocket@kubernetescrd", so.config.GetNamespace("supabase")),
 				},
 				"hosts": []map[string]interface{}{
 					{

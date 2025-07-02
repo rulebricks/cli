@@ -1034,6 +1034,8 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 			},
 		},
 		"imageCredentials": map[string]interface{}{
+			"registry": "index.docker.io",
+			"username": "rulebricks",
 			"password": fmt.Sprintf("dckr_pat_%s", d.secrets.LicenseKey),
 		},
 		"ingress": map[string]interface{}{

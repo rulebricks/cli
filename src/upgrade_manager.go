@@ -443,7 +443,25 @@ func (um *UpgradeManager) performUpgrade(version string) error {
 	}
 	spinner.Success()
 
-	// Phase 5: Update state
+	// Phase 5: Run database migrations if applicable
+	if um.config.Database.Type != "" {
+		spinner = um.progress.StartSpinner("Checking for database migrations")
+		migrationsRun, err := um.runDatabaseMigrations(context.Background(), extractedPath, version)
+		if err != nil {
+			spinner.Fail()
+			um.progress.Warning("Failed to run database migrations: %v", err)
+			// Don't fail the entire upgrade if migrations fail
+		} else {
+			spinner.Success()
+			if migrationsRun > 0 {
+				um.progress.Success("Applied %d new database migration(s)", migrationsRun)
+			} else {
+				um.progress.Info("No new database migrations to apply")
+			}
+		}
+	}
+
+	// Phase 6: Update state
 	um.updateDeploymentState(version)
 
 	duration := time.Since(startTime)
@@ -493,6 +511,14 @@ func (um *UpgradeManager) generateUpgradeValues() (map[string]interface{}, error
 		}
 	}
 
+	// Add image credentials for Docker Hub authentication
+	// This is critical for pulling the Rulebricks app image
+	values["imageCredentials"] = map[string]interface{}{
+		"registry": "index.docker.io",
+		"username": "rulebricks",
+		"password": fmt.Sprintf("dckr_pat_%s", um.config.Project.License),
+	}
+
 	return values, nil
 }
 
@@ -516,4 +542,233 @@ func (um *UpgradeManager) updateDeploymentState(version string) error {
 	}
 
 	return os.WriteFile(statePath, data, 0644)
+}
+
+// runDatabaseMigrations runs any new database migrations from the upgraded version
+func (um *UpgradeManager) runDatabaseMigrations(ctx context.Context, extractedChartPath string, version string) (int, error) {
+	// Use the same persistent work directory as initial deployment
+	homeDir, _ := os.UserHomeDir()
+	workDir := filepath.Join(homeDir, ".rulebricks", "deploy", um.config.Project.Name)
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		return 0, fmt.Errorf("failed to create work directory: %w", err)
+	}
+	// Don't remove the work directory - keep it persistent
+
+	// Initialize asset manager to extract Supabase assets from the new version
+	assetManager, err := NewAssetManager(um.config.Project.License, workDir, um.verbose)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create asset manager: %w", err)
+	}
+
+	// Extract Supabase assets from the new Docker image to the same location as initial deployment
+	targetSupabaseDir := filepath.Join(workDir, "supabase")
+
+	// Remove old supabase directory to ensure clean extraction
+	if err := os.RemoveAll(targetSupabaseDir); err != nil && !os.IsNotExist(err) {
+		um.progress.Warning("Failed to remove old supabase directory: %v", err)
+	}
+
+	// Construct the image name for the new version
+	imageName := fmt.Sprintf("%s:%s", DefaultAppImage, version)
+	if um.config.Advanced.DockerRegistry != nil && um.config.Advanced.DockerRegistry.AppImage != "" {
+		// Use custom registry if configured
+		baseImage := um.config.Advanced.DockerRegistry.AppImage
+		// Remove any existing tag
+		if idx := strings.LastIndex(baseImage, ":"); idx > 0 {
+			baseImage = baseImage[:idx]
+		}
+		imageName = fmt.Sprintf("%s:%s", baseImage, version)
+	}
+
+	// Extract Supabase assets from Docker image
+	um.progress.Info("Extracting database migrations from %s to %s", imageName, targetSupabaseDir)
+
+	// Create a temporary container
+	containerName := fmt.Sprintf("rulebricks-upgrade-extract-%d", time.Now().Unix())
+	createCmd := exec.CommandContext(ctx, "docker", "create", "--name", containerName, imageName)
+	if err := createCmd.Run(); err != nil {
+		return 0, fmt.Errorf("failed to create container from image %s: %w", imageName, err)
+	}
+
+	// Ensure container is removed even if extraction fails
+	defer func() {
+		removeCmd := exec.Command("docker", "rm", "-f", containerName)
+		removeCmd.Run()
+	}()
+
+	// Copy supabase directory from container
+	copyCmd := exec.CommandContext(ctx, "docker", "cp",
+		fmt.Sprintf("%s:/supabase", containerName), targetSupabaseDir)
+	if err := copyCmd.Run(); err != nil {
+		return 0, fmt.Errorf("failed to extract supabase assets from image: %w", err)
+	}
+
+	// Create Supabase operations with the temporary work directory
+	supabaseOpts := &SupabaseOptions{
+		Verbose:      um.verbose,
+		WorkDir:      workDir,
+		ChartVersion: version,
+		AssetManager: assetManager,
+	}
+
+	// Load secrets from state or environment
+	secrets := &SharedSecrets{}
+	if um.config.Project.License != "" {
+		secrets.LicenseKey = um.config.Project.License
+	}
+
+	// Get existing secrets from deployed resources if available
+	if _, err := NewKubernetesOperations(um.config, um.verbose); err == nil {
+		namespace := um.config.GetNamespace("app")
+
+		// Try to get database password from existing secret
+		cmd := exec.Command("kubectl", "get", "secret", "rulebricks-app-secret",
+			"-n", namespace,
+			"-o", "jsonpath={.data.DATABASE_URL}")
+		if output, err := cmd.Output(); err == nil && len(output) > 0 {
+			// Decode base64
+			decodeCmd := exec.Command("base64", "-d")
+			decodeCmd.Stdin = strings.NewReader(string(output))
+			decoded, err := decodeCmd.Output()
+			if err == nil && len(decoded) > 0 {
+				// Extract password from DATABASE_URL
+				if dbURL := string(decoded); dbURL != "" {
+					// Parse DATABASE_URL to extract password
+					if parts := strings.Split(dbURL, "@"); len(parts) >= 2 {
+						userPass := parts[0]
+						if idx := strings.LastIndex(userPass, ":"); idx > 0 {
+							secrets.DBPassword = userPass[idx+1:]
+						}
+					}
+				}
+			}
+		}
+
+		// Get Supabase anon key
+		cmd = exec.Command("kubectl", "get", "secret", "rulebricks-app-secret",
+			"-n", namespace,
+			"-o", "jsonpath={.data.NEXT_PUBLIC_SUPABASE_ANON_KEY}")
+		if output, err := cmd.Output(); err == nil && len(output) > 0 {
+			decodeCmd := exec.Command("base64", "-d")
+			decodeCmd.Stdin = strings.NewReader(string(output))
+			if decoded, err := decodeCmd.Output(); err == nil {
+				secrets.SupabaseAnonKey = string(decoded)
+			}
+		}
+
+		// Get Supabase service key
+		cmd = exec.Command("kubectl", "get", "secret", "rulebricks-app-secret",
+			"-n", namespace,
+			"-o", "jsonpath={.data.SUPABASE_SERVICE_KEY}")
+		if output, err := cmd.Output(); err == nil && len(output) > 0 {
+			decodeCmd := exec.Command("base64", "-d")
+			decodeCmd.Stdin = strings.NewReader(string(output))
+			if decoded, err := decodeCmd.Output(); err == nil {
+				secrets.SupabaseServiceKey = string(decoded)
+			}
+		}
+
+		// Get JWT secret
+		cmd = exec.Command("kubectl", "get", "secret", "rulebricks-app-secret",
+			"-n", namespace,
+			"-o", "jsonpath={.data.SUPABASE_JWT_SECRET}")
+		if output, err := cmd.Output(); err == nil && len(output) > 0 {
+			decodeCmd := exec.Command("base64", "-d")
+			decodeCmd.Stdin = strings.NewReader(string(output))
+			if decoded, err := decodeCmd.Output(); err == nil {
+				secrets.JWTSecret = string(decoded)
+			}
+		}
+	}
+
+	supabaseOpts.Secrets = secrets
+	supabaseOps := NewSupabaseOperations(um.config, *supabaseOpts, um.progress)
+
+	// Get list of available migrations
+	migrationsDir := filepath.Join(workDir, "supabase", "migrations")
+	var availableMigrations []string
+	if entries, err := os.ReadDir(migrationsDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+				availableMigrations = append(availableMigrations, entry.Name())
+			}
+		}
+	}
+
+	// Get list of already applied migrations
+	appliedMigrations := make(map[string]bool)
+	var migrationsBefore int
+
+	switch um.config.Database.Type {
+	case "self-hosted":
+		namespace := fmt.Sprintf("%s-supabase", um.config.Project.Name)
+		getDbPodCmd := exec.CommandContext(ctx, "kubectl", "get", "pod",
+			"-n", namespace,
+			"-l", "app.kubernetes.io/name=supabase-db,app.kubernetes.io/instance=supabase",
+			"-o", "jsonpath={.items[0].metadata.name}")
+		dbPodBytes, _ := getDbPodCmd.Output()
+		if dbPod := string(dbPodBytes); dbPod != "" {
+			// Get list of applied migrations
+			listCmd := fmt.Sprintf(`PGPASSWORD=%s psql -U postgres -d postgres -t -c "SELECT version FROM schema_migrations;" 2>/dev/null`, secrets.DBPassword)
+			cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, dbPod, "--", "bash", "-c", listCmd)
+			if output, err := cmd.Output(); err == nil {
+				for _, line := range strings.Split(string(output), "\n") {
+					migration := strings.TrimSpace(line)
+					if migration != "" {
+						appliedMigrations[migration] = true
+						migrationsBefore++
+					}
+				}
+			}
+		}
+	case "managed", "external":
+		// For managed/external databases, we can't easily check what's already applied
+		// We'll rely on the migration system's idempotency
+		um.progress.Info("Database type: %s - will attempt to apply all migrations", um.config.Database.Type)
+	}
+
+	// Count new migrations
+	newMigrations := []string{}
+	for _, migration := range availableMigrations {
+		if !appliedMigrations[migration] {
+			newMigrations = append(newMigrations, migration)
+		}
+	}
+
+	if len(newMigrations) == 0 {
+		um.progress.Info("No new migrations found")
+		return 0, nil
+	}
+
+	um.progress.Info("Found %d new migration(s) to apply:", len(newMigrations))
+	for _, migration := range newMigrations {
+		um.progress.Info("  • %s", migration)
+	}
+
+	// Run migrations
+	if err := supabaseOps.RunMigrations(ctx); err != nil {
+		return 0, fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	// For self-hosted, verify migrations were applied
+	if um.config.Database.Type == "self-hosted" {
+		namespace := fmt.Sprintf("%s-supabase", um.config.Project.Name)
+		getDbPodCmd := exec.CommandContext(ctx, "kubectl", "get", "pod",
+			"-n", namespace,
+			"-l", "app.kubernetes.io/name=supabase-db,app.kubernetes.io/instance=supabase",
+			"-o", "jsonpath={.items[0].metadata.name}")
+		dbPodBytes, _ := getDbPodCmd.Output()
+		if dbPod := string(dbPodBytes); dbPod != "" {
+			countCmd := fmt.Sprintf(`PGPASSWORD=%s psql -U postgres -d postgres -t -c "SELECT COUNT(*) FROM schema_migrations;" 2>/dev/null || echo 0`, secrets.DBPassword)
+			cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, dbPod, "--", "bash", "-c", countCmd)
+			if output, err := cmd.Output(); err == nil {
+				var migrationsAfter int
+				fmt.Sscanf(string(output), "%d", &migrationsAfter)
+				return migrationsAfter - migrationsBefore, nil
+			}
+		}
+	}
+
+	// For managed/external, assume all new migrations were applied
+	return len(newMigrations), nil
 }
