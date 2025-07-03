@@ -1469,6 +1469,11 @@ func (ko *KubernetesOperations) generateVectorConfigMap(config *VectorConfig, ka
 				}
 			}
 
+		case "console":
+			sinkConfig["encoding"] = map[string]interface{}{
+				"codec": "json",
+			}
+
 		default:
 			// Generic configuration for other sinks
 			if config.Sink.Endpoint != "" {

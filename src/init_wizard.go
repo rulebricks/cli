@@ -65,9 +65,7 @@ func (w *InitWizard) Run() error {
 		return err
 	}
 
-	if err := w.configureMonitoring(); err != nil {
-		return err
-	}
+
 
 	// Apply defaults
 	w.config.ApplyDefaults()
@@ -111,12 +109,16 @@ func (w *InitWizard) configureProject() error {
 	w.config.Project.Name = sanitizeName(w.config.Project.Name)
 
 	// Domain
-	w.config.Project.Domain = w.promptString("Domain name", fmt.Sprintf("%s.example.com", w.config.Project.Name), func(s string) error {
+	fmt.Printf("Your application will be accessible at: %s.<root-domain> (You'll need DNS access)\n", w.config.Project.Name)
+	rootDomain := w.promptString("Root domain", "example.com", func(s string) error {
 		if !isValidDomain(s) {
-			return fmt.Errorf("invalid domain format")
+			return fmt.Errorf("invalid domain format - please enter just the root domain (e.g., example.com)")
 		}
 		return nil
 	})
+
+	// Prepend project name to create full domain
+	w.config.Project.Domain = fmt.Sprintf("%s.%s", w.config.Project.Name, rootDomain)
 
 	// Email
 	w.config.Project.Email = w.promptString("Admin email", "", validateEmail)
@@ -124,8 +126,8 @@ func (w *InitWizard) configureProject() error {
 	// License key
 	w.config.Project.License = w.promptPassword("Rulebricks license key")
 
-	// Project version
-	w.config.Project.Version = w.promptString("Project version", "1.0.0", nil)
+	// Project version (uses CLI version)
+	w.config.Project.Version = version
 
 	return nil
 }
@@ -219,13 +221,8 @@ func (w *InitWizard) configureKubernetes() {
 	w.config.Kubernetes.ClusterName = w.promptString("Kubernetes cluster name",
 		"rulebricks-cluster", nil)
 
-	w.config.Kubernetes.NodeCount = w.promptInt("Initial node count", 3, 1, 100)
-
-	if w.confirm("Enable autoscaling?", true) {
-		w.config.Kubernetes.EnableAutoscale = true
-		w.config.Kubernetes.MinNodes = w.promptInt("Minimum nodes", w.config.Kubernetes.NodeCount, 1, 100)
-		w.config.Kubernetes.MaxNodes = w.promptInt("Maximum nodes", w.config.Kubernetes.NodeCount*2, w.config.Kubernetes.MinNodes, 100)
-	}
+	// Autoscaling is always enabled, node counts will be set based on performance tier
+	w.config.Kubernetes.EnableAutoscale = true
 }
 
 func (w *InitWizard) configureDatabase() error {
@@ -267,12 +264,12 @@ func (w *InitWizard) configureDatabase() error {
 		color.Green("✓ Self-hosted Supabase will be deployed with the cluster")
 	}
 
-	// Connection pooling
-	if w.config.Database.Type != "managed" && w.confirm("Enable connection pooling?", true) {
+	// Connection pooling (always enabled for non-managed databases)
+	if w.config.Database.Type != "managed" {
 		w.config.Database.Pooling = &PoolingConfig{
 			Enabled: true,
-			MinSize: w.promptInt("Minimum pool size", 10, 1, 1000),
-			MaxSize: w.promptInt("Maximum pool size", 100, 10, 1000),
+			MinSize: 10,
+			MaxSize: 500,
 		}
 	}
 
@@ -368,39 +365,30 @@ func (w *InitWizard) configureEmail() error {
 func (w *InitWizard) configureSecurity() error {
 	color.New(color.Bold).Println("\n🔒 Security Configuration")
 
-	// TLS configuration
+	// TLS is always enabled with cert-manager/Let's Encrypt
 	w.config.Security.TLS = &TLSConfig{
-		Enabled: w.confirm("Enable TLS/SSL?", true),
+		Enabled:   true,
+		Provider:  "cert-manager",
+		AcmeEmail: w.promptString("ACME email for Let's Encrypt", w.config.Project.Email, validateEmail),
 	}
 
-	if w.config.Security.TLS.Enabled {
-		tlsProviders := []string{"cert-manager", "custom"}
-		w.config.Security.TLS.Provider = w.promptChoice("TLS provider", tlsProviders, "cert-manager")
-
-		if w.config.Security.TLS.Provider == "cert-manager" {
-			w.config.Security.TLS.AcmeEmail = w.promptString("ACME email for Let's Encrypt", w.config.Project.Email, validateEmail)
-		} else {
-			w.config.Security.TLS.CustomCert = w.promptString("Path to certificate file", "", nil)
-			w.config.Security.TLS.CustomKey = w.promptString("Path to key file", "", nil)
-		}
-
-		// Additional domains
-		if w.confirm("Add additional domains?", false) {
-			domains := []string{}
-			for {
-				domain := w.promptString("Additional domain (empty to finish)", "", nil)
-				if domain == "" {
-					break
-				}
-				domains = append(domains, domain)
-			}
-			w.config.Security.TLS.Domains = domains
-		}
-	}
-
-	// Network security
+	// Network security - rate limiting disabled by default
 	w.config.Security.Network = &NetworkConfig{
-		RateLimiting: w.confirm("Enable rate limiting?", true),
+		RateLimiting: false,
+		AllowedIPs:   []string{},
+	}
+
+	// Ask about IP restrictions
+	if w.confirm("Restrict access to specific IP addresses/ranges?", false) {
+		var ips []string
+		for {
+			ip := w.promptString("IP address or CIDR range (empty to finish)", "", nil)
+			if ip == "" {
+				break
+			}
+			ips = append(ips, ip)
+		}
+		w.config.Security.Network.AllowedIPs = ips
 	}
 
 	return nil
@@ -410,12 +398,35 @@ func (w *InitWizard) configureOptionalFeatures() error {
 	color.New(color.Bold).Println("\n⚙️  Optional Features")
 
 	// Monitoring
-	w.config.Monitoring.Enabled = w.confirm("Enable monitoring (Prometheus + Grafana)?", true)
+	w.config.Monitoring.Enabled = w.confirm("Enable monitoring (Prometheus + Grafana)?", false)
 
+	if w.config.Monitoring.Enabled {
+		// Monitoring mode
+		modeChoice := w.promptChoice("Monitoring mode:", []string{
+			"local - Use built-in Prometheus and Grafana",
+			"remote - Use external monitoring (Grafana Cloud, New Relic, etc.)",
+		}, "local - Use built-in Prometheus and Grafana")
 
-	// Logging
-	w.config.Logging.Enabled = w.confirm("Enable centralized logging?", false)
-	if w.config.Logging.Enabled {
+		switch modeChoice {
+		case "local - Use built-in Prometheus and Grafana":
+			w.config.Monitoring.Mode = "local"
+			w.config.Monitoring.Local = &LocalMonitoringConfig{
+				PrometheusEnabled: true,
+				GrafanaEnabled:    true,
+				Retention:         "30d",
+				StorageSize:       "50Gi",
+			}
+		case "remote - Use external monitoring (Grafana Cloud, New Relic, etc.)":
+			w.config.Monitoring.Mode = "remote"
+			if err := w.configureRemoteMonitoring(); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Logging configuration (always enabled, just configure where to send logs)
+	w.config.Logging.Enabled = true
+	if w.confirm("Configure external rule execution log destination?", false) {
 		sinkTypes := []string{"console", "elasticsearch", "datadog_logs", "loki", "aws_s3", "azure_blob", "gcp_cloud_storage", "splunk_hec", "new_relic_logs", "http"}
 		w.config.Logging.Vector = &VectorConfig{
 			Sink: &VectorSink{
@@ -423,9 +434,12 @@ func (w *InitWizard) configureOptionalFeatures() error {
 			},
 		}
 
-		if w.config.Logging.Vector.Sink.Type != "console" {
-			w.config.Logging.Vector.Sink.Config = make(map[string]interface{})
+		w.config.Logging.Vector.Sink.Config = make(map[string]interface{})
 
+		if w.config.Logging.Vector.Sink.Type == "console" {
+			// Console sink requires encoding configuration
+			w.config.Logging.Vector.Sink.Config["encoding"] = "json"
+		} else {
 			switch w.config.Logging.Vector.Sink.Type {
 			case "elasticsearch":
 				w.config.Logging.Vector.Sink.Endpoint = w.promptString("Elasticsearch endpoint (e.g., https://elastic.example.com:9200)", "", nil)
@@ -500,6 +514,16 @@ func (w *InitWizard) configureOptionalFeatures() error {
 				}
 			}
 		}
+	} else {
+		// Default to console sink if no external destination is configured
+		w.config.Logging.Vector = &VectorConfig{
+			Sink: &VectorSink{
+				Type: "console",
+				Config: map[string]interface{}{
+					"encoding": "json",
+				},
+			},
+		}
 	}
 
 	// AI features
@@ -508,42 +532,8 @@ func (w *InitWizard) configureOptionalFeatures() error {
 		w.config.AI.OpenAIAPIKeyFrom = w.promptString("OpenAI API key source", "env:OPENAI_API_KEY", nil)
 	}
 
-	// Performance tuning
-	if w.confirm("Configure performance settings?", false) {
-		w.configurePerformance()
-	}
-
-	return nil
-}
-
-func (w *InitWizard) configureMonitoring() error {
-	w.config.Monitoring.Enabled = w.confirm("Enable monitoring (Prometheus/Grafana)?", true)
-
-	if !w.config.Monitoring.Enabled {
-		return nil
-	}
-
-	// Choose monitoring mode
-	modeChoice := w.promptChoice("How would you like to deploy monitoring?", []string{
-		"local - Deploy Prometheus and Grafana in the cluster",
-		"remote - Use external monitoring (Grafana Cloud, New Relic, etc.)",
-	}, "local - Deploy Prometheus and Grafana in the cluster")
-
-	switch modeChoice {
-	case "local - Deploy Prometheus and Grafana in the cluster":
-		w.config.Monitoring.Mode = "local"
-		w.config.Monitoring.Local = &LocalMonitoringConfig{
-			PrometheusEnabled: true,
-			GrafanaEnabled:    true,
-			Retention:         "30d",
-			StorageSize:       "50Gi",
-		}
-	case "remote - Use external monitoring (Grafana Cloud, New Relic, etc.)":
-		w.config.Monitoring.Mode = "remote"
-		if err := w.configureRemoteMonitoring(); err != nil {
-			return err
-		}
-	}
+	// Performance tuning (mandatory)
+	w.configurePerformance()
 
 	return nil
 }
@@ -641,17 +631,105 @@ func (w *InitWizard) configureRemoteMonitoring() error {
 }
 
 func (w *InitWizard) configurePerformance() {
-	w.config.Performance.VolumeLevel = w.promptChoice("Storage volume level",
-		[]string{"small", "medium", "large"}, "medium")
+	color.New(color.Bold).Println("\n⚡ Performance Configuration")
+	fmt.Println("Choose your deployment size based on expected workload:")
+	fmt.Println()
 
-	w.config.Performance.HPSReplicas = w.promptInt("Initial HPS replicas", 1, 1, 10)
-	w.config.Performance.HPSMaxReplicas = w.promptInt("Maximum HPS replicas", 5, w.config.Performance.HPSReplicas, 50)
+	// Display performance tier options
+	color.New(color.FgCyan).Println("┌──────────────────────────────────────────────────────────────────────────────┐")
+	color.New(color.FgCyan).Println("│                          Performance Tier Selection                          │")
+	color.New(color.FgCyan).Println("├──────────────────────────────────────────────────────────────────────────────┤")
+	fmt.Printf("│ %-10s │ %-25s │ %-35s │\n", "Tier", "Use Case", "Resources")
+	color.New(color.FgCyan).Println("├──────────────────────────────────────────────────────────────────────────────┤")
 
-	if w.confirm("Configure Kafka for event processing?", false) {
-		w.config.Performance.KafkaPartitions = w.promptInt("Kafka partitions", 10, 1, 100)
-		w.config.Performance.KafkaRetentionHours = w.promptInt("Kafka retention (hours)", 24, 1, 168)
-		w.config.Performance.KafkaReplicationFactor = w.promptInt("Kafka replication factor", 1, 1, 5)
+	fmt.Printf("│ ")
+	color.New(color.FgGreen, color.Bold).Printf("%-10s", "Small")
+	fmt.Printf(" │ %-25s │ %-35s │\n", "Development/Testing", "2-4 CPUs, 4-8GB RAM, 1-2 nodes")
+	fmt.Printf("│            │ %-25s │ %-35s │\n", "", "<100 rules/sec")
+
+	color.New(color.FgCyan).Println("├──────────────────────────────────────────────────────────────────────────────┤")
+
+	fmt.Printf("│ ")
+	color.New(color.FgYellow, color.Bold).Printf("%-10s", "Medium")
+	fmt.Printf(" │ %-25s │ %-35s │\n", "Production", "6-12 CPUs, 12-24GB RAM, 3+ nodes")
+	fmt.Printf("│            │ %-25s │ %-35s │\n", "", "100-1,000 rules/sec")
+
+	color.New(color.FgCyan).Println("├──────────────────────────────────────────────────────────────────────────────┤")
+
+	fmt.Printf("│ ")
+	color.New(color.FgRed, color.Bold).Printf("%-10s", "Large")
+	fmt.Printf(" │ %-25s │ %-35s │\n", "High Performance", "15+ CPUs, 30+ GB RAM, 5+ nodes")
+	fmt.Printf("│            │ %-25s │ %-35s │\n", "", ">1,000 rules/sec")
+
+	color.New(color.FgCyan).Println("└──────────────────────────────────────────────────────────────────────────────┘")
+	fmt.Println()
+
+	tierChoice := w.promptChoice("Select performance tier",
+		[]string{"small", "medium", "large"}, "small")
+
+	// Set all performance parameters based on tier selection
+	switch tierChoice {
+	case "small":
+		w.config.Performance.VolumeLevel = "small"
+		w.config.Performance.HPSReplicas = 1
+		w.config.Performance.HPSMaxReplicas = 2
+		w.config.Performance.HPSWorkerReplicas = 3
+		w.config.Performance.HPSWorkerMaxReplicas = 10
+		w.config.Performance.KafkaPartitions = 3
+		w.config.Performance.KafkaRetentionHours = 24
+		w.config.Performance.KafkaReplicationFactor = 1
+		w.config.Performance.KafkaStorageSize = "10Gi"
+		// Node configuration
+		w.config.Kubernetes.NodeCount = 2
+		w.config.Kubernetes.MinNodes = 1
+		w.config.Kubernetes.MaxNodes = 3
+
+	case "medium":
+		w.config.Performance.VolumeLevel = "medium"
+		w.config.Performance.HPSReplicas = 2
+		w.config.Performance.HPSMaxReplicas = 6
+		w.config.Performance.HPSWorkerReplicas = 5
+		w.config.Performance.HPSWorkerMaxReplicas = 30
+		w.config.Performance.KafkaPartitions = 10
+		w.config.Performance.KafkaRetentionHours = 72
+		w.config.Performance.KafkaReplicationFactor = 2
+		w.config.Performance.KafkaStorageSize = "50Gi"
+		// Node configuration
+		w.config.Kubernetes.NodeCount = 3
+		w.config.Kubernetes.MinNodes = 3
+		w.config.Kubernetes.MaxNodes = 6
+
+	case "large":
+		w.config.Performance.VolumeLevel = "large"
+		w.config.Performance.HPSReplicas = 3
+		w.config.Performance.HPSMaxReplicas = 8
+		w.config.Performance.HPSWorkerReplicas = 10
+		w.config.Performance.HPSWorkerMaxReplicas = 50
+		w.config.Performance.KafkaPartitions = 20
+		w.config.Performance.KafkaRetentionHours = 168
+		w.config.Performance.KafkaReplicationFactor = 3
+		w.config.Performance.KafkaStorageSize = "100Gi"
+		// Node configuration
+		w.config.Kubernetes.NodeCount = 5
+		w.config.Kubernetes.MinNodes = 5
+		w.config.Kubernetes.MaxNodes = 10
 	}
+
+	// Set common performance parameters
+	w.config.Performance.ScaleUpStabilization = 60
+	w.config.Performance.ScaleDownStabilization = 300
+	w.config.Performance.KedaPollingInterval = 30
+	w.config.Performance.KafkaLagThreshold = 100
+
+	fmt.Println()
+	color.New(color.FgGreen).Printf("✓ Performance tier '%s' selected\n", tierChoice)
+	fmt.Println()
+	fmt.Println("Configuration summary:")
+	fmt.Printf("  • Cluster nodes: %d-%d (autoscaling enabled)\n", w.config.Kubernetes.MinNodes, w.config.Kubernetes.MaxNodes)
+	fmt.Printf("  • HPS replicas: %d-%d\n", w.config.Performance.HPSReplicas, w.config.Performance.HPSMaxReplicas)
+	fmt.Printf("  • Worker replicas: %d-%d\n", w.config.Performance.HPSWorkerReplicas, w.config.Performance.HPSWorkerMaxReplicas)
+	fmt.Printf("  • Kafka partitions: %d\n", w.config.Performance.KafkaPartitions)
+	fmt.Printf("  • Storage size: %s\n", w.config.Performance.VolumeLevel)
 }
 
 // UI helper methods
@@ -661,23 +739,21 @@ func (w *InitWizard) displayWelcome() {
 	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
 	// Print the welcome message with ASCII art
 	color.New(color.Bold, color.FgGreen).Printf(`
-%s
 
-                    ______
-                  ⟋      ⟋|
-                  ██████  |
-                  ██████  |_____
-                  ██████ ⟋     ⟋|
-                ⟋     ⟋ ██████  |
-                ██████  ██████  |
-                ██████  ██████⟋
-                ██████⟋
 
-                   Rulebricks
+               ⟋ ‾‾‾‾⟋|
+              ██████  |
+              ██████  |
+              ██████ ⟋ ‾‾‾‾⟋|
+            ⟋     ⟋ ██████  |
+           ██████   ██████  |
+           ██████   ██████⟋
+           ██████⟋
 
-%s
+         [Configure Rulebricks]
 
-`, strings.Repeat("=", 50), strings.Repeat("=", 50));
+
+`);
 	fmt.Println("This wizard will help you create a configuration file for your deployment.")
 	fmt.Println("Press Ctrl+C at any time to cancel.")
 }
@@ -687,6 +763,7 @@ func (w *InitWizard) displaySummary() {
 	fmt.Println(strings.Repeat("─", 50))
 	fmt.Printf("Project:    %s\n", w.config.Project.Name)
 	fmt.Printf("Domain:     %s\n", w.config.Project.Domain)
+	fmt.Printf("Version:    %s (CLI version)\n", w.config.Project.Version)
 	fmt.Printf("Cloud:      %s (%s)\n", w.config.Cloud.Provider, w.config.Cloud.Region)
 	fmt.Printf("Database:   %s\n", w.config.Database.Type)
 	fmt.Printf("Email:      %s\n", w.config.Email.Provider)
@@ -713,12 +790,12 @@ func (w *InitWizard) displayNextSteps() {
 	fmt.Println("1. Review and edit rulebricks.yaml if needed")
 	fmt.Println("2. Ensure your cloud provider credentials are configured")
 	fmt.Println("3. Run 'rulebricks deploy' to deploy your application")
-	fmt.Println("\nFor more information, visit https://docs.rulebricks.com")
+	fmt.Println("\nFor more information, visit https://rulebricks.com/docs")
 }
 
 // Input helper methods
 
-func (w *InitWizard) promptString(prompt, defaultValue string, validator func(string) error) string {
+func (w *InitWizard) promptString(prompt string, defaultValue string, validator func(string) error) string {
 	for {
 		if defaultValue != "" {
 			fmt.Printf("%s [%s]: ", prompt, defaultValue)

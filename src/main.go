@@ -290,9 +290,27 @@ func SaveConfig(config *Config, path string) error {
 }
 
 func confirmDestruction(destroyCluster bool) bool {
+	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
+	// Print the welcome message with ASCII art
+	color.New(color.Bold, color.FgRed).Printf(`
+
+
+               ⟋ ‾‾‾‾⟋|
+              ██████  |
+              ██████  |
+              ██████ ⟋ ‾‾‾‾⟋|
+            ⟋     ⟋ ██████  |
+           ██████   ██████  |
+           ██████   ██████⟋
+           ██████⟋
+
+         [Uninstall Rulebricks]
+
+
+`);
 	if destroyCluster {
 		color.Red("\n⚠️  WARNING: This will destroy your entire cluster and all data!")
-		color.Yellow("This action is irreversible and will delete:")
+		color.Yellow("\nThis action is irreversible and will delete:")
 		fmt.Println("  • All deployed applications")
 		fmt.Println("  • All databases and stored data")
 		fmt.Println("  • The Kubernetes cluster")
@@ -300,7 +318,7 @@ func confirmDestruction(destroyCluster bool) bool {
 		fmt.Printf("\nType 'destroy-all' to confirm: ")
 	} else {
 		color.Yellow("\n⚠️  This will remove the Rulebricks deployment")
-		fmt.Println("The following will be deleted:")
+		fmt.Println("\nThe following components will be deleted:")
 		fmt.Println("  • Rulebricks application")
 		fmt.Println("  • Databases (if self-hosted)")
 		fmt.Println("  • Monitoring stack")

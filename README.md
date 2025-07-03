@@ -1,5 +1,21 @@
+```
+
+
+               ⟋ ‾‾‾‾⟋|
+              ██████  |
+              ██████  |
+              ██████ ⟋ ‾‾‾‾⟋|
+            ⟋     ⟋ ██████  |
+           ██████   ██████  |
+           ██████   ██████⟋
+           ██████⟋
+
+          [Deploy Rulebricks]
+
+```
+
 <div align="center">
-  <h1>🚀 Rulebricks CLI</h1>
+  <h1>Rulebricks CLI</h1>
   <p><strong>Enterprise-grade deployment tool for Rulebricks rule engine clusters</strong></p>
   <p>
     <a href="#installation">Installation</a> •

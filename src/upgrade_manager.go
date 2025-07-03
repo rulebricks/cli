@@ -144,8 +144,25 @@ func (um *UpgradeManager) Upgrade(version string, dryRun bool) error {
 		return fmt.Errorf("already running version %s", version)
 	}
 
+	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
+	// Print the welcome message with ASCII art
+	color.New(color.Bold, color.FgYellow).Printf(`
+
+
+               ⟋ ‾‾‾‾⟋|
+              ██████  |
+              ██████  |
+              ██████ ⟋ ‾‾‾‾⟋|
+            ⟋     ⟋ ██████  |
+           ██████   ██████  |
+           ██████   ██████⟋
+           ██████⟋
+
+          [Upgrade Rulebricks]
+
+
+`);
 	// Display upgrade plan
-	color.New(color.Bold).Println("\n📋 Upgrade Plan")
 	fmt.Println(strings.Repeat("─", 50))
 	if currentVersion == "unknown" {
 		fmt.Printf("Current version: %s\n", color.YellowString("unknown"))

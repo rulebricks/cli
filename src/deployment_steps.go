@@ -1110,6 +1110,7 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 
 	// Map sink types to friendly names
 	sinkFriendlyNames := map[string]string{
+		"console":			  "Console (stdout)",
 		"elasticsearch":      "Elasticsearch",
 		"datadog_logs":       "Datadog",
 		"loki":               "Grafana Loki",

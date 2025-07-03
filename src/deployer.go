@@ -262,7 +262,24 @@ func (d *Deployer) createPlan() DeploymentPlan {
 
 // displayPlan shows the deployment plan to the user
 func (d *Deployer) displayPlan() {
-	color.New(color.Bold).Println("\n📋 Deployment Plan")
+	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
+	// Print the welcome message with ASCII art
+	color.New(color.Bold, color.FgCyan).Printf(`
+
+
+               ⟋ ‾‾‾‾⟋|
+              ██████  |
+              ██████  |
+              ██████ ⟋ ‾‾‾‾⟋|
+            ⟋     ⟋ ██████  |
+           ██████   ██████  |
+           ██████   ██████⟋
+           ██████⟋
+
+          [Install Rulebricks]
+
+
+`);
 	fmt.Println(strings.Repeat("─", 50))
 
 	for i, step := range d.plan.Steps {
@@ -636,23 +653,21 @@ func (d *Deployer) displayConnectionInfo() {
 	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
 	// Print the welcome message with ASCII art
 	color.New(color.Bold, color.FgGreen).Printf(`
-%s
 
-                    ______
-                  ⟋      ⟋|
-                  ██████  |
-                  ██████  |_____
-                  ██████ ⟋     ⟋|
-                ⟋     ⟋ ██████  |
-                ██████  ██████  |
-                ██████  ██████⟋
-                ██████⟋
 
-                   Rulebricks
+               ⟋ ‾‾‾‾⟋|
+              ██████  |
+              ██████  |
+              ██████ ⟋ ‾‾‾‾⟋|
+            ⟋     ⟋ ██████  |
+           ██████   ██████  |
+           ██████   ██████⟋
+           ██████⟋
 
-%s
+               [Welcome]
 
-`, strings.Repeat("=", 50), strings.Repeat("=", 50));
+
+`);
 
 	fmt.Println("\n" + strings.Repeat("=", 60))
 	color.Green("🎉 Deployment Complete!")
