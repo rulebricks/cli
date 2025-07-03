@@ -15,7 +15,6 @@
 ```
 
 <div align="start">
-  <p><strong>Enterprise-grade deployment tool for Rulebricks rule engine clusters</strong></p>
   <p>
     <a href="#installation">Installation</a> •
     <a href="#quick-start">Quick Start</a> •
