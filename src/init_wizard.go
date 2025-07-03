@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-
 	"github.com/fatih/color"
 )
 
@@ -66,6 +65,10 @@ func (w *InitWizard) Run() error {
 		return err
 	}
 
+	if err := w.configureMonitoring(); err != nil {
+		return err
+	}
+
 	// Apply defaults
 	w.config.ApplyDefaults()
 
@@ -99,7 +102,7 @@ func (w *InitWizard) configureProject() error {
 	color.New(color.Bold).Println("\n🚀 Project Configuration")
 
 	// Project name
-	w.config.Project.Name = w.promptString("Project name", "my-app", func(s string) error {
+	w.config.Project.Name = w.promptString("Project name", "rulebricks", func(s string) error {
 		if !isValidKubernetesName(sanitizeName(s)) {
 			return fmt.Errorf("project name must be lowercase alphanumeric or '-'")
 		}
@@ -408,9 +411,7 @@ func (w *InitWizard) configureOptionalFeatures() error {
 
 	// Monitoring
 	w.config.Monitoring.Enabled = w.confirm("Enable monitoring (Prometheus + Grafana)?", true)
-	if w.config.Monitoring.Enabled {
-		w.config.Monitoring.Provider = "prometheus"
-	}
+
 
 	// Logging
 	w.config.Logging.Enabled = w.confirm("Enable centralized logging?", false)
@@ -515,6 +516,130 @@ func (w *InitWizard) configureOptionalFeatures() error {
 	return nil
 }
 
+func (w *InitWizard) configureMonitoring() error {
+	w.config.Monitoring.Enabled = w.confirm("Enable monitoring (Prometheus/Grafana)?", true)
+
+	if !w.config.Monitoring.Enabled {
+		return nil
+	}
+
+	// Choose monitoring mode
+	modeChoice := w.promptChoice("How would you like to deploy monitoring?", []string{
+		"local - Deploy Prometheus and Grafana in the cluster",
+		"remote - Use external monitoring (Grafana Cloud, New Relic, etc.)",
+	}, "local - Deploy Prometheus and Grafana in the cluster")
+
+	switch modeChoice {
+	case "local - Deploy Prometheus and Grafana in the cluster":
+		w.config.Monitoring.Mode = "local"
+		w.config.Monitoring.Local = &LocalMonitoringConfig{
+			PrometheusEnabled: true,
+			GrafanaEnabled:    true,
+			Retention:         "30d",
+			StorageSize:       "50Gi",
+		}
+	case "remote - Use external monitoring (Grafana Cloud, New Relic, etc.)":
+		w.config.Monitoring.Mode = "remote"
+		if err := w.configureRemoteMonitoring(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (w *InitWizard) configureRemoteMonitoring() error {
+	w.config.Monitoring.Remote = &RemoteMonitoringConfig{}
+
+	// Choose provider
+	providerChoice := w.promptChoice("Select remote monitoring provider:", []string{
+		"prometheus - Generic Prometheus remote write",
+		"grafana-cloud - Grafana Cloud",
+		"newrelic - New Relic",
+		"custom - Custom Prometheus-compatible endpoint",
+	}, "grafana-cloud - Grafana Cloud")
+
+	switch providerChoice {
+	case "prometheus - Generic Prometheus remote write":
+		w.config.Monitoring.Remote.Provider = "prometheus"
+	case "grafana-cloud - Grafana Cloud":
+		w.config.Monitoring.Remote.Provider = "grafana-cloud"
+	case "newrelic - New Relic":
+		w.config.Monitoring.Remote.Provider = "newrelic"
+	case "custom - Custom Prometheus-compatible endpoint":
+		w.config.Monitoring.Remote.Provider = "custom"
+	}
+
+	switch w.config.Monitoring.Remote.Provider {
+	case "prometheus", "grafana-cloud", "custom":
+		w.config.Monitoring.Remote.PrometheusWrite = &PrometheusRemoteWrite{}
+
+		// Get remote write URL
+		defaultURL := ""
+		if w.config.Monitoring.Remote.Provider == "grafana-cloud" {
+			defaultURL = "https://prometheus-us-central1.grafana.net/api/prom/push"
+		}
+
+		url := w.promptString("Remote write URL:", defaultURL, nil)
+		w.config.Monitoring.Remote.PrometheusWrite.URL = url
+
+		// Authentication
+		authChoice := w.promptChoice("Authentication type:", []string{
+			"basic - Username and password",
+			"bearer - Bearer token",
+			"none - No authentication",
+		}, "basic - Username and password")
+
+		switch authChoice {
+		case "basic - Username and password": // Basic auth
+			username := w.promptString("Username:", "", nil)
+			w.config.Monitoring.Remote.PrometheusWrite.Username = username
+			w.config.Monitoring.Remote.PrometheusWrite.PasswordFrom = "env:MONITORING_PASSWORD"
+			fmt.Println("⚠️  Password will be read from MONITORING_PASSWORD environment variable")
+		case "bearer - Bearer token": // Bearer token
+			w.config.Monitoring.Remote.PrometheusWrite.BearerTokenFrom = "env:MONITORING_TOKEN"
+			fmt.Println("⚠️  Bearer token will be read from MONITORING_TOKEN environment variable")
+		}
+
+		// Ask about filtering metrics
+		if w.confirm("Configure metric filtering?", false) {
+			fmt.Println("Add metric filters to reduce data sent to remote storage.")
+			fmt.Println("Example: Keep only kubernetes_.* and node_.* metrics")
+
+			keepRegex := w.promptString("Metrics to keep (regex, empty for all):", "kubernetes_.*|node_.*|up|traefik_.*", nil)
+			if keepRegex != "" {
+				w.config.Monitoring.Remote.PrometheusWrite.WriteRelabelConfigs = []RelabelConfig{
+					{
+						SourceLabels: []string{"__name__"},
+						Regex:        keepRegex,
+						Action:       "keep",
+					},
+				}
+			}
+		}
+
+	case "newrelic":
+		w.config.Monitoring.Remote.NewRelic = &NewRelicConfig{
+			LicenseKeyFrom: "env:NEWRELIC_LICENSE_KEY",
+		}
+
+		regionChoice := w.promptChoice("New Relic region:", []string{
+			"US - United States",
+			"EU - Europe",
+		}, "US - United States")
+
+		if regionChoice == "US - United States" {
+			w.config.Monitoring.Remote.NewRelic.Region = "US"
+		} else {
+			w.config.Monitoring.Remote.NewRelic.Region = "EU"
+		}
+
+		fmt.Println("⚠️  New Relic license key will be read from NEWRELIC_LICENSE_KEY environment variable")
+	}
+
+	return nil
+}
+
 func (w *InitWizard) configurePerformance() {
 	w.config.Performance.VolumeLevel = w.promptChoice("Storage volume level",
 		[]string{"small", "medium", "large"}, "medium")
@@ -532,9 +657,29 @@ func (w *InitWizard) configurePerformance() {
 // UI helper methods
 
 func (w *InitWizard) displayWelcome() {
-	color.New(color.Bold, color.FgCyan).Println("\n🎉 Welcome to Rulebricks!")
+	// clear the console
+	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
+	// Print the welcome message with ASCII art
+	color.New(color.Bold, color.FgGreen).Printf(`
+%s
+
+                    ______
+                  ⟋      ⟋|
+                  ██████  |
+                  ██████  |_____
+                  ██████ ⟋     ⟋|
+                ⟋     ⟋ ██████  |
+                ██████  ██████  |
+                ██████  ██████⟋
+                ██████⟋
+
+                   Rulebricks
+
+%s
+
+`, strings.Repeat("=", 50), strings.Repeat("=", 50));
 	fmt.Println("This wizard will help you create a configuration file for your deployment.")
-	fmt.Println("Press Ctrl+C at any time to cancel.\n")
+	fmt.Println("Press Ctrl+C at any time to cancel.")
 }
 
 func (w *InitWizard) displaySummary() {
@@ -546,7 +691,19 @@ func (w *InitWizard) displaySummary() {
 	fmt.Printf("Database:   %s\n", w.config.Database.Type)
 	fmt.Printf("Email:      %s\n", w.config.Email.Provider)
 	fmt.Printf("TLS:        %v\n", w.config.Security.TLS.Enabled)
-	fmt.Printf("Monitoring: %v\n", w.config.Monitoring.Enabled)
+	if w.config.Monitoring.Enabled {
+		mode := w.config.Monitoring.Mode
+		if mode == "" {
+			mode = "local"
+		}
+		fmt.Printf("Monitoring: %s", mode)
+		if mode == "remote" && w.config.Monitoring.Remote != nil {
+			fmt.Printf(" (%s)", w.config.Monitoring.Remote.Provider)
+		}
+		fmt.Println()
+	} else {
+		fmt.Println("Monitoring: disabled")
+	}
 	fmt.Println(strings.Repeat("─", 50))
 }
 

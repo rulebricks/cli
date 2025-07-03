@@ -274,7 +274,21 @@ func (checker *StatusChecker) checkMonitoring(status *DeploymentStatus) {
 	}
 
 	status.Monitoring.Enabled = true
-	status.Monitoring.Provider = checker.config.Monitoring.Provider
+
+	// Determine monitoring mode
+	mode := checker.config.Monitoring.Mode
+	if mode == "" {
+		mode = "local"
+	}
+
+	// Set provider based on mode and configuration
+	if mode == "remote" {
+		if checker.config.Monitoring.Remote != nil {
+			status.Monitoring.Provider = checker.config.Monitoring.Remote.Provider
+		}
+	} else {
+		status.Monitoring.Provider = "prometheus"
+	}
 
 	ctx := context.Background()
 	monitoringNs := checker.config.GetNamespace("monitoring")
@@ -285,11 +299,18 @@ func (checker *StatusChecker) checkMonitoring(status *DeploymentStatus) {
 		status.Monitoring.PrometheusRunning = true
 	}
 
-	// Check Grafana
-	grafanaDeployment, err := checker.k8sOps.GetDeployment(ctx, monitoringNs, "prometheus-grafana")
-	if err == nil && grafanaDeployment.Status.ReadyReplicas > 0 {
-		status.Monitoring.GrafanaRunning = true
-		status.Monitoring.GrafanaURL = fmt.Sprintf("https://grafana.%s", checker.config.Project.Domain)
+	// Check Grafana (only if it should be deployed)
+	includeGrafana := false
+	if mode == "local" {
+		includeGrafana = true
+	}
+
+	if includeGrafana {
+		grafanaDeployment, err := checker.k8sOps.GetDeployment(ctx, monitoringNs, "prometheus-grafana")
+		if err == nil && grafanaDeployment.Status.ReadyReplicas > 0 {
+			status.Monitoring.GrafanaRunning = true
+			status.Monitoring.GrafanaURL = fmt.Sprintf("https://grafana.%s", checker.config.Project.Domain)
+		}
 	}
 }
 

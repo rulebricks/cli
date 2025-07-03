@@ -629,14 +629,58 @@ func (ko *KubernetesOperations) WaitForApplicationReady(ctx context.Context) err
 
 // Monitoring installation
 
-func (ko *KubernetesOperations) InstallPrometheus(ctx context.Context, grafanaPassword string) error {
+func (ko *KubernetesOperations) InstallPrometheus(ctx context.Context, grafanaPassword string, remoteWriteConfig map[string]interface{}) error {
+	return ko.InstallPrometheusWithRemoteWrite(ctx, grafanaPassword, remoteWriteConfig, true)
+}
+
+// InstallPrometheusWithRemoteWrite installs Prometheus with optional Grafana and remote write configuration
+func (ko *KubernetesOperations) InstallPrometheusWithRemoteWrite(ctx context.Context, grafanaPassword string, remoteWriteConfig map[string]interface{}, includeGrafana bool) error {
 	namespace := ko.config.GetNamespace("monitoring")
 	if err := ko.ensureNamespace(ctx, namespace); err != nil {
 		return err
 	}
 
 	values := map[string]interface{}{
-		"grafana": map[string]interface{}{
+		"prometheus": map[string]interface{}{
+			"prometheusSpec": map[string]interface{}{},
+		},
+	}
+
+	// Configure Prometheus storage based on monitoring mode
+	retention := "30d"
+	storageSize := "50Gi"
+
+	if ko.config.Monitoring.Mode == "remote" {
+		// Shorter retention for remote mode
+		retention = "7d"
+		storageSize = "10Gi"
+	}
+
+	// Set retention and storage
+	promSpec := values["prometheus"].(map[string]interface{})["prometheusSpec"].(map[string]interface{})
+	promSpec["retention"] = retention
+	promSpec["storageSpec"] = map[string]interface{}{
+		"volumeClaimTemplate": map[string]interface{}{
+			"spec": map[string]interface{}{
+				"accessModes": []string{"ReadWriteOnce"},
+				"resources": map[string]interface{}{
+					"requests": map[string]interface{}{
+						"storage": storageSize,
+					},
+				},
+			},
+		},
+	}
+
+	// Add remote write configuration if provided
+	if remoteWriteConfig != nil && remoteWriteConfig["remoteWrite"] != nil {
+		promSpec["remoteWrite"] = remoteWriteConfig["remoteWrite"]
+	}
+
+	// Configure Grafana
+	if includeGrafana && grafanaPassword != "" {
+		values["grafana"] = map[string]interface{}{
+			"enabled":       true,
 			"adminPassword": grafanaPassword,
 			"ingress": map[string]interface{}{
 				"enabled":   true,
@@ -655,7 +699,19 @@ func (ko *KubernetesOperations) InstallPrometheus(ctx context.Context, grafanaPa
 					},
 				},
 			},
-		},
+		}
+	} else {
+		// Disable Grafana
+		values["grafana"] = map[string]interface{}{
+			"enabled": false,
+		}
+	}
+
+	// Disable alertmanager for remote configurations
+	if ko.config.Monitoring.Mode == "remote" {
+		values["alertmanager"] = map[string]interface{}{
+			"enabled": false,
+		}
 	}
 
 	return ko.installHelmChart(ctx, "prometheus", "prometheus-community/kube-prometheus-stack", namespace, values)
@@ -1031,7 +1087,7 @@ func (ko *KubernetesOperations) GetLoadBalancerEndpoint(ctx context.Context) (st
 		return "", err
 	}
 
-	if service.Status.LoadBalancer.Ingress != nil && len(service.Status.LoadBalancer.Ingress) > 0 {
+	if len(service.Status.LoadBalancer.Ingress) > 0 {
 		ingress := service.Status.LoadBalancer.Ingress[0]
 		if ingress.Hostname != "" {
 			return ingress.Hostname, nil

@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -15,6 +17,28 @@ type SharedSecrets struct {
 	SupabaseServiceKey string
 	JWTSecret          string
 	DashboardPassword  string
+}
+
+// GetSecret retrieves a secret value from the provided source
+func (s *SharedSecrets) GetSecret(source string) string {
+	if source == "" {
+		return ""
+	}
+
+	// Handle environment variable references
+	if strings.HasPrefix(source, "env:") {
+		envVar := strings.TrimPrefix(source, "env:")
+		return os.Getenv(envVar)
+	}
+
+	// Handle file references (future enhancement)
+	if strings.HasPrefix(source, "file:") {
+		// TODO: Implement file-based secret loading
+		return ""
+	}
+
+	// Return as-is if no prefix (plain text - not recommended)
+	return source
 }
 
 // KafkaConfig holds Kafka configuration

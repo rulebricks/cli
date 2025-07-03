@@ -173,10 +173,13 @@ type NetworkConfig struct {
 
 // MonitoringConfig defines monitoring settings
 type MonitoringConfig struct {
-	Enabled  bool           `yaml:"enabled"`
-	Provider string         `yaml:"provider,omitempty"`
-	Metrics  *MetricsConfig `yaml:"metrics,omitempty"`
-	Logs     *LogsConfig    `yaml:"logs,omitempty"`
+	Enabled  bool                    `yaml:"enabled"`
+	Mode     string                  `yaml:"mode,omitempty"` // "local" or "remote"
+	Provider string                  `yaml:"provider,omitempty"` // Deprecated, use Mode instead
+	Local    *LocalMonitoringConfig  `yaml:"local,omitempty"`
+	Remote   *RemoteMonitoringConfig `yaml:"remote,omitempty"`
+	Metrics  *MetricsConfig          `yaml:"metrics,omitempty"`
+	Logs     *LogsConfig             `yaml:"logs,omitempty"`
 }
 
 // MetricsConfig defines metrics collection settings
@@ -189,6 +192,48 @@ type MetricsConfig struct {
 type LogsConfig struct {
 	Level     string `yaml:"level,omitempty"`
 	Retention string `yaml:"retention,omitempty"`
+}
+
+// LocalMonitoringConfig defines local monitoring stack settings
+type LocalMonitoringConfig struct {
+	PrometheusEnabled bool   `yaml:"prometheus_enabled"`
+	GrafanaEnabled    bool   `yaml:"grafana_enabled"`
+	Retention         string `yaml:"retention,omitempty"`
+	StorageSize       string `yaml:"storage_size,omitempty"`
+}
+
+// RemoteMonitoringConfig defines remote monitoring settings
+type RemoteMonitoringConfig struct {
+	Provider       string                   `yaml:"provider"` // "prometheus", "grafana-cloud", "newrelic", "custom"
+	PrometheusWrite *PrometheusRemoteWrite  `yaml:"prometheus_write,omitempty"`
+	NewRelic       *NewRelicConfig          `yaml:"newrelic,omitempty"`
+}
+
+// PrometheusRemoteWrite defines Prometheus remote write configuration
+type PrometheusRemoteWrite struct {
+	URL               string            `yaml:"url"`
+	Username          string            `yaml:"username,omitempty"`
+	PasswordFrom      string            `yaml:"password_from,omitempty"`
+	BearerToken       string            `yaml:"bearer_token,omitempty"`
+	BearerTokenFrom   string            `yaml:"bearer_token_from,omitempty"`
+	Headers           map[string]string `yaml:"headers,omitempty"`
+	WriteRelabelConfigs []RelabelConfig `yaml:"write_relabel_configs,omitempty"`
+}
+
+// RelabelConfig defines Prometheus relabel configuration
+type RelabelConfig struct {
+	SourceLabels []string `yaml:"source_labels,omitempty"`
+	Separator    string   `yaml:"separator,omitempty"`
+	TargetLabel  string   `yaml:"target_label,omitempty"`
+	Regex        string   `yaml:"regex,omitempty"`
+	Replacement  string   `yaml:"replacement,omitempty"`
+	Action       string   `yaml:"action,omitempty"`
+}
+
+// NewRelicConfig defines New Relic-specific configuration
+type NewRelicConfig struct {
+	LicenseKeyFrom string `yaml:"license_key_from"`
+	Region         string `yaml:"region,omitempty"` // "US" or "EU", default: "US"
 }
 
 // AdvancedConfig defines advanced settings
@@ -382,6 +427,47 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate monitoring configuration
+	if c.Monitoring.Enabled {
+		// Validate mode
+		if c.Monitoring.Mode != "" && c.Monitoring.Mode != "local" && c.Monitoring.Mode != "remote" {
+			return fmt.Errorf("monitoring.mode must be 'local' or 'remote'")
+		}
+
+		// Validate remote configuration
+		if c.Monitoring.Mode == "remote" {
+			if c.Monitoring.Remote == nil {
+				return fmt.Errorf("monitoring.remote configuration is required for remote mode")
+			}
+
+			// Validate provider
+			switch c.Monitoring.Remote.Provider {
+			case "prometheus", "grafana-cloud", "newrelic", "custom":
+				// Valid providers
+			default:
+				return fmt.Errorf("unsupported monitoring provider: %s", c.Monitoring.Remote.Provider)
+			}
+
+			// Validate provider-specific configuration
+			switch c.Monitoring.Remote.Provider {
+			case "prometheus", "grafana-cloud", "custom":
+				if c.Monitoring.Remote.PrometheusWrite == nil {
+					return fmt.Errorf("monitoring.remote.prometheus_write is required for provider '%s'", c.Monitoring.Remote.Provider)
+				}
+				if c.Monitoring.Remote.PrometheusWrite.URL == "" {
+					return fmt.Errorf("monitoring.remote.prometheus_write.url is required")
+				}
+			case "newrelic":
+				if c.Monitoring.Remote.NewRelic == nil {
+					return fmt.Errorf("monitoring.remote.newrelic configuration is required for New Relic provider")
+				}
+				if c.Monitoring.Remote.NewRelic.LicenseKeyFrom == "" {
+					return fmt.Errorf("monitoring.remote.newrelic.license_key_from is required")
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -442,6 +528,40 @@ func (c *Config) ApplyDefaults() {
 	}
 
 	// Apply monitoring defaults
+	if c.Monitoring.Enabled {
+		// Default to local mode if not specified
+		if c.Monitoring.Mode == "" {
+			if c.Monitoring.Provider != "" {
+				// Migrate from old provider field
+				c.Monitoring.Mode = "remote"
+			} else {
+				c.Monitoring.Mode = "local"
+			}
+		}
+
+		// Apply local monitoring defaults
+		if c.Monitoring.Mode == "local" {
+			if c.Monitoring.Local == nil {
+				c.Monitoring.Local = &LocalMonitoringConfig{
+					PrometheusEnabled: true,
+					GrafanaEnabled:    true,
+					Retention:         "30d",
+					StorageSize:       "50Gi",
+				}
+			}
+		}
+
+		// Apply remote monitoring defaults
+		if c.Monitoring.Mode == "remote" {
+			if c.Monitoring.Remote != nil && c.Monitoring.Remote.Provider == "" {
+				c.Monitoring.Remote.Provider = "prometheus"
+			}
+			if c.Monitoring.Remote != nil && c.Monitoring.Remote.NewRelic != nil && c.Monitoring.Remote.NewRelic.Region == "" {
+				c.Monitoring.Remote.NewRelic.Region = "US"
+			}
+		}
+	}
+
 	if c.Monitoring.Metrics == nil {
 		c.Monitoring.Metrics = &MetricsConfig{
 			Retention: "30d",

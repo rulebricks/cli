@@ -410,10 +410,16 @@ Three deployment options:
 #### 5. **Observability Stack**
 
 **Metrics (Prometheus + Grafana):**
+- Flexible deployment modes:
+  - **Local**: Full Prometheus + Grafana stack in cluster
+  - **Remote**: Minimal Prometheus that forwards to external monitoring
+  - **Disabled**: No monitoring infrastructure
+- Remote write support for:
+  - Grafana Cloud
+  - New Relic
+  - Any Prometheus-compatible endpoint
 - Cluster and application metrics
-- Custom dashboards
-- Alert rules
-- Long-term storage options
+- Custom dashboards (local mode only)
 
 **Logging (Vector):**
 - Centralized log aggregation
@@ -516,6 +522,60 @@ The logging system uses Vector for centralized log collection from all component
 
 **Cloud Storage Setup:**
 When using cloud storage sinks, set `setup_iam: true` in your configuration to get prompted for automatic IAM setup after deployment. Alternatively, use `rulebricks vector generate-iam-config` for manual setup instructions.
+
+### Monitoring Configuration
+
+The monitoring system provides flexible deployment options for metrics collection and visualization:
+
+**Deployment Modes:**
+
+1. **Local Mode** (default):
+   - Full Prometheus and Grafana stack deployed in your cluster
+   - 30-day retention, 50Gi storage
+   - Grafana accessible at `https://grafana.{your-domain}`
+   - Best for: Development, isolated environments, full control
+
+2. **Remote Mode**:
+   - Minimal Prometheus deployment (7-day retention, 10Gi storage)
+   - Forwards all metrics to external monitoring system
+   - No local Grafana deployment
+   - Best for: Production environments with existing monitoring infrastructure
+
+3. **Disabled**:
+   - No monitoring infrastructure deployed
+   - Choose this if you have alternative monitoring solutions
+
+**Supported Remote Write Destinations:**
+
+- **Grafana Cloud**: Full Prometheus remote write support
+- **New Relic**: Native Prometheus integration
+- **Generic Prometheus**: Any Prometheus-compatible remote write endpoint
+- **Custom**: Configure your own remote write endpoint
+
+**Configuration Example:**
+
+```yaml
+monitoring:
+  enabled: true
+  mode: remote  # or "local"
+  remote:
+    provider: grafana-cloud
+    prometheus_write:
+      url: https://prometheus-us-central1.grafana.net/api/prom/push
+      username: "123456"
+      password_from: env:MONITORING_PASSWORD
+      # Optional: Filter metrics to reduce costs
+      write_relabel_configs:
+        - source_labels: [__name__]
+          regex: "kubernetes_.*|node_.*|up|traefik_.*"
+          action: keep
+```
+
+**Authentication:**
+- Credentials are read from environment variables for security
+- Basic auth: Set `MONITORING_PASSWORD` environment variable
+- Bearer token: Set `MONITORING_TOKEN` environment variable
+- New Relic: Set `NEWRELIC_LICENSE_KEY` environment variable
 
 ### Secret Management
 

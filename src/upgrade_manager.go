@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
 	"github.com/fatih/color"
 	"gopkg.in/yaml.v3"
 )
@@ -75,10 +74,7 @@ func (um *UpgradeManager) ListVersions() error {
 			break
 		}
 
-		versionStr := release.TagName
-		if strings.HasPrefix(versionStr, "v") {
-			versionStr = versionStr[1:]
-		}
+		versionStr := strings.TrimPrefix(release.TagName, "v")
 
 		marker := "  "
 		dateStr := release.CreatedAt.Format("2006-01-02")
@@ -265,19 +261,14 @@ func (um *UpgradeManager) getLatestVersion() (string, error) {
 	// Find latest non-prerelease
 	for _, release := range releases {
 		if !release.Prerelease {
-			version := release.TagName
-			if strings.HasPrefix(version, "v") {
-				version = version[1:]
-			}
+			version := strings.TrimPrefix(release.TagName, "v")
 			return version, nil
 		}
 	}
 
 	// If all are prereleases, return the first one
 	version := releases[0].TagName
-	if strings.HasPrefix(version, "v") {
-		version = version[1:]
-	}
+	version = strings.TrimPrefix(version, "v")
 	return version, nil
 }
 

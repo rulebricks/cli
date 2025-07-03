@@ -260,7 +260,7 @@ func (s *MonitoringStep) Name() string {
 }
 
 func (s *MonitoringStep) Description() string {
-	return "Install Prometheus and Grafana monitoring stack"
+	return "Configure monitoring infrastructure"
 }
 
 func (s *MonitoringStep) Required() bool {
@@ -280,23 +280,49 @@ func (s *MonitoringStep) Execute(ctx context.Context, d *Deployer) error {
 		return fmt.Errorf("Kubernetes operations not initialized")
 	}
 
-	// Generate monitoring credentials
-	grafanaPassword := generateSecurePassword()
-
-	// Install Prometheus and Grafana
-	if err := d.k8sOps.InstallPrometheus(ctx, grafanaPassword); err != nil {
-		return fmt.Errorf("failed to install monitoring stack: %w", err)
+	// Check monitoring mode
+	mode := d.config.Monitoring.Mode
+	if mode == "" {
+		mode = "local" // Default to local
 	}
 
-	// Update state with monitoring info
-	if d.state != nil {
-		d.state.Monitoring = MonitoringState{
-			Enabled:         true,
-			Provider:        "prometheus",
-			GrafanaURL:      fmt.Sprintf("https://grafana.%s", d.config.Project.Domain),
-			GrafanaUsername: "admin",
-			GrafanaPassword: grafanaPassword,
+	switch mode {
+	case "local":
+		// Install full monitoring stack
+		grafanaPassword := generateSecurePassword()
+		if err := d.k8sOps.InstallPrometheus(ctx, grafanaPassword, nil); err != nil {
+			return fmt.Errorf("failed to install monitoring stack: %w", err)
 		}
+
+		// Update state with monitoring info
+		if d.state != nil {
+			d.state.Monitoring = MonitoringState{
+				Enabled:         true,
+				Provider:        "prometheus",
+				GrafanaURL:      fmt.Sprintf("https://grafana.%s", d.config.Project.Domain),
+				GrafanaUsername: "admin",
+				GrafanaPassword: grafanaPassword,
+			}
+		}
+
+	case "remote":
+		// Install Prometheus with remote write configuration (no Grafana)
+		remoteWriteConfig := d.prepareRemoteWriteConfig()
+
+		if err := d.k8sOps.InstallPrometheusWithRemoteWrite(ctx, "", remoteWriteConfig, false); err != nil {
+			return fmt.Errorf("failed to install Prometheus with remote write: %w", err)
+		}
+
+		// Update state
+		if d.state != nil {
+			d.state.Monitoring = MonitoringState{
+				Enabled:  true,
+				Provider: d.config.Monitoring.Remote.Provider,
+			}
+		}
+
+	default:
+		return fmt.Errorf("unknown monitoring mode: %s", mode)
 	}
 
 	return nil
@@ -307,6 +333,95 @@ func (s *MonitoringStep) Rollback(ctx context.Context, d *Deployer) error {
 		return nil
 	}
 	return d.k8sOps.UninstallPrometheus(ctx)
+}
+
+// prepareRemoteWriteConfig prepares Prometheus remote write configuration
+func (d *Deployer) prepareRemoteWriteConfig() map[string]interface{} {
+	if d.config.Monitoring.Remote == nil {
+		return nil
+	}
+
+	remoteWriteConfigs := []map[string]interface{}{}
+
+	switch d.config.Monitoring.Remote.Provider {
+	case "prometheus", "grafana-cloud", "custom":
+		if pw := d.config.Monitoring.Remote.PrometheusWrite; pw != nil {
+			config := map[string]interface{}{
+				"url": pw.URL,
+			}
+
+			// Add authentication
+			if pw.Username != "" && pw.PasswordFrom != "" {
+				password := d.secrets.GetSecret(pw.PasswordFrom)
+				config["basicAuth"] = map[string]interface{}{
+					"username": pw.Username,
+					"password": password,
+				}
+			} else if pw.BearerTokenFrom != "" {
+				token := d.secrets.GetSecret(pw.BearerTokenFrom)
+				config["bearerToken"] = token
+			}
+
+			// Add custom headers
+			if len(pw.Headers) > 0 {
+				config["headers"] = pw.Headers
+			}
+
+			// Add relabel configs
+			if len(pw.WriteRelabelConfigs) > 0 {
+				relabelConfigs := []map[string]interface{}{}
+				for _, rc := range pw.WriteRelabelConfigs {
+					relabelConfig := map[string]interface{}{}
+					if len(rc.SourceLabels) > 0 {
+						relabelConfig["sourceLabels"] = rc.SourceLabels
+					}
+					if rc.Separator != "" {
+						relabelConfig["separator"] = rc.Separator
+					}
+					if rc.TargetLabel != "" {
+						relabelConfig["targetLabel"] = rc.TargetLabel
+					}
+					if rc.Regex != "" {
+						relabelConfig["regex"] = rc.Regex
+					}
+					if rc.Replacement != "" {
+						relabelConfig["replacement"] = rc.Replacement
+					}
+					if rc.Action != "" {
+						relabelConfig["action"] = rc.Action
+					}
+					relabelConfigs = append(relabelConfigs, relabelConfig)
+				}
+				config["writeRelabelConfigs"] = relabelConfigs
+			}
+
+			remoteWriteConfigs = append(remoteWriteConfigs, config)
+		}
+
+	case "newrelic":
+		if nr := d.config.Monitoring.Remote.NewRelic; nr != nil {
+			licenseKey := d.secrets.GetSecret(nr.LicenseKeyFrom)
+			// New Relic endpoints by region
+			url := "https://metric-api.newrelic.com/prometheus/v1/write"
+			if nr.Region == "EU" {
+				url = "https://metric-api.eu.newrelic.com/prometheus/v1/write"
+			}
+			remoteWriteConfigs = append(remoteWriteConfigs, map[string]interface{}{
+				"url": url,
+				"headers": map[string]string{
+					"X-License-Key": licenseKey,
+				},
+			})
+		}
+	}
+
+	if len(remoteWriteConfigs) > 0 {
+		return map[string]interface{}{
+			"remoteWrite": remoteWriteConfigs,
+		}
+	}
+
+	return nil
 }
 
 // LoggingStep installs centralized logging
@@ -519,7 +634,19 @@ func (s *DNSVerificationStep) Execute(ctx context.Context, d *Deployer) error {
 		fmt.Printf("   Value: %s\n\n", endpoint)
 	}
 
-	if d.config.Monitoring.Enabled && d.config.Monitoring.Provider == "prometheus" {
+	// Check if Grafana is enabled based on monitoring mode
+	includeGrafana := false
+	if d.config.Monitoring.Enabled {
+		mode := d.config.Monitoring.Mode
+		if mode == "" {
+			mode = "local"
+		}
+		if mode == "local" {
+			includeGrafana = true
+		}
+	}
+
+	if includeGrafana {
 		fmt.Printf("3. Grafana dashboard:\n")
 		fmt.Printf("   Type:  CNAME\n")
 		fmt.Printf("   Name:  grafana.%s\n", d.config.Project.Domain)
@@ -531,7 +658,7 @@ func (s *DNSVerificationStep) Execute(ctx context.Context, d *Deployer) error {
 	if d.config.Database.Type == "self-hosted" {
 		domains = append(domains, fmt.Sprintf("supabase.%s", d.config.Project.Domain))
 	}
-	if d.config.Monitoring.Enabled && d.config.Monitoring.Provider == "prometheus" {
+	if includeGrafana {
 		domains = append(domains, fmt.Sprintf("grafana.%s", d.config.Project.Domain))
 	}
 
@@ -582,7 +709,7 @@ func (s *DNSVerificationStep) Execute(ctx context.Context, d *Deployer) error {
 
 			if resolved {
 				resolvedDomains[domain] = true
-				d.progress.Success("%s resolved successfully", domain)
+				// d.progress.Success("%s resolved successfully", domain)
 			} else {
 				allResolved = false
 				pendingCount++
@@ -718,7 +845,19 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 
 	var sans []string
 	// Add monitoring domain if enabled
-	if d.config.Monitoring.Enabled && d.config.Monitoring.Provider == "prometheus" {
+	// Check if Grafana is enabled based on monitoring mode
+	includeGrafana := false
+	if d.config.Monitoring.Enabled {
+		mode := d.config.Monitoring.Mode
+		if mode == "" {
+			mode = "local"
+		}
+		if mode == "local" {
+			includeGrafana = true
+		}
+	}
+
+	if includeGrafana {
 		sans = append(sans, fmt.Sprintf("grafana.%s", d.config.Project.Domain))
 	}
 	// Add Supabase domain if self-hosted

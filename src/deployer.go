@@ -213,7 +213,7 @@ func (d *Deployer) Execute() error {
 	d.displayConnectionInfo()
 
 	duration := time.Since(startTime)
-	d.progress.Success("\nDeployment completed successfully in %s", formatDuration(duration))
+	d.progress.Success("Deployment completed successfully in %s", formatDuration(duration))
 
 	return nil
 }
@@ -497,7 +497,15 @@ func (d *Deployer) confirmDeployment() bool {
 	fmt.Printf("  • Database: %s\n", d.config.Database.Type)
 
 	if d.config.Monitoring.Enabled {
-		fmt.Println("  • Monitoring: enabled")
+		mode := d.config.Monitoring.Mode
+		if mode == "" {
+			mode = "local"
+		}
+		fmt.Printf("  • Monitoring: %s", mode)
+		if mode == "remote" && d.config.Monitoring.Remote != nil {
+			fmt.Printf(" (%s)", d.config.Monitoring.Remote.Provider)
+		}
+		fmt.Println()
 	}
 
 	fmt.Printf("\nContinue? (y/N): ")
@@ -625,6 +633,27 @@ func (d *Deployer) saveState() error {
 
 // displayConnectionInfo shows connection details after deployment
 func (d *Deployer) displayConnectionInfo() {
+	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
+	// Print the welcome message with ASCII art
+	color.New(color.Bold, color.FgGreen).Printf(`
+%s
+
+                    ______
+                  ⟋      ⟋|
+                  ██████  |
+                  ██████  |_____
+                  ██████ ⟋     ⟋|
+                ⟋     ⟋ ██████  |
+                ██████  ██████  |
+                ██████  ██████⟋
+                ██████⟋
+
+                   Rulebricks
+
+%s
+
+`, strings.Repeat("=", 50), strings.Repeat("=", 50));
+
 	fmt.Println("\n" + strings.Repeat("=", 60))
 	color.Green("🎉 Deployment Complete!")
 	fmt.Println(strings.Repeat("=", 60))
@@ -640,11 +669,31 @@ func (d *Deployer) displayConnectionInfo() {
 		fmt.Printf("   Password: %s\n", d.state.Database.DashboardPassword)
 	}
 
-	if d.config.Monitoring.Enabled && d.config.Monitoring.Provider == "prometheus" && d.state != nil {
-		fmt.Printf("\n📈 Grafana Dashboard:\n")
-		fmt.Printf("   URL: https://grafana.%s\n", d.config.Project.Domain)
-		fmt.Printf("   Username: admin\n")
-		fmt.Printf("   Password: %s\n", d.state.Monitoring.GrafanaPassword)
+	if d.config.Monitoring.Enabled && d.state != nil {
+		mode := d.config.Monitoring.Mode
+		if mode == "" {
+			mode = "local"
+		}
+
+		switch mode {
+		case "local":
+			if d.state.Monitoring.GrafanaPassword != "" {
+				fmt.Printf("\n📈 Grafana Dashboard:\n")
+				fmt.Printf("   URL: https://grafana.%s\n", d.config.Project.Domain)
+				fmt.Printf("   Username: admin\n")
+				fmt.Printf("   Password: %s\n", d.state.Monitoring.GrafanaPassword)
+			}
+
+		case "remote":
+			fmt.Printf("\n📈 Monitoring:\n")
+			fmt.Printf("   Mode: Remote\n")
+			if d.config.Monitoring.Remote != nil {
+				fmt.Printf("   Provider: %s\n", d.config.Monitoring.Remote.Provider)
+				fmt.Printf("   Metrics are being sent to your external monitoring system\n")
+			}
+
+
+		}
 	}
 
 	fmt.Printf("\n💾 State saved to: .rulebricks-state.yaml\n")
@@ -652,6 +701,7 @@ func (d *Deployer) displayConnectionInfo() {
 	fmt.Printf("   1. Visit https://%s/auth/signup to create your account\n", d.config.Project.Domain)
 	fmt.Printf("   2. Check 'rulebricks status' to monitor your deployment\n")
 	fmt.Printf("   3. Use 'rulebricks logs' to view application logs\n")
+	fmt.Printf("   4. Use 'rulebricks upgrade' to find & install new application versions\n")
 
 	// Check if logging requires IAM setup
 	if d.config.Logging.Enabled && d.config.Logging.Vector != nil && d.config.Logging.Vector.Sink != nil {
@@ -660,20 +710,14 @@ func (d *Deployer) displayConnectionInfo() {
 
 		switch d.config.Logging.Vector.Sink.Type {
 		case "aws_s3":
-			if setupIAM, ok := d.config.Logging.Vector.Sink.Config["setup_iam"].(bool); ok && setupIAM {
-				needsIAMSetup = true
-				setupCommand = "rulebricks vector setup-s3"
-			}
+			needsIAMSetup = true
+			setupCommand = "rulebricks vector setup-s3"
 		case "gcp_cloud_storage":
-			if setupIAM, ok := d.config.Logging.Vector.Sink.Config["setup_iam"].(bool); ok && setupIAM {
-				needsIAMSetup = true
-				setupCommand = "rulebricks vector setup-gcs"
-			}
+			needsIAMSetup = true
+			setupCommand = "rulebricks vector setup-gcs"
 		case "azure_blob":
-			if setupIAM, ok := d.config.Logging.Vector.Sink.Config["setup_iam"].(bool); ok && setupIAM {
-				needsIAMSetup = true
-				setupCommand = "rulebricks vector setup-azure"
-			}
+			needsIAMSetup = true
+			setupCommand = "rulebricks vector setup-azure"
 		}
 
 		if needsIAMSetup {
