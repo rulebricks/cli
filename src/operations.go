@@ -1952,17 +1952,14 @@ func (so *SupabaseOperations) GetJWTSecret() string {
 // GetDatabaseState returns the current database state
 func (so *SupabaseOperations) GetDatabaseState() DatabaseState {
 	state := DatabaseState{
-		Type:              so.config.Database.Type,
-		Provider:          so.config.Database.Provider,
-		URL:               GetDatabaseURL(so.config, so.dbPassword),
-		AnonKey:           so.anonKey,
-		ServiceKey:        so.serviceKey,
-		DashboardPassword: so.dashboardPass,
-		DashboardUsername: "supabase",
-		DashboardURL:      fmt.Sprintf("https://supabase.%s", so.config.Project.Domain),
-		JWTSecret:         so.jwtSecret,
-		DBPassword:        so.dbPassword,
-		Internal:          so.config.Database.Type == "self-hosted",
+		Type:       so.config.Database.Type,
+		Provider:   so.config.Database.Provider,
+		URL:        GetDatabaseURL(so.config, so.dbPassword, so.projectRef),
+		AnonKey:    so.anonKey,
+		ServiceKey: so.serviceKey,
+		JWTSecret:  so.jwtSecret,
+		DBPassword: so.dbPassword,
+		Internal:   so.config.Database.Type == "self-hosted",
 	}
 
 	// Set database connection details based on type
@@ -1974,18 +1971,31 @@ func (so *SupabaseOperations) GetDatabaseState() DatabaseState {
 			state.PostgresDatabase = so.config.Database.External.Database
 			state.PostgresUsername = so.config.Database.External.Username
 		}
+		// External databases don't have a Supabase dashboard
+		state.DashboardURL = ""
+		state.DashboardUsername = ""
+		state.DashboardPassword = ""
 	case "managed":
 		// For managed Supabase, use the project reference
 		state.PostgresHost = fmt.Sprintf("%s.supabase.co", so.projectRef)
 		state.PostgresPort = 5432
 		state.PostgresDatabase = "postgres"
 		state.PostgresUsername = "postgres"
+		// Managed deployments use Supabase's web dashboard
+		state.DashboardURL = fmt.Sprintf("https://supabase.com/dashboard/project/%s", so.projectRef)
+		// No dashboard credentials for managed deployments
+		state.DashboardUsername = ""
+		state.DashboardPassword = ""
 	default:
 		// For self-hosted
 		state.PostgresHost = "supabase-db." + so.config.GetNamespace("supabase")
 		state.PostgresPort = 5432
 		state.PostgresDatabase = "postgres"
 		state.PostgresUsername = "postgres"
+		// Self-hosted deployments have their own dashboard
+		state.DashboardURL = fmt.Sprintf("https://supabase.%s", so.config.Project.Domain)
+		state.DashboardUsername = "supabase"
+		state.DashboardPassword = so.dashboardPass
 	}
 
 	return state
@@ -2960,9 +2970,11 @@ func (so *SupabaseOperations) PushDatabaseSchema(dryRun bool) error {
 	if dryRun {
 		args = append(args, "--dry-run")
 	}
-	args = append(args, "--project-ref", so.projectRef)
+
+	args = append(args, "--include-all")
 
 	cmd := exec.Command("supabase", args...)
+	cmd.Stdin = strings.NewReader("Y\n")
 	cmd.Dir = supabaseDir
 
 	return cmd.Run()

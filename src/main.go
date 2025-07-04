@@ -123,7 +123,18 @@ var statusCmd = &cobra.Command{
 			return fmt.Errorf("failed to load configuration: %w", err)
 		}
 
-		checker := NewStatusChecker(config)
+		// Load deployment state if available
+		var state *DeploymentState
+		statePath := ".rulebricks-state.yaml"
+		if _, err := os.Stat(statePath); err == nil {
+			data, err := os.ReadFile(statePath)
+			if err == nil {
+				state = &DeploymentState{}
+				yaml.Unmarshal(data, state)
+			}
+		}
+
+		checker := NewStatusChecker(config, state)
 		status, err := checker.CheckAll()
 		if err != nil {
 			return fmt.Errorf("failed to check status: %w", err)

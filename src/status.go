@@ -15,13 +15,15 @@ type StatusChecker struct {
 	config   *Config
 	k8sOps   *KubernetesOperations
 	progress *ProgressIndicator
+	state    *DeploymentState
 }
 
 // NewStatusChecker creates a new status checker
-func NewStatusChecker(config *Config) *StatusChecker {
+func NewStatusChecker(config *Config, state *DeploymentState) *StatusChecker {
 	return &StatusChecker{
 		config:   config,
 		progress: NewProgressIndicator(false),
+		state:    state,
 	}
 }
 
@@ -169,7 +171,12 @@ func (checker *StatusChecker) checkManagedDatabase(status *DeploymentStatus) {
 	// For managed Supabase, we assume it's available if configured
 	status.Database.Available = true
 	status.Database.Provider = "Supabase"
-	if checker.config.Database.Supabase != nil {
+
+	// Use the actual project reference from state if available
+	if checker.state != nil && checker.state.Database.PostgresHost != "" {
+		status.Database.ExternalEndpoint = fmt.Sprintf("https://%s", checker.state.Database.PostgresHost)
+	} else if checker.config.Database.Supabase != nil {
+		// Fallback to config project name
 		status.Database.ExternalEndpoint = fmt.Sprintf("https://%s.supabase.co", checker.config.Database.Supabase.ProjectName)
 	}
 }

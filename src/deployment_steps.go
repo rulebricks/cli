@@ -1333,6 +1333,11 @@ func (d *Deployer) getDatabaseURL() string {
 func (d *Deployer) getSupabaseURL() string {
 	switch d.config.Database.Type {
 	case "managed":
+		// Use the actual project reference from the database state
+		if d.state.Database.PostgresHost != "" {
+			return fmt.Sprintf("https://%s", d.state.Database.PostgresHost)
+		}
+		// Fallback to config project name (though this should not happen after database deployment)
 		return fmt.Sprintf("https://%s.supabase.co", d.config.Database.Supabase.ProjectName)
 	case "self-hosted", "external":
 		return fmt.Sprintf("https://supabase.%s", d.config.Project.Domain)

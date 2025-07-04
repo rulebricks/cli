@@ -676,11 +676,15 @@ func (d *Deployer) displayConnectionInfo() {
 	fmt.Printf("   URL: https://%s\n", d.config.Project.Domain)
 	fmt.Printf("   Admin Email: %s\n", d.config.Project.Email)
 
-	if d.config.Database.Type == "self-hosted" && d.state != nil {
+	if d.state != nil && d.state.Database.DashboardURL != "" {
 		fmt.Printf("\n📊 Supabase Dashboard:\n")
-		fmt.Printf("   URL: https://supabase.%s\n", d.config.Project.Domain)
-		fmt.Printf("   Username: supabase\n")
-		fmt.Printf("   Password: %s\n", d.state.Database.DashboardPassword)
+		fmt.Printf("   URL: %s\n", d.state.Database.DashboardURL)
+		if d.state.Database.DashboardUsername != "" {
+			fmt.Printf("   Username: %s\n", d.state.Database.DashboardUsername)
+		}
+		if d.state.Database.DashboardPassword != "" {
+			fmt.Printf("   Password: %s\n", d.state.Database.DashboardPassword)
+		}
 	}
 
 	if d.config.Monitoring.Enabled && d.state != nil {
