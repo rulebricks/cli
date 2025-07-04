@@ -484,7 +484,7 @@ func (d *Deployer) loadSecrets() error {
 	}
 
 	// Email credentials
-	if d.config.Email.Provider != "" && d.config.Email.SMTP != nil {
+	if d.config.Email.SMTP != nil {
 		password, err := resolveSecretValue(d.config.Email.SMTP.PasswordFrom)
 		if err != nil {
 			return fmt.Errorf("failed to load SMTP password: %w", err)
@@ -666,7 +666,6 @@ func (d *Deployer) displayConnectionInfo() {
 
                [Welcome]
 
-
 `);
 
 	fmt.Println("\n" + strings.Repeat("=", 60))
@@ -742,7 +741,7 @@ func (d *Deployer) displayConnectionInfo() {
 		}
 	}
 
-	if d.config.Email.Provider == "" {
+	if d.config.Email.SMTP == nil {
 		color.Yellow("\n⚠️  Email not configured. Configure email to enable notifications.\n")
 	}
 

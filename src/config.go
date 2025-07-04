@@ -117,7 +117,6 @@ type PoolingConfig struct {
 
 // EmailConfig defines email provider settings
 type EmailConfig struct {
-	Provider  string             `yaml:"provider"`
 	From      string             `yaml:"from"`
 	FromName  string             `yaml:"from_name,omitempty"`
 	SMTP      *SMTPConfig        `yaml:"smtp,omitempty"`
@@ -389,12 +388,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("unsupported database type: %s (must be managed, self-hosted, or external)", c.Database.Type)
 	}
 
-	// Validate email configuration - all providers use SMTP
-	switch c.Email.Provider {
-	case "smtp", "sendgrid", "mailgun", "ses", "resend":
-		if c.Email.SMTP == nil {
-			return fmt.Errorf("email.smtp configuration is required for %s provider", c.Email.Provider)
-		}
+	// Validate email configuration - check if SMTP is configured
+	if c.Email.SMTP != nil {
+		// Validate SMTP configuration
 		if c.Email.SMTP.Host == "" {
 			return fmt.Errorf("email.smtp.host is required")
 		}
@@ -407,10 +403,6 @@ func (c *Config) Validate() error {
 		if c.Email.SMTP.PasswordFrom == "" {
 			return fmt.Errorf("email.smtp.password_from is required")
 		}
-	case "":
-		// Email is optional, no validation needed
-	default:
-		return fmt.Errorf("unsupported email provider: %s", c.Email.Provider)
 	}
 
 	// Validate Kubernetes configuration
@@ -473,6 +465,8 @@ func (c *Config) Validate() error {
 
 // ApplyDefaults applies default values to the configuration
 func (c *Config) ApplyDefaults() {
+	// Version should already be set to CLI version by InitWizard
+	// Only set a default if somehow still empty
 	if c.Version == "" {
 		c.Version = "1.0"
 	}

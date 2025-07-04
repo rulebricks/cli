@@ -20,7 +20,7 @@ func NewInitWizard(nonInteractive bool) *InitWizard {
 	return &InitWizard{
 		nonInteractive: nonInteractive,
 		scanner:        bufio.NewScanner(os.Stdin),
-		config:         &Config{Version: "1.0"},
+		config:         &Config{Version: version},
 	}
 }
 
@@ -123,11 +123,29 @@ func (w *InitWizard) configureProject() error {
 	// Email
 	w.config.Project.Email = w.promptString("Admin email", "", validateEmail)
 
-	// License key
+	// License key (collected here for future license validation during deployment)
 	w.config.Project.License = w.promptPassword("Rulebricks license key")
 
-	// Project version (uses CLI version)
-	w.config.Project.Version = version
+	// Fetch the latest version to use as default
+	fmt.Println("Fetching available Rulebricks versions...")
+	latestVersion := "1.0.0" // fallback default
+
+	// Create a chart manager to fetch versions
+	chartManager, err := NewChartManager("", false)
+	if err == nil {
+		if fetchedVersion, err := chartManager.GetLatestVersion(); err == nil {
+			latestVersion = fetchedVersion
+			color.Green("✓ Latest version: %s", latestVersion)
+		} else {
+			color.Yellow("⚠️  Could not fetch latest version, using fallback: %s", latestVersion)
+		}
+	} else {
+		color.Yellow("⚠️  Could not initialize version fetcher, using fallback: %s", latestVersion)
+	}
+
+	// Project version (Rulebricks application version) - always explicit
+	fmt.Println("\nNote: Explicit version selection ensures reproducible deployments")
+	w.config.Project.Version = w.promptString("Rulebricks version to deploy", latestVersion, nil)
 
 	return nil
 }
@@ -294,27 +312,33 @@ func (w *InitWizard) configureReplicas() {
 func (w *InitWizard) configureEmail() error {
 	color.New(color.Bold).Println("\n📧 Email Configuration")
 
-	// Email provider
-	providers := []string{"smtp", "sendgrid", "mailgun", "ses", "resend"}
-	w.config.Email.Provider = w.promptChoice("Email provider", providers, "smtp")
+	// Email provider (for defaults only, not stored in config)
+	providers := []string{"SendGrid", "Mailgun", "AWS SES", "Resend", "Other (Custom SMTP)"}
+	emailProvider := w.promptChoice("Email provider", providers, "SendGrid")
 
 	// Common settings
-	w.config.Email.From = w.promptString("From email", fmt.Sprintf("noreply@%s", w.config.Project.Domain), validateEmail)
-	w.config.Email.FromName = w.promptString("From name", w.config.Project.Name, nil)
+	// Extract root domain from project domain (projectname.rootdomain -> rootdomain)
+	rootDomain := w.config.Project.Domain
+	if idx := strings.Index(rootDomain, "."); idx != -1 {
+		rootDomain = rootDomain[idx+1:]
+	}
+	w.config.Email.From = w.promptString("From email", fmt.Sprintf("noreply@%s", rootDomain), validateEmail)
+	w.config.Email.FromName = w.promptString("From name", "Rulebricks", nil)
 
 	// Provider-specific settings - all providers use SMTP
 	w.config.Email.SMTP = &SMTPConfig{}
 
-	switch w.config.Email.Provider {
-	case "smtp":
+	switch emailProvider {
+	case "Other (Custom SMTP)":
+		fmt.Println("\nCustom SMTP configuration:")
 		w.config.Email.SMTP.Host = w.promptString("SMTP host", "", nil)
 		w.config.Email.SMTP.Port = w.promptInt("SMTP port", 587, 1, 65535)
 		w.config.Email.SMTP.Username = w.promptString("SMTP username", "", nil)
 		w.config.Email.SMTP.PasswordFrom = w.promptString("Password source", "env:SMTP_PASSWORD", nil)
-		w.config.Email.SMTP.Encryption = w.promptChoice("Encryption", []string{"tls", "ssl", "none"}, "tls")
+		w.config.Email.SMTP.Encryption = w.promptChoice("Encryption", []string{"starttls", "ssl", "none"}, "starttls")
 		w.config.Email.SMTP.AdminEmail = w.promptString("Admin email (optional)", "", nil)
 
-	case "sendgrid":
+	case "SendGrid":
 		fmt.Println("\nSendGrid SMTP configuration:")
 		fmt.Println("Note: Use your SendGrid API key as the password")
 		fmt.Println("The username is always 'apikey' for SendGrid")
@@ -322,9 +346,10 @@ func (w *InitWizard) configureEmail() error {
 		w.config.Email.SMTP.Port = 587
 		w.config.Email.SMTP.Username = "apikey"
 		w.config.Email.SMTP.PasswordFrom = w.promptString("SendGrid API key source", "env:SENDGRID_API_KEY", nil)
-		w.config.Email.SMTP.Encryption = "tls"
+		w.config.Email.SMTP.Encryption = "starttls"
+		w.config.Email.SMTP.AdminEmail = w.config.Email.From
 
-	case "mailgun":
+	case "Mailgun":
 		fmt.Println("\nMailgun SMTP configuration:")
 		fmt.Println("Note: Find your SMTP credentials in Mailgun Dashboard > Domain Settings > SMTP credentials")
 		fmt.Println("Username format is typically: postmaster@your-domain.mailgun.org")
@@ -332,9 +357,10 @@ func (w *InitWizard) configureEmail() error {
 		w.config.Email.SMTP.Port = 587
 		w.config.Email.SMTP.Username = w.promptString("Mailgun SMTP username", "", nil)
 		w.config.Email.SMTP.PasswordFrom = w.promptString("Mailgun SMTP password source", "env:MAILGUN_SMTP_PASSWORD", nil)
-		w.config.Email.SMTP.Encryption = "tls"
+		w.config.Email.SMTP.Encryption = "starttls"
+		w.config.Email.SMTP.AdminEmail = w.config.Email.From
 
-	case "ses":
+	case "AWS SES":
 		fmt.Println("\nAWS SES SMTP configuration:")
 		fmt.Println("Note: Create SMTP credentials in AWS Console > SES > SMTP Settings > Create SMTP credentials")
 		fmt.Println("These are different from your AWS access keys!")
@@ -346,9 +372,10 @@ func (w *InitWizard) configureEmail() error {
 		w.config.Email.SMTP.Port = 587
 		w.config.Email.SMTP.Username = w.promptString("SES SMTP username", "", nil)
 		w.config.Email.SMTP.PasswordFrom = w.promptString("SES SMTP password source", "env:SES_SMTP_PASSWORD", nil)
-		w.config.Email.SMTP.Encryption = "tls"
+		w.config.Email.SMTP.Encryption = "starttls"
+		w.config.Email.SMTP.AdminEmail = w.config.Email.From
 
-	case "resend":
+	case "Resend":
 		fmt.Println("\nResend SMTP configuration:")
 		fmt.Println("Note: Use your Resend API key as the password")
 		fmt.Println("The username is always 'resend' for Resend")
@@ -356,7 +383,8 @@ func (w *InitWizard) configureEmail() error {
 		w.config.Email.SMTP.Port = 587
 		w.config.Email.SMTP.Username = "resend"
 		w.config.Email.SMTP.PasswordFrom = w.promptString("Resend API key source", "env:RESEND_API_KEY", nil)
-		w.config.Email.SMTP.Encryption = "tls"
+		w.config.Email.SMTP.Encryption = "starttls"
+		w.config.Email.SMTP.AdminEmail = w.config.Email.From
 	}
 
 	return nil
@@ -534,6 +562,11 @@ func (w *InitWizard) configureOptionalFeatures() error {
 
 	// Performance tuning (mandatory)
 	w.configurePerformance()
+
+	// Advanced settings
+	if w.confirm("Configure advanced settings?", false) {
+		w.configureAdvanced()
+	}
 
 	return nil
 }
@@ -732,6 +765,41 @@ func (w *InitWizard) configurePerformance() {
 	fmt.Printf("  • Storage size: %s\n", w.config.Performance.VolumeLevel)
 }
 
+func (w *InitWizard) configureAdvanced() {
+	color.New(color.Bold).Println("\n🔧 Advanced Configuration")
+
+	// Terraform backend configuration
+	if w.confirm("Configure remote Terraform backend?", false) {
+		w.config.Advanced.Terraform = &TerraformConfig{}
+
+		backendTypes := []string{"s3", "azurerm", "gcs", "remote"}
+		w.config.Advanced.Terraform.Backend = w.promptChoice("Terraform backend type", backendTypes, "s3")
+
+		w.config.Advanced.Terraform.BackendConfig = make(map[string]string)
+
+		switch w.config.Advanced.Terraform.Backend {
+		case "s3":
+			w.config.Advanced.Terraform.BackendConfig["bucket"] = w.promptString("S3 bucket name", "", nil)
+			w.config.Advanced.Terraform.BackendConfig["key"] = w.promptString("State file key", fmt.Sprintf("%s/terraform.tfstate", w.config.Project.Name), nil)
+			w.config.Advanced.Terraform.BackendConfig["region"] = w.promptString("AWS region", w.config.Cloud.Region, nil)
+			if w.confirm("Enable state locking with DynamoDB?", true) {
+				w.config.Advanced.Terraform.BackendConfig["dynamodb_table"] = w.promptString("DynamoDB table name", "terraform-state-lock", nil)
+			}
+		case "azurerm":
+			w.config.Advanced.Terraform.BackendConfig["resource_group_name"] = w.promptString("Resource group name", "", nil)
+			w.config.Advanced.Terraform.BackendConfig["storage_account_name"] = w.promptString("Storage account name", "", nil)
+			w.config.Advanced.Terraform.BackendConfig["container_name"] = w.promptString("Container name", "tfstate", nil)
+			w.config.Advanced.Terraform.BackendConfig["key"] = w.promptString("State file key", fmt.Sprintf("%s.terraform.tfstate", w.config.Project.Name), nil)
+		case "gcs":
+			w.config.Advanced.Terraform.BackendConfig["bucket"] = w.promptString("GCS bucket name", "", nil)
+			w.config.Advanced.Terraform.BackendConfig["prefix"] = w.promptString("State file prefix", w.config.Project.Name, nil)
+		case "remote":
+			w.config.Advanced.Terraform.BackendConfig["organization"] = w.promptString("Terraform Cloud organization", "", nil)
+			w.config.Advanced.Terraform.BackendConfig["workspaces"] = w.promptString("Workspace name", w.config.Project.Name, nil)
+		}
+	}
+}
+
 // UI helper methods
 
 func (w *InitWizard) displayWelcome() {
@@ -763,10 +831,10 @@ func (w *InitWizard) displaySummary() {
 	fmt.Println(strings.Repeat("─", 50))
 	fmt.Printf("Project:    %s\n", w.config.Project.Name)
 	fmt.Printf("Domain:     %s\n", w.config.Project.Domain)
-	fmt.Printf("Version:    %s (CLI version)\n", w.config.Project.Version)
+	fmt.Printf("Version:    %s (Rulebricks version)\n", w.config.Project.Version)
 	fmt.Printf("Cloud:      %s (%s)\n", w.config.Cloud.Provider, w.config.Cloud.Region)
 	fmt.Printf("Database:   %s\n", w.config.Database.Type)
-	fmt.Printf("Email:      %s\n", w.config.Email.Provider)
+	fmt.Printf("Email:      SMTP (%s)\n", w.config.Email.SMTP.Host)
 	fmt.Printf("TLS:        %v\n", w.config.Security.TLS.Enabled)
 	if w.config.Monitoring.Enabled {
 		mode := w.config.Monitoring.Mode

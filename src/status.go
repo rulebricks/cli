@@ -531,14 +531,33 @@ const (
 func (status *DeploymentStatus) Display() {
 	// Header
 	fmt.Println()
-	color.New(color.Bold).Printf("📊 Deployment Status\n")
-	fmt.Printf("Checked at: %s\n", status.Timestamp.Format("2006-01-02 15:04:05"))
-	fmt.Println(strings.Repeat("─", 60))
+	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
 
 	// Overall Health
 	healthIcon := getHealthIcon(status.OverallHealth)
 	healthColor := getHealthColor(status.OverallHealth)
-	fmt.Printf("\nOverall Health: %s %s\n", healthIcon, healthColor(string(status.OverallHealth)))
+
+	// Print the welcome message with ASCII art
+	color.New(color.Bold, getDirectHealthColor(status.OverallHealth)).Printf(`
+
+
+               ⟋ ‾‾‾‾⟋|
+              ██████  |
+              ██████  |
+              ██████ ⟋ ‾‾‾‾⟋|
+            ⟋     ⟋ ██████  |
+           ██████   ██████  |
+           ██████   ██████⟋
+           ██████⟋
+
+              [` + string(status.OverallHealth) + `]
+
+`);
+
+	fmt.Printf("\nStatus: %s %s\n", healthIcon, healthColor(string(status.OverallHealth)))
+	fmt.Printf("As of: %s\n", status.Timestamp.Format("2006-01-02 15:04:05"))
+
+	fmt.Println(strings.Repeat("─", 60))
 
 	// Infrastructure
 	fmt.Printf("\n🏗️  Infrastructure\n")
@@ -644,6 +663,19 @@ func getHealthColor(health HealthState) func(string, ...interface{}) string {
 		return color.RedString
 	default:
 		return color.HiBlackString
+	}
+}
+
+func getDirectHealthColor(health HealthState) color.Attribute {
+	switch health {
+	case HealthHealthy:
+		return color.FgGreen
+	case HealthDegraded:
+		return color.FgYellow
+	case HealthUnhealthy:
+		return color.FgRed
+	default:
+		return color.FgWhite
 	}
 }
 

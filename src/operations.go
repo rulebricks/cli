@@ -1575,6 +1575,11 @@ func (so *SupabaseOperations) deployManaged(ctx context.Context) error {
 		}
 	}
 
+	// Ensure supabase assets are extracted from app image
+	if err := so.EnsureSupabaseAssets(); err != nil {
+		return err
+	}
+
 	// Link the project
 	if err := so.linkProject(); err != nil {
 		return err
@@ -1650,9 +1655,9 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 	// Generate analytics key
 	analyticsKey := generateRandomString(32)
 
-	// Create SMTP password if needed (all email providers use SMTP)
+	// Create SMTP password if needed
 	smtpPassword := ""
-	if so.options.Secrets != nil && so.config.Email.Provider != "" {
+	if so.options.Secrets != nil && so.config.Email.SMTP != nil {
 		smtpPassword = so.options.Secrets.SMTPPassword
 	}
 
@@ -1876,7 +1881,7 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 	// Use the chart version or default to latest
 	chartVersion := so.options.ChartVersion
 	if chartVersion == "" {
-		chartVersion = "latest"
+		chartVersion = so.config.Project.Version
 	}
 
 	// Pull the Supabase chart using ChartManager
@@ -2330,7 +2335,7 @@ func (so *SupabaseOperations) createProject(orgID string) error {
 	// Build command
 	args := []string{
 		"projects", "create", so.config.Database.Supabase.ProjectName,
-		"--db-pass", so.dbPassword,
+		"--db-password", so.dbPassword,
 		"--org-id", orgID,
 	}
 
@@ -2341,6 +2346,7 @@ func (so *SupabaseOperations) createProject(orgID string) error {
 	cmd := exec.Command("supabase", args...)
 	output, err := cmd.Output()
 	if err != nil {
+		fmt.Printf("With Supabase CLI args: %v\n", args)
 		return fmt.Errorf("failed to create project: %w", err)
 	}
 
@@ -2404,8 +2410,8 @@ func (so *SupabaseOperations) createAuthEnvironment() map[string]interface{} {
 		"GOTRUE_MAILER_SUBJECTS_EMAIL_CHANGE":  "Confirm Email Change",
 	}
 
-	// Configure email settings based on provider
-	if so.config.Email.Provider != "" {
+	// Configure email settings if SMTP is configured
+	if so.config.Email.SMTP != nil {
 		env["GOTRUE_EXTERNAL_EMAIL_ENABLED"] = "true"
 		env["GOTRUE_MAILER_AUTOCONFIRM"] = "false"
 
@@ -2425,7 +2431,7 @@ func (so *SupabaseOperations) createAuthEnvironment() map[string]interface{} {
 	}
 
 	// Add email template configuration when email is enabled
-	if so.config.Email.Provider != "" {
+	if so.config.Email.SMTP != nil {
 		// Always set template URLs
 		env["GOTRUE_MAILER_TEMPLATES_INVITE"] = emailTemplates.TemplateInvite
 		env["GOTRUE_MAILER_TEMPLATES_CONFIRMATION"] = emailTemplates.TemplateConfirmation
@@ -2454,8 +2460,8 @@ func (so *SupabaseOperations) createAuthEnvironment() map[string]interface{} {
 
 // createSMTPConfig creates SMTP configuration
 func (so *SupabaseOperations) createSMTPConfig() map[string]interface{} {
-	// If no email provider is configured or SMTP config is missing, disable email
-	if so.config.Email.Provider == "" || so.config.Email.SMTP == nil {
+	// If SMTP config is missing, disable email
+	if so.config.Email.SMTP == nil {
 		return map[string]interface{}{
 			"enabled": false,
 		}
@@ -2470,7 +2476,7 @@ func (so *SupabaseOperations) createSMTPConfig() map[string]interface{} {
 		"password": so.options.Secrets.SMTPPassword,
 		"from":     so.config.Email.From,
 		"fromName": so.config.Email.FromName,
-		"secure":   so.config.Email.SMTP.Encryption == "ssl",
+		"secure":   so.config.Email.SMTP.Encryption == "ssl", // false for starttls, true for ssl
 		"auth":     true,
 	}
 }
@@ -2506,7 +2512,7 @@ func (so *SupabaseOperations) deploySelfHostedWithExternalDB(ctx context.Context
 	// Pull the Supabase chart
 	chartVersion := so.options.ChartVersion
 	if chartVersion == "" {
-		chartVersion = "latest"
+		chartVersion = so.config.Project.Version
 	}
 
 	// Pull the Supabase chart using ChartManager
@@ -2568,9 +2574,9 @@ func (so *SupabaseOperations) createExternalDBValues() map[string]interface{} {
 	// Start with the same base configuration as self-hosted
 	analyticsKey := generateRandomString(32)
 
-	// Create SMTP password if needed (all email providers use SMTP)
+	// Create SMTP password if needed
 	smtpPassword := ""
-	if so.options.Secrets != nil && so.config.Email.Provider != "" {
+	if so.options.Secrets != nil && so.config.Email.SMTP != nil {
 		smtpPassword = so.options.Secrets.SMTPPassword
 	}
 

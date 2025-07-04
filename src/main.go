@@ -65,7 +65,7 @@ var deployCmd = &cobra.Command{
 		// Get chart version
 		chartVersion, _ := cmd.Flags().GetString("chart-version")
 		if chartVersion == "" {
-			chartVersion = "latest"
+			chartVersion = config.Project.Version
 		}
 
 		// Create and execute deployment

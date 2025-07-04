@@ -717,7 +717,7 @@ func (s *DNSVerificationStep) Execute(ctx context.Context, d *Deployer) error {
 		}
 
 		if allResolved {
-			d.progress.Success("All DNS records have propagated successfully!")
+			d.progress.Success("\rAll DNS records have propagated successfully!")
 			break
 		}
 
@@ -1307,7 +1307,6 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 
 func (d *Deployer) prepareEmailConfig() map[string]interface{} {
 	emailConfig := map[string]interface{}{
-		"provider": d.config.Email.Provider,
 		"from":     d.config.Email.From,
 		"fromName": d.config.Email.FromName,
 	}
