@@ -463,14 +463,7 @@ func (d *Deployer) loadSecrets() error {
 	}
 	d.secrets.LicenseKey = licenseKey
 
-	// Database password (if external)
-	if d.config.Database.Type == "external" {
-		password, err := resolveSecretValue(d.config.Database.External.PasswordFrom)
-		if err != nil {
-			return fmt.Errorf("failed to load database password: %w", err)
-		}
-		d.secrets.DBPassword = password
-	}
+
 
 	// For self-hosted Supabase, load from state if available
 	if d.config.Database.Type == "self-hosted" && d.state != nil {

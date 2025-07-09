@@ -79,7 +79,6 @@ type DatabaseConfig struct {
 	Type     string               `yaml:"type"`
 	Provider string               `yaml:"provider,omitempty"`
 	Supabase *SupabaseConfig      `yaml:"supabase,omitempty"`
-	External *ExternalDBConfig    `yaml:"external,omitempty"`
 	Pooling  *PoolingConfig       `yaml:"pooling,omitempty"`
 }
 
@@ -90,23 +89,7 @@ type SupabaseConfig struct {
 	OrgID       string `yaml:"org_id,omitempty"`
 }
 
-// ExternalDBConfig defines external database settings
-type ExternalDBConfig struct {
-	Host         string              `yaml:"host"`
-	Port         int                 `yaml:"port"`
-	Database     string              `yaml:"database"`
-	Username     string              `yaml:"username"`
-	PasswordFrom string              `yaml:"password_from"`
-	SSLMode      string              `yaml:"ssl_mode,omitempty"`
-	Replicas     []ReplicaConfig     `yaml:"replicas,omitempty"`
-}
 
-// ReplicaConfig defines database replica settings
-type ReplicaConfig struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
-	Type string `yaml:"type,omitempty"`
-}
 
 // PoolingConfig defines connection pooling settings
 type PoolingConfig struct {
@@ -374,18 +357,9 @@ func (c *Config) Validate() error {
 		}
 	case "self-hosted":
 		// Self-hosted is valid
-	case "external":
-		if c.Database.External == nil {
-			return fmt.Errorf("database.external configuration is required for external database")
-		}
-		if c.Database.External.Host == "" {
-			return fmt.Errorf("database.external.host is required")
-		}
-		if c.Database.External.Port == 0 {
-			return fmt.Errorf("database.external.port is required")
-		}
+
 	default:
-		return fmt.Errorf("unsupported database type: %s (must be managed, self-hosted, or external)", c.Database.Type)
+		return fmt.Errorf("unsupported database type: %s (must be managed or self-hosted)", c.Database.Type)
 	}
 
 	// Validate email configuration - check if SMTP is configured

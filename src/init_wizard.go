@@ -247,7 +247,7 @@ func (w *InitWizard) configureDatabase() error {
 	color.New(color.Bold).Println("\n🗄️  Database Configuration")
 
 	// Database type
-	dbTypes := []string{"self-hosted", "managed", "external"}
+	dbTypes := []string{"self-hosted", "managed"}
 	w.config.Database.Type = w.promptChoice("Database type", dbTypes, "self-hosted")
 
 	switch w.config.Database.Type {
@@ -264,26 +264,15 @@ func (w *InitWizard) configureDatabase() error {
 		w.config.Database.Supabase.Region = w.promptString("Supabase region", "us-east-1", nil)
 		w.config.Database.Supabase.OrgID = w.promptString("Organization ID (optional)", "", nil)
 
-	case "external":
-		w.config.Database.External = &ExternalDBConfig{}
-		w.config.Database.External.Host = w.promptString("Database host", "", nil)
-		w.config.Database.External.Port = w.promptInt("Database port", 5432, 1, 65535)
-		w.config.Database.External.Database = w.promptString("Database name", "postgres", nil)
-		w.config.Database.External.Username = w.promptString("Database username", "postgres", nil)
-		w.config.Database.External.PasswordFrom = w.promptString("Password source (env:VAR or file:path)", "env:DB_PASSWORD", nil)
-		w.config.Database.External.SSLMode = w.promptChoice("SSL mode", []string{"disable", "require", "verify-ca", "verify-full"}, "require")
 
-		if w.confirm("Configure read replicas?", false) {
-			w.configureReplicas()
-		}
 
 	case "self-hosted":
 		// Self-hosted uses defaults
 		color.Green("✓ Self-hosted Supabase will be deployed with the cluster")
 	}
 
-	// Connection pooling (always enabled for non-managed databases)
-	if w.config.Database.Type != "managed" {
+	// Connection pooling (enabled for self-hosted databases)
+	if w.config.Database.Type == "self-hosted" {
 		w.config.Database.Pooling = &PoolingConfig{
 			Enabled: true,
 			MinSize: 10,
@@ -294,20 +283,7 @@ func (w *InitWizard) configureDatabase() error {
 	return nil
 }
 
-func (w *InitWizard) configureReplicas() {
-	numReplicas := w.promptInt("Number of read replicas", 0, 0, 10)
-	if numReplicas > 0 {
-		w.config.Database.External.Replicas = make([]ReplicaConfig, numReplicas)
-		for i := 0; i < numReplicas; i++ {
-			fmt.Printf("\nReplica %d:\n", i+1)
-			w.config.Database.External.Replicas[i] = ReplicaConfig{
-				Host: w.promptString("  Host", "", nil),
-				Port: w.promptInt("  Port", 5432, 1, 65535),
-				Type: w.promptChoice("  Type", []string{"read", "analytics"}, "read"),
-			}
-		}
-	}
-}
+
 
 func (w *InitWizard) configureEmail() error {
 	color.New(color.Bold).Println("\n📧 Email Configuration")

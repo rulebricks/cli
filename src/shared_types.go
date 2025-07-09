@@ -294,14 +294,6 @@ func GetDatabaseURL(config *Config, password string, projectRef ...string) strin
 	case "self-hosted":
 		return fmt.Sprintf("postgresql://postgres:%s@supabase-db.%s.svc.cluster.local:5432/postgres?sslmode=disable",
 			password, config.GetNamespace("supabase"))
-	case "external":
-		return fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=%s",
-			config.Database.External.Username,
-			password,
-			config.Database.External.Host,
-			config.Database.External.Port,
-			config.Database.External.Database,
-			config.Database.External.SSLMode)
 	case "managed":
 		// Use project reference if provided, otherwise fall back to project name
 		host := config.Database.Supabase.ProjectName

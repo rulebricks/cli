@@ -445,6 +445,8 @@ func (co *CloudOperations) getTerraformVariables() []string {
 	return args
 }
 
+
+
 // KubernetesOperations handles Kubernetes cluster operations
 type KubernetesOperations struct {
 	config    *Config
@@ -1530,8 +1532,6 @@ func (so *SupabaseOperations) Deploy(ctx context.Context) error {
 	case "self-hosted":
 		// Always redeploy self-hosted Supabase to avoid password mismatches
 		return so.deploySelfHosted(ctx)
-	case "external":
-		return so.deploySelfHostedWithExternalDB(ctx)
 	default:
 		return fmt.Errorf("unsupported database type: %s", so.config.Database.Type)
 	}
@@ -1773,7 +1773,7 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 			},
 		},
 		"storage": map[string]interface{}{
-			"enabled": true,
+			"enabled": false,
 			"image": map[string]interface{}{
 				"repository": "supabase/storage-api",
 				"tag":        "v0.46.4",
@@ -1836,7 +1836,7 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 			},
 		},
 		"analytics": map[string]interface{}{
-			"enabled": true,
+			"enabled": false,
 			"image": map[string]interface{}{
 				"repository": "supabase/logflare",
 				"tag":        "1.4.0",
@@ -1844,7 +1844,7 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 			},
 		},
 		"vector": map[string]interface{}{
-			"enabled": true,
+			"enabled": false,
 			"image": map[string]interface{}{
 				"repository": "timberio/vector",
 				"tag":        "0.28.1-alpine",
@@ -1852,12 +1852,7 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 			},
 		},
 		"functions": map[string]interface{}{
-			"enabled": true,
-			"image": map[string]interface{}{
-				"repository": "supabase/edge-runtime",
-				"tag":        "v1.29.1",
-				"pullPolicy": "IfNotPresent",
-			},
+			"enabled": false, // Disable functions as the image doesn't exist
 		},
 	}
 
@@ -1964,17 +1959,6 @@ func (so *SupabaseOperations) GetDatabaseState() DatabaseState {
 
 	// Set database connection details based on type
 	switch so.config.Database.Type {
-	case "external":
-		if so.config.Database.External != nil {
-			state.PostgresHost = so.config.Database.External.Host
-			state.PostgresPort = so.config.Database.External.Port
-			state.PostgresDatabase = so.config.Database.External.Database
-			state.PostgresUsername = so.config.Database.External.Username
-		}
-		// External databases don't have a Supabase dashboard
-		state.DashboardURL = ""
-		state.DashboardUsername = ""
-		state.DashboardPassword = ""
 	case "managed":
 		// For managed Supabase, use the project reference
 		state.PostgresHost = fmt.Sprintf("%s.supabase.co", so.projectRef)
@@ -2034,68 +2018,12 @@ func (so *SupabaseOperations) RunMigrations(ctx context.Context) error {
 	case "self-hosted":
 		// For self-hosted, we need to run migrations manually on the database pod
 		return so.runSelfHostedMigrations(ctx)
-	case "external":
-		// For external DB, we need to run migrations manually
-		return so.RunMigrationsExternal(ctx)
+
 	}
 	return nil
 }
 
-// RunMigrationsExternal runs migrations on an external database
-func (so *SupabaseOperations) RunMigrationsExternal(ctx context.Context) error {
-	fmt.Println("Running migrations on external database...")
 
-	// Ensure Supabase assets are available
-	if err := so.EnsureSupabaseAssets(); err != nil {
-		return fmt.Errorf("failed to ensure Supabase assets: %w", err)
-	}
-
-	// Get database password
-	password, err := resolveSecretValue(so.config.Database.External.PasswordFrom)
-	if err != nil {
-		return fmt.Errorf("failed to resolve database password: %w", err)
-	}
-
-	// Build connection string
-	connStr := fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=%s",
-		so.config.Database.External.Username,
-		password,
-		so.config.Database.External.Host,
-		so.config.Database.External.Port,
-		so.config.Database.External.Database,
-		so.config.Database.External.SSLMode)
-
-	// Get migration files
-	migrationsDir := filepath.Join(so.options.WorkDir, "supabase", "migrations")
-	entries, err := os.ReadDir(migrationsDir)
-	if err != nil {
-		return fmt.Errorf("failed to read migrations directory: %w", err)
-	}
-
-	// Run each migration file
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
-			migrationPath := filepath.Join(migrationsDir, entry.Name())
-			fmt.Printf("  Running migration: %s\n", entry.Name())
-
-			// Read migration file
-			content, err := os.ReadFile(migrationPath)
-			if err != nil {
-				return fmt.Errorf("failed to read migration %s: %w", entry.Name(), err)
-			}
-
-			// Execute using psql
-			cmd := exec.CommandContext(ctx, "psql", connStr, "-c", string(content))
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("failed to execute migration %s: %w", entry.Name(), err)
-			}
-		}
-	}
-
-	return nil
-}
-
-// validateExternal validates external database configuration
 // runSelfHostedMigrations runs migrations on the self-hosted Supabase database
 func (so *SupabaseOperations) runSelfHostedMigrations(ctx context.Context) error {
 	so.progress.Info("Running migrations on self-hosted database...")
@@ -2215,27 +2143,7 @@ func (so *SupabaseOperations) runSelfHostedMigrations(ctx context.Context) error
 	return nil
 }
 
-func (so *SupabaseOperations) validateExternal(ctx context.Context) error {
-	if so.config.Database.External == nil {
-		return fmt.Errorf("external database configuration missing")
-	}
 
-	// Validate required fields
-	if so.config.Database.External.Host == "" {
-		return fmt.Errorf("external database host is required")
-	}
-	if so.config.Database.External.Port == 0 {
-		return fmt.Errorf("external database port is required")
-	}
-	if so.config.Database.External.Database == "" {
-		return fmt.Errorf("external database name is required")
-	}
-	if so.config.Database.External.Username == "" {
-		return fmt.Errorf("external database username is required")
-	}
-
-	return nil
-}
 
 // checkSupabaseCLI checks if Supabase CLI is installed
 func (so *SupabaseOperations) checkSupabaseCLI() error {
@@ -2429,8 +2337,7 @@ func (so *SupabaseOperations) createAuthEnvironment() map[string]interface{} {
 		if so.config.Email.SMTP != nil {
 			env["GOTRUE_SMTP_HOST"] = so.config.Email.SMTP.Host
 			env["GOTRUE_SMTP_PORT"] = fmt.Sprintf("%d", so.config.Email.SMTP.Port)
-			env["GOTRUE_SMTP_USER"] = so.config.Email.SMTP.Username
-			env["GOTRUE_SMTP_PASS"] = so.options.Secrets.SMTPPassword
+			// Don't set GOTRUE_SMTP_USER and GOTRUE_SMTP_PASS - they come from secrets
 			env["GOTRUE_SMTP_ADMIN_EMAIL"] = so.config.Email.SMTP.AdminEmail
 			env["GOTRUE_SMTP_SENDER_NAME"] = so.config.Email.FromName
 		}
@@ -2491,340 +2398,6 @@ func (so *SupabaseOperations) createSMTPConfig() map[string]interface{} {
 	}
 }
 
-// deploySelfHostedWithExternalDB deploys Supabase with external PostgreSQL
-func (so *SupabaseOperations) deploySelfHostedWithExternalDB(ctx context.Context) error {
-	so.progress.Info("Deploying Supabase with external PostgreSQL...")
-
-	// Validate external database connection
-	if err := so.validateExternal(ctx); err != nil {
-		return err
-	}
-
-	// Generate secrets for Supabase services
-	so.jwtSecret = generateRandomString(32)
-	so.anonKey = generateJWT("anon", so.jwtSecret)
-	so.serviceKey = generateJWT("service_role", so.jwtSecret)
-
-	// Create Helm values with external DB config
-	values := so.createExternalDBValues()
-
-	// Create values file
-	valuesData, err := yaml.Marshal(values)
-	if err != nil {
-		return fmt.Errorf("failed to marshal values: %w", err)
-	}
-
-	valuesFile := filepath.Join(so.options.WorkDir, "supabase-external-values.yaml")
-	if err := os.WriteFile(valuesFile, valuesData, 0644); err != nil {
-		return fmt.Errorf("failed to write values file: %w", err)
-	}
-
-	// Pull the Supabase chart
-	chartVersion := so.options.ChartVersion
-	if chartVersion == "" {
-		chartVersion = so.config.Project.Version
-	}
-
-	// Pull the Supabase chart using ChartManager
-	chartInfo, err := so.options.ChartManager.PullSupabaseChart(chartVersion)
-	if err != nil {
-		return fmt.Errorf("failed to get Supabase chart: %w", err)
-	}
-
-	// Extract the chart
-	extractedPath, err := so.options.ChartManager.ExtractChart(chartInfo.CachedPath)
-	if err != nil {
-		return fmt.Errorf("failed to extract Supabase chart: %w", err)
-	}
-	defer os.RemoveAll(extractedPath)
-
-	// The chart should be extracted as "supabase" directory
-	supabaseChartPath := filepath.Join(extractedPath, "supabase")
-
-	// Deploy with Helm
-	namespace := so.config.GetNamespace("supabase")
-
-	// Create namespace
-	cmd := exec.Command("kubectl", "create", "namespace", namespace)
-	cmd.Run() // Ignore error if namespace exists
-
-	cmd = exec.CommandContext(ctx, "helm", "upgrade", "--install", "supabase",
-		supabaseChartPath,
-		"--namespace", namespace,
-		"--reset-values",
-		"-f", valuesFile,
-		"--wait",
-		"--timeout", "15m")
-
-	if so.options.Verbose {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	}
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to deploy Supabase with external DB: %w", err)
-	}
-
-	// Ensure realtime tenant exists
-	if err := so.ensureRealtimeTenant(ctx); err != nil {
-		so.progress.Warning("Failed to ensure realtime tenant: %v", err)
-	}
-
-	// Run migrations on external database
-	if err := so.RunMigrationsExternal(ctx); err != nil {
-		return err
-	}
-
-	so.progress.Success("Supabase with external database deployment complete!")
-	return nil
-}
-
-// createExternalDBValues creates Helm values for external database
-func (so *SupabaseOperations) createExternalDBValues() map[string]interface{} {
-	// Start with the same base configuration as self-hosted
-	analyticsKey := generateRandomString(32)
-
-	// Create SMTP password if needed
-	smtpPassword := ""
-	if so.options.Secrets != nil && so.config.Email.SMTP != nil {
-		smtpPassword = so.options.Secrets.SMTPPassword
-	}
-
-	// Create comprehensive values configuration
-	values := map[string]interface{}{
-		"secret": map[string]interface{}{
-			"jwt": map[string]interface{}{
-				"anonKey":    so.anonKey,
-				"serviceKey": so.serviceKey,
-				"secret":     so.jwtSecret,
-			},
-			"smtp": map[string]interface{}{
-				"username": so.config.Email.SMTP.Username,
-				"password": smtpPassword,
-			},
-			"db": map[string]interface{}{
-				"username": "postgres",
-				"password": so.dbPassword,
-				"database": "postgres",
-			},
-			"analytics": map[string]interface{}{
-				"apiKey": analyticsKey,
-			},
-			"dashboard": map[string]interface{}{
-				"username": "supabase",
-				"password": so.dashboardPass,
-			},
-		},
-		"global": map[string]interface{}{
-			"jwt": map[string]interface{}{
-				"secret":     so.jwtSecret,
-				"anonKey":    so.anonKey,
-				"serviceKey": so.serviceKey,
-			},
-			"smtp": so.createSMTPConfig(),
-		},
-		"db": map[string]interface{}{
-			"enabled": false, // Disable internal database for external
-		},
-		"studio": map[string]interface{}{
-			"enabled": true,
-			"image": map[string]interface{}{
-				"repository": "supabase/studio",
-				"tag":        "20231123-64a766a",
-				"pullPolicy": "IfNotPresent",
-			},
-			"auth": map[string]interface{}{
-				"password": so.dashboardPass,
-			},
-			"environment": map[string]interface{}{
-				"SUPABASE_PUBLIC_URL":             fmt.Sprintf("https://supabase.%s", so.config.Project.Domain),
-				"NEXT_PUBLIC_ENABLE_LOGS":         "true",
-				"NEXT_ANALYTICS_BACKEND_PROVIDER": "postgres",
-				"STUDIO_PG_META_URL":              "http://supabase-supabase-meta:8080",
-				"POSTGRES_PASSWORD":               so.dbPassword,
-				"DEFAULT_ORGANIZATION_NAME":       "Default Organization",
-				"DEFAULT_PROJECT_NAME":            "Default Project",
-				"SUPABASE_URL":                    "http://supabase-supabase-kong:8000",
-			},
-		},
-		"auth": map[string]interface{}{
-			"enabled": true,
-			"image": map[string]interface{}{
-				"repository": "supabase/gotrue",
-				"tag":        "v2.132.3",
-				"pullPolicy": "IfNotPresent",
-			},
-			"environment": so.createAuthEnvironment(),
-		},
-		"rest": map[string]interface{}{
-			"enabled": true,
-			"image": map[string]interface{}{
-				"repository": "postgrest/postgrest",
-				"tag":        "v12.0.1",
-				"pullPolicy": "IfNotPresent",
-			},
-			"environment": map[string]interface{}{
-				"PGRST_DB_SCHEMAS":            "public,storage,graphql_public",
-				"PGRST_DB_EXTRA_SEARCH_PATH":  "public,extensions",
-				"PGRST_DB_MAX_ROWS":           "1000",
-				"PGRST_DB_ANON_ROLE":          "anon",
-				"PGRST_JWT_AUD":               "authenticated",
-			},
-		},
-		"realtime": map[string]interface{}{
-			"enabled": true,
-			"image": map[string]interface{}{
-				"repository": "supabase/realtime",
-				"tag":        "v2.25.50",
-				"pullPolicy": "IfNotPresent",
-			},
-		},
-		"meta": map[string]interface{}{
-			"enabled": true,
-			"image": map[string]interface{}{
-				"repository": "supabase/postgres-meta",
-				"tag":        "v0.75.0",
-				"pullPolicy": "IfNotPresent",
-			},
-		},
-		"storage": map[string]interface{}{
-			"enabled": true,
-			"image": map[string]interface{}{
-				"repository": "supabase/storage-api",
-				"tag":        "v0.46.4",
-				"pullPolicy": "IfNotPresent",
-			},
-			"persistence": map[string]interface{}{
-				"enabled": true,
-				"size":    "10Gi",
-			},
-			"environment": map[string]interface{}{
-				"FILE_SIZE_LIMIT":              "52428800",
-				"STORAGE_BACKEND":              "file",
-				"FILE_STORAGE_BACKEND_PATH":    "/var/lib/storage",
-				"TENANT_ID":                    "stub",
-				"REGION":                       "stub",
-				"GLOBAL_S3_BUCKET":             "stub",
-			},
-		},
-		"imgproxy": map[string]interface{}{
-			"enabled": true,
-			"image": map[string]interface{}{
-				"repository": "darthsim/imgproxy",
-				"tag":        "v3.8.0",
-				"pullPolicy": "IfNotPresent",
-			},
-		},
-		"kong": map[string]interface{}{
-			"enabled": true,
-			"image": map[string]interface{}{
-				"repository": "kong",
-				"tag":        "2.8.1",
-				"pullPolicy": "IfNotPresent",
-			},
-			"environment": map[string]interface{}{
-				"KONG_DECLARATIVE_CONFIG": "/opt/kong/kong.yml",
-				"KONG_DATABASE":           "off",
-				"KONG_LOG_LEVEL":          "info",
-			},
-			"ingress": map[string]interface{}{
-				"enabled":   true,
-				"className": "traefik",
-				"annotations": map[string]interface{}{
-					"traefik.ingress.kubernetes.io/router.entrypoints":   "websecure",
-					"traefik.ingress.kubernetes.io/router.tls":           "true",
-					"traefik.ingress.kubernetes.io/router.tls.certresolver": "le",
-				},
-				"hosts": []map[string]interface{}{
-					{
-						"host": fmt.Sprintf("supabase.%s", so.config.Project.Domain),
-						"paths": []map[string]interface{}{
-							{
-								"path":     "/",
-								"pathType": "Prefix",
-							},
-						},
-					},
-				},
-				"tls": []map[string]interface{}{
-					{
-						"hosts": []string{
-							fmt.Sprintf("supabase.%s", so.config.Project.Domain),
-						},
-					},
-				},
-			},
-		},
-		"analytics": map[string]interface{}{
-			"enabled": true,
-			"image": map[string]interface{}{
-				"repository": "supabase/logflare",
-				"tag":        "1.4.0",
-				"pullPolicy": "IfNotPresent",
-			},
-		},
-	}
-
-	// Now modify for external database
-
-	// Get database password
-	dbPassword, _ := resolveSecretValue(so.config.Database.External.PasswordFrom)
-
-	// Configure services to use external database
-	dbURL := fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=%s",
-		so.config.Database.External.Username,
-		dbPassword,
-		so.config.Database.External.Host,
-		so.config.Database.External.Port,
-		so.config.Database.External.Database,
-		so.config.Database.External.SSLMode)
-
-	// Update auth service - merge with existing environment
-	authEnv := values["auth"].(map[string]interface{})["environment"].(map[string]interface{})
-	authEnv["DATABASE_URL"] = dbURL
-
-	// Update rest service - merge with existing environment
-	restEnv := values["rest"].(map[string]interface{})["environment"].(map[string]interface{})
-	restEnv["PGRST_DB_URI"] = dbURL
-
-	// Update realtime service
-	values["realtime"].(map[string]interface{})["environment"] = map[string]interface{}{
-		"DB_HOST":          so.config.Database.External.Host,
-		"DB_PORT":          fmt.Sprintf("%d", so.config.Database.External.Port),
-		"DB_USER":          so.config.Database.External.Username,
-		"DB_PASSWORD":      dbPassword,
-		"DB_NAME":          so.config.Database.External.Database,
-		"DB_SSL":           so.config.Database.External.SSLMode != "disable",
-		"MAX_HEADER_LENGTH": "8192",
-	}
-
-	// Update storage service - merge with existing environment
-	storageEnv := values["storage"].(map[string]interface{})["environment"].(map[string]interface{})
-	storageEnv["DATABASE_URL"] = dbURL
-
-	// Update meta service - need to add environment if not exists
-	if metaEnv, ok := values["meta"].(map[string]interface{})["environment"].(map[string]interface{}); ok {
-		metaEnv["PG_META_DB_URL"] = dbURL
-	} else {
-		values["meta"].(map[string]interface{})["environment"] = map[string]interface{}{
-			"PG_META_DB_URL": dbURL,
-		}
-	}
-
-	// Update imgproxy if enabled - need to add environment if not exists
-	if imgproxy, ok := values["imgproxy"].(map[string]interface{}); ok && imgproxy["enabled"].(bool) {
-		if imgproxyEnv, ok := imgproxy["environment"].(map[string]interface{}); ok {
-			imgproxyEnv["IMGPROXY_DATABASE_URL"] = dbURL
-		} else {
-			values["imgproxy"].(map[string]interface{})["environment"] = map[string]interface{}{
-				"IMGPROXY_DATABASE_URL": dbURL,
-			}
-		}
-	}
-
-	return values
-}
-
 // ensureRealtimeTenant ensures the realtime tenant is configured in the database
 func (so *SupabaseOperations) ensureRealtimeTenant(ctx context.Context) error {
 	namespace := so.config.GetNamespace("supabase")
@@ -2854,13 +2427,8 @@ func (so *SupabaseOperations) ensureRealtimeTenant(ctx context.Context) error {
 		return fmt.Errorf("unable to determine JWT secret for realtime tenant")
 	}
 
-	// Execute SQL to ensure realtime tenants exist with properly encrypted JWT secret
-	// The realtime service expects JWT secrets to be encrypted using AES-ECB with DB_ENC_KEY
-	// We use PostgreSQL's encode/encrypt functions to do this
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace,
-		"deployment/supabase-supabase-db", "--",
-		"psql", "-U", "supabase_admin", "-d", "postgres", "-c",
-		fmt.Sprintf(`-- Enable pgcrypto if not already enabled
+	// SQL to ensure realtime tenants exist with properly encrypted JWT secret
+	tenantSQL := fmt.Sprintf(`-- Enable pgcrypto if not already enabled
 		CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 		-- Create supabase-supabase-realtime tenant with encrypted JWT secret
@@ -2894,10 +2462,15 @@ func (so *SupabaseOperations) ensureRealtimeTenant(ctx context.Context) error {
 		INSERT INTO _realtime.extensions
 		SELECT gen_random_uuid(), type, settings, 'supabase', NOW(), NOW()
 		FROM _realtime.extensions WHERE tenant_external_id = 'realtime-dev'
-		AND NOT EXISTS (SELECT 1 FROM _realtime.extensions WHERE tenant_external_id = 'supabase');`, jwtSecret, jwtSecret, jwtSecret, jwtSecret))
+		AND NOT EXISTS (SELECT 1 FROM _realtime.extensions WHERE tenant_external_id = 'supabase');`, jwtSecret, jwtSecret, jwtSecret, jwtSecret)
+
+	// For self-hosted database, exec into the database pod
+	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace,
+		"deployment/supabase-supabase-db", "--",
+		"psql", "-U", "supabase_admin", "-d", "postgres", "-c", tenantSQL)
 
 	if err := cmd.Run(); err != nil {
-		// This is non-fatal - realtime may not be enabled or this might be an external database
+		// This is non-fatal - realtime may not be enabled
 		if so.options.Verbose && so.progress != nil {
 			so.progress.Debug("Warning: Failed to configure realtime tenant: %v", err)
 		}

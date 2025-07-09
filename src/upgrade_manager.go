@@ -739,8 +739,8 @@ func (um *UpgradeManager) runDatabaseMigrations(ctx context.Context, extractedCh
 				}
 			}
 		}
-	case "managed", "external":
-		// For managed/external databases, we can't easily check what's already applied
+	case "managed":
+		// For managed databases, we can't easily check what's already applied
 		// We'll rely on the migration system's idempotency
 		um.progress.Info("Database type: %s - will attempt to apply all migrations", um.config.Database.Type)
 	}

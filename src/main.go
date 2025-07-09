@@ -29,7 +29,22 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "rulebricks",
 	Short: "Rulebricks deployment and management CLI",
-	Long: `Rulebricks CLI manages the deployment and lifecycle of Rulebricks applications
+	Long: `
+
+
+               ⟋ ‾‾‾‾⟋|
+              ██████  |
+              ██████  |
+              ██████ ⟋ ‾‾‾‾⟋|
+            ⟋     ⟋ ██████  |
+           ██████   ██████  |
+           ██████   ██████⟋
+           ██████⟋
+
+           [Rulebricks CLI]
+
+
+Rulebricks CLI manages the deployment and lifecycle of private Rulebricks instances
 on Kubernetes clusters across multiple cloud providers.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,

@@ -153,7 +153,7 @@ func (s *DatabaseStep) Name() string {
 }
 
 func (s *DatabaseStep) Description() string {
-	return "Deploy and configure database (Supabase or external)"
+	return "Deploy and configure database (Supabase)"
 }
 
 func (s *DatabaseStep) Required() bool {
@@ -717,7 +717,7 @@ func (s *DNSVerificationStep) Execute(ctx context.Context, d *Deployer) error {
 		}
 
 		if allResolved {
-			d.progress.Success("\rAll DNS records have propagated successfully!")
+			d.progress.Success("\r --- All DNS records have propagated successfully! --- ")
 			break
 		}
 
@@ -1339,7 +1339,7 @@ func (d *Deployer) getSupabaseURL() string {
 		}
 		// Fallback to config project name (though this should not happen after database deployment)
 		return fmt.Sprintf("https://%s.supabase.co", d.config.Database.Supabase.ProjectName)
-	case "self-hosted", "external":
+	case "self-hosted":
 		return fmt.Sprintf("https://supabase.%s", d.config.Project.Domain)
 	default:
 		return ""

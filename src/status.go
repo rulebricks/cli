@@ -137,8 +137,7 @@ func (checker *StatusChecker) checkDatabase(status *DeploymentStatus) {
 		checker.checkSelfHostedDatabase(status)
 	case "managed":
 		checker.checkManagedDatabase(status)
-	case "external":
-		checker.checkExternalDatabase(status)
+
 	}
 }
 
@@ -181,13 +180,7 @@ func (checker *StatusChecker) checkManagedDatabase(status *DeploymentStatus) {
 	}
 }
 
-func (checker *StatusChecker) checkExternalDatabase(status *DeploymentStatus) {
-	// For external database, we can't directly check availability
-	status.Database.Available = true
-	if checker.config.Database.External != nil {
-		status.Database.ExternalEndpoint = fmt.Sprintf("%s:%d", checker.config.Database.External.Host, checker.config.Database.External.Port)
-	}
-}
+
 
 func (checker *StatusChecker) checkApplication(status *DeploymentStatus) {
 	namespace := checker.config.GetNamespace("app")
