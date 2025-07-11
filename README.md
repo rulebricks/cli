@@ -30,9 +30,7 @@
 
 The Rulebricks CLI is a powerful deployment and management tool that automates the creation and maintenance of production-ready Rulebricks rule engine clusters. It handles the complete infrastructure lifecycle across multiple cloud providers, from initial setup to ongoing operations.
 
-This CLI can deploy Rulebricks via Terraform across AWS, Azure, and Google Cloud.
-
-If you would like to use this CLI to create a private deployment, first get a license key from us by scheduling a demo.
+This CLI can deploy Rulebricks via Terraform across AWS, Azure, and Google Cloud, and requires a valid Rulebricks license key to use.
 
 ### Key Features
 
