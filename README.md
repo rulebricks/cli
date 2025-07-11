@@ -30,7 +30,9 @@
 
 The Rulebricks CLI is a powerful deployment and management tool that automates the creation and maintenance of production-ready Rulebricks rule engine clusters. It handles the complete infrastructure lifecycle across multiple cloud providers, from initial setup to ongoing operations.
 
-This CLI has been tested primarily for use with AWS, though we make every infrastructure decision to ensure we can easily adapt to Azure and Google Cloud in the very near future.
+This CLI can deploy Rulebricks via Terraform across AWS, Azure, and Google Cloud.
+
+If you would like to use this CLI to create a private deployment, first get a license key from us by scheduling a demo.
 
 ### Key Features
 
@@ -601,6 +603,13 @@ Certain secrets can be sourced from:
 ## Troubleshooting
 
 ### Common Issues
+
+**Cloud Specifics:**
+- Ensure cloud CLI tools are installed and configured
+- Azure: ensure quotas are sufficient for resource provisioning
+- GCP: ensure billing is enabled on the project and your CLI is freshly authenticated
+- GCP: cleaning up resources via `rulebricks destroy` may fail due to Google Cloud adding `deletion_protection` to resources. You can manually remove this protection via the GCP console or from your terraform state.
+- AWS: ensure your IAM user has sufficient permissions for EKS, S3, and other resources
 
 **Certificate Generation:**
 - Ensure domain points to load balancer
