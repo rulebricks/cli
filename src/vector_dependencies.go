@@ -9,10 +9,10 @@ import (
 
 // Dependency represents a required CLI tool
 type Dependency struct {
-	Name        string
-	Command     string
-	InstallDoc  string
-	InstallCmd  map[string]string // OS-specific install commands
+	Name       string
+	Command    string
+	InstallDoc string
+	InstallCmd map[string]string // OS-specific install commands
 }
 
 // DependencyChecker checks for required CLI dependencies
@@ -27,8 +27,8 @@ func NewDependencyChecker(provider string) *DependencyChecker {
 	// Common dependencies
 	commonDeps := []Dependency{
 		{
-			Name:    "kubectl",
-			Command: "kubectl",
+			Name:       "kubectl",
+			Command:    "kubectl",
 			InstallDoc: "https://kubernetes.io/docs/tasks/tools/",
 			InstallCmd: map[string]string{
 				"darwin": "brew install kubectl",
@@ -41,8 +41,8 @@ func NewDependencyChecker(provider string) *DependencyChecker {
 	case "aws", "s3":
 		dc.dependencies = append(commonDeps, []Dependency{
 			{
-				Name:    "AWS CLI",
-				Command: "aws",
+				Name:       "AWS CLI",
+				Command:    "aws",
 				InstallDoc: "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html",
 				InstallCmd: map[string]string{
 					"darwin": "brew install awscli",
@@ -50,8 +50,8 @@ func NewDependencyChecker(provider string) *DependencyChecker {
 				},
 			},
 			{
-				Name:    "eksctl",
-				Command: "eksctl",
+				Name:       "eksctl",
+				Command:    "eksctl",
 				InstallDoc: "https://eksctl.io/installation/",
 				InstallCmd: map[string]string{
 					"darwin": "brew tap weaveworks/tap && brew install weaveworks/tap/eksctl",
@@ -63,8 +63,8 @@ func NewDependencyChecker(provider string) *DependencyChecker {
 	case "gcp", "gcs":
 		dc.dependencies = append(commonDeps, []Dependency{
 			{
-				Name:    "Google Cloud SDK",
-				Command: "gcloud",
+				Name:       "Google Cloud SDK",
+				Command:    "gcloud",
 				InstallDoc: "https://cloud.google.com/sdk/docs/install",
 				InstallCmd: map[string]string{
 					"darwin": "brew install --cask google-cloud-sdk",
@@ -76,8 +76,8 @@ func NewDependencyChecker(provider string) *DependencyChecker {
 	case "azure":
 		dc.dependencies = append(commonDeps, []Dependency{
 			{
-				Name:    "Azure CLI",
-				Command: "az",
+				Name:       "Azure CLI",
+				Command:    "az",
 				InstallDoc: "https://docs.microsoft.com/en-us/cli/azure/install-azure-cli",
 				InstallCmd: map[string]string{
 					"darwin": "brew install azure-cli",

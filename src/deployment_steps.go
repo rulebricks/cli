@@ -4,14 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"gopkg.in/yaml.v3"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // InfrastructureStep handles cloud infrastructure provisioning
@@ -122,8 +122,6 @@ func (s *CoreServicesStep) Execute(ctx context.Context, d *Deployer) error {
 	if err := d.k8sOps.InstallTraefik(ctx, d.extractedChartPath); err != nil {
 		return fmt.Errorf("failed to install Traefik: %w", err)
 	}
-
-
 
 	// Install KEDA for autoscaling
 	if err := d.k8sOps.InstallKEDA(ctx); err != nil {
@@ -620,16 +618,22 @@ func (s *DNSVerificationStep) Execute(ctx context.Context, d *Deployer) error {
 		d.state.LoadBalancerEndpoint = endpoint
 	}
 
+	// Determine DNS record type based on endpoint format
+	recordType := "CNAME"
+	if net.ParseIP(endpoint) != nil {
+		recordType = "A"
+	}
+
 	// Display DNS requirements
 	fmt.Printf("\n📝 Please configure the following DNS records:\n\n")
 	fmt.Printf("1. Main application:\n")
-	fmt.Printf("   Type:  CNAME\n")
+	fmt.Printf("   Type:  %s\n", recordType)
 	fmt.Printf("   Name:  %s\n", d.config.Project.Domain)
 	fmt.Printf("   Value: %s\n\n", endpoint)
 
 	if d.config.Database.Type == "self-hosted" {
 		fmt.Printf("2. Supabase dashboard:\n")
-		fmt.Printf("   Type:  CNAME\n")
+		fmt.Printf("   Type:  %s\n", recordType)
 		fmt.Printf("   Name:  supabase.%s\n", d.config.Project.Domain)
 		fmt.Printf("   Value: %s\n\n", endpoint)
 	}
@@ -648,7 +652,7 @@ func (s *DNSVerificationStep) Execute(ctx context.Context, d *Deployer) error {
 
 	if includeGrafana {
 		fmt.Printf("3. Grafana dashboard:\n")
-		fmt.Printf("   Type:  CNAME\n")
+		fmt.Printf("   Type:  %s\n", recordType)
 		fmt.Printf("   Name:  grafana.%s\n", d.config.Project.Domain)
 		fmt.Printf("   Value: %s\n\n", endpoint)
 	}
@@ -802,6 +806,16 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 
 	// Create a temporary values file that overrides the ACME configuration
 	traefikNamespace := d.config.GetNamespace("traefik")
+
+	// Determine storage class based on cloud provider
+	storageClass := "gp2" // AWS default
+	switch d.config.Cloud.Provider {
+	case "azure":
+		storageClass = "default"
+	case "gcp":
+		storageClass = "standard"
+	}
+
 	tlsOverrides := map[string]interface{}{
 		"additionalArguments": []string{
 			"--api.insecure=false",
@@ -820,14 +834,14 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 		},
 		"ports": map[string]interface{}{
 			"websecure": map[string]interface{}{
-				"port": 8443,
+				"port":        8443,
 				"exposedPort": 443,
 				"expose": map[string]interface{}{
 					"enabled": true,
-					"port": 443,
+					"port":    443,
 				},
 				"tls": map[string]interface{}{
-					"enabled": true,
+					"enabled":      true,
 					"certResolver": "le",
 					"domains": []map[string]interface{}{
 						{
@@ -837,7 +851,25 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 				},
 			},
 		},
+		"persistence": map[string]interface{}{
+			"enabled":      true,
+			"storageClass": storageClass,
+		},
+	}
 
+	// Add ARM64 support for GCP
+	if d.config.Cloud.Provider == "gcp" {
+		tlsOverrides["nodeSelector"] = map[string]interface{}{
+			"kubernetes.io/arch": "arm64",
+		}
+		tlsOverrides["tolerations"] = []interface{}{
+			map[string]interface{}{
+				"key":      "kubernetes.io/arch",
+				"operator": "Equal",
+				"value":    "arm64",
+				"effect":   "NoSchedule",
+			},
+		}
 	}
 
 	// Add SANs if needed
@@ -894,8 +926,8 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 	args := []string{
 		"upgrade", "--install", "traefik", "traefik/traefik",
 		"--namespace", traefikNamespace,
-		"-f", traefikTLSValuesPath,  // Base TLS configuration
-		"-f", tlsValuesFile,          // Our overrides
+		"-f", traefikTLSValuesPath, // Base TLS configuration
+		"-f", tlsValuesFile, // Our overrides
 		"--wait",
 	}
 
@@ -933,7 +965,7 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 	}
 
 	// Check certificate status with retries
-	maxAttempts := 30  // 5 minutes total
+	maxAttempts := 30 // 5 minutes total
 	certificateObtained := false
 
 	for i := 0; i < maxAttempts; i++ {
@@ -943,7 +975,7 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 			"cat", "/data/acme.json")
 
 		output, err := checkCmd.Output()
-		if err == nil && len(output) > 100 {  // acme.json should have content
+		if err == nil && len(output) > 100 { // acme.json should have content
 			if d.options.Verbose {
 				d.progress.Debug("ACME storage file size: %d bytes", len(output))
 			}
@@ -1007,8 +1039,8 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 		},
 	}
 
-	maxRetries := 30 // 5 minutes total
-	for i := 0; i < maxRetries; i++ {
+	// Wait indefinitely for HTTPS to be ready
+	for i := 0; ; i++ {
 		resp, err := client.Get(httpsURL)
 		if err == nil {
 			defer resp.Body.Close()
@@ -1038,8 +1070,8 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 						// Give Supabase endpoint a bit more time to propagate
 						time.Sleep(5 * time.Second)
 
-						supabaseRetries := 12 // 2 minutes for Supabase
-						for j := 0; j < supabaseRetries; j++ {
+						// Wait indefinitely for Supabase HTTPS to be ready
+						for j := 0; ; j++ {
 							supabaseResp, err := client.Get(supabaseURL)
 							if err == nil {
 								defer supabaseResp.Body.Close()
@@ -1053,20 +1085,14 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 								}
 							}
 
-							if j < supabaseRetries-1 {
-								if d.options.Verbose {
-									d.progress.Debug("Supabase HTTPS not ready yet, retrying in 10 seconds... (attempt %d/%d)", j+1, supabaseRetries)
-									if err != nil {
-										d.progress.Debug("Error: %v", err)
-									}
+							if d.options.Verbose {
+								d.progress.Debug("Supabase HTTPS not ready yet, retrying in 10 seconds... (attempt %d)", j+1)
+								if err != nil {
+									d.progress.Debug("Error: %v", err)
 								}
-								time.Sleep(10 * time.Second)
 							}
+							time.Sleep(10 * time.Second)
 						}
-
-						// If Supabase verification failed, warn but don't fail the deployment
-						d.progress.Warning("Supabase HTTPS endpoint not yet accessible at %s", supabaseURL)
-						d.progress.Warning("This may cause issues with first-time login. Please wait a few minutes for DNS propagation.")
 					}
 
 					return nil
@@ -1074,19 +1100,17 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 			}
 		}
 
-		if i < maxRetries-1 {
-			if d.options.Verbose {
-				d.progress.Debug("HTTPS not ready yet, retrying in 10 seconds... (attempt %d/%d)", i+1, maxRetries)
-				if err != nil {
-					d.progress.Debug("Error: %v", err)
-				}
+		if d.options.Verbose {
+			d.progress.Debug("HTTPS not ready yet, retrying in 10 seconds... (attempt %d)", i+1)
+			if err != nil {
+				d.progress.Debug("Error: %v", err)
 			}
-			time.Sleep(10 * time.Second)
 		}
+		time.Sleep(10 * time.Second)
 	}
 
-	// If we get here, HTTPS verification failed
-	return fmt.Errorf("HTTPS endpoint verification failed for %s - certificate may not be valid", d.config.Project.Domain)
+	// This should never be reached since we loop indefinitely
+	return nil
 }
 
 func (s *TLSConfigurationStep) Rollback(ctx context.Context, d *Deployer) error {
@@ -1110,16 +1134,16 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 
 	// Map sink types to friendly names
 	sinkFriendlyNames := map[string]string{
-		"console":			  "Console (stdout)",
-		"elasticsearch":      "Elasticsearch",
-		"datadog_logs":       "Datadog",
-		"loki":               "Grafana Loki",
-		"aws_s3":             "AWS S3",
-		"azure_blob":         "Azure Blob Storage",
-		"gcp_cloud_storage":  "Google Cloud Storage",
-		"splunk_hec":         "Splunk",
-		"new_relic_logs":     "New Relic",
-		"http":               "Custom HTTP endpoint",
+		"console":           "Console (stdout)",
+		"elasticsearch":     "Elasticsearch",
+		"datadog_logs":      "Datadog",
+		"loki":              "Grafana Loki",
+		"aws_s3":            "AWS S3",
+		"azure_blob":        "Azure Blob Storage",
+		"gcp_cloud_storage": "Google Cloud Storage",
+		"splunk_hec":        "Splunk",
+		"new_relic_logs":    "New Relic",
+		"http":              "Custom HTTP endpoint",
 	}
 
 	loggingDestination := "console" // default
@@ -1130,21 +1154,56 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 		}
 	}
 
+	// Determine storage class based on cloud provider
+	storageClass := "gp2" // AWS default
+	switch d.config.Cloud.Provider {
+	case "azure":
+		storageClass = "default"
+	case "gcp":
+		storageClass = "standard"
+	}
+
+	// Add platform-specific node selector and tolerations for GCP ARM64 instances
+	var nodeSelector map[string]interface{}
+	var tolerations []interface{}
+	if d.config.Cloud.Provider == "gcp" {
+		nodeSelector = map[string]interface{}{
+			"kubernetes.io/arch": "arm64",
+		}
+		tolerations = []interface{}{
+			map[string]interface{}{
+				"key":      "kubernetes.io/arch",
+				"operator": "Equal",
+				"value":    "arm64",
+				"effect":   "NoSchedule",
+			},
+		}
+	}
+
 	values := map[string]interface{}{
+		"redis": map[string]interface{}{
+			"persistence": map[string]interface{}{
+				"storageClass": storageClass,
+			},
+			"nodeSelector": nodeSelector,
+			"tolerations":  tolerations,
+		},
 		"app": map[string]interface{}{
-			"tlsEnabled":          true,
-			"email":               d.config.Project.Email,
-			"licenseKey":          d.secrets.LicenseKey,
+			"tlsEnabled":           true,
+			"email":                d.config.Project.Email,
+			"licenseKey":           d.secrets.LicenseKey,
 			"nextPublicSelfHosted": "1",
-			"supabaseUrl":         d.getSupabaseURL(),
-			"supabaseAnonKey":     d.secrets.SupabaseAnonKey,
-			"supabaseServiceKey":  d.secrets.SupabaseServiceKey,
+			"supabaseUrl":          d.getSupabaseURL(),
+			"supabaseAnonKey":      d.secrets.SupabaseAnonKey,
+			"supabaseServiceKey":   d.secrets.SupabaseServiceKey,
 			"replicas": func() int {
 				if d.config.Performance.HPSReplicas > 0 {
 					return d.config.Performance.HPSReplicas
 				}
 				return 2 // Default replicas
 			}(),
+			"nodeSelector": nodeSelector,
+			"tolerations":  tolerations,
 			"smtp": func() map[string]interface{} {
 				if d.config.Email.SMTP != nil {
 					return map[string]interface{}{
@@ -1167,10 +1226,10 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 				}
 			}(),
 			"logging": map[string]interface{}{
-				"enabled":             true,
-				"kafkaBrokers":        kafkaBrokers,
-				"kafkaTopic":          "logs",
-				"loggingDestination":  loggingDestination,
+				"enabled":            true,
+				"kafkaBrokers":       kafkaBrokers,
+				"kafkaTopic":         "logs",
+				"loggingDestination": loggingDestination,
 			},
 		},
 		"imageCredentials": map[string]interface{}{
@@ -1246,7 +1305,9 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 
 	// Configure HPS
 	hpsConfig := map[string]interface{}{
-		"enabled": true,
+		"enabled":      true,
+		"nodeSelector": nodeSelector,
+		"tolerations":  tolerations,
 		"autoscaling": map[string]interface{}{
 			"enabled": true,
 			"minReplicas": func() int {
@@ -1261,7 +1322,7 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 				}
 				return 10
 			}(),
-			"targetCPUUtilizationPercentage": 50,
+			"targetCPUUtilizationPercentage":    50,
 			"targetMemoryUtilizationPercentage": 80,
 		},
 	}
@@ -1269,16 +1330,18 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 	// Configure workers if performance settings are defined
 	if d.config.Performance.HPSWorkerReplicas > 0 {
 		hpsConfig["workers"] = map[string]interface{}{
-			"enabled": true,
-			"replicas": d.config.Performance.HPSWorkerReplicas,
-			"topics": "bulk-solve,flows,parallel-solve",
+			"enabled":      true,
+			"replicas":     d.config.Performance.HPSWorkerReplicas,
+			"topics":       "bulk-solve,flows,parallel-solve",
+			"nodeSelector": nodeSelector,
+			"tolerations":  tolerations,
 			"keda": map[string]interface{}{
-				"enabled": true,
+				"enabled":         true,
 				"minReplicaCount": d.config.Performance.HPSWorkerReplicas,
 				"maxReplicaCount": d.config.Performance.HPSWorkerMaxReplicas,
-				"lagThreshold": d.config.Performance.KafkaLagThreshold,
+				"lagThreshold":    d.config.Performance.KafkaLagThreshold,
 				"pollingInterval": d.config.Performance.KedaPollingInterval,
-				"cooldownPeriod": d.config.Performance.ScaleDownStabilization,
+				"cooldownPeriod":  d.config.Performance.ScaleDownStabilization,
 			},
 		}
 	}

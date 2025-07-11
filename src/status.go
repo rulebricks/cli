@@ -180,8 +180,6 @@ func (checker *StatusChecker) checkManagedDatabase(status *DeploymentStatus) {
 	}
 }
 
-
-
 func (checker *StatusChecker) checkApplication(status *DeploymentStatus) {
 	namespace := checker.config.GetNamespace("app")
 	ctx := context.Background()
@@ -417,16 +415,16 @@ func getNodeMemory(node corev1.Node) ResourceUsage {
 // Status types
 
 type DeploymentStatus struct {
-	Timestamp     time.Time
+	Timestamp      time.Time
 	Infrastructure InfrastructureStatus
-	Kubernetes    KubernetesStatus
-	Database      DatabaseStatus
-	Application   ApplicationStatus
-	Services      ServicesStatus
-	Monitoring    MonitoringStatus
-	Certificates  []CertificateStatus
-	HealthChecks  []HealthCheck
-	OverallHealth HealthState
+	Kubernetes     KubernetesStatus
+	Database       DatabaseStatus
+	Application    ApplicationStatus
+	Services       ServicesStatus
+	Monitoring     MonitoringStatus
+	Certificates   []CertificateStatus
+	HealthChecks   []HealthCheck
+	OverallHealth  HealthState
 }
 
 type InfrastructureStatus struct {
@@ -439,13 +437,13 @@ type InfrastructureStatus struct {
 }
 
 type KubernetesStatus struct {
-	Version      string
-	Nodes        []NodeStatus
-	Namespaces   int
-	TotalPods    int
-	RunningPods  int
-	PendingPods  int
-	FailedPods   int
+	Version     string
+	Nodes       []NodeStatus
+	Namespaces  int
+	TotalPods   int
+	RunningPods int
+	PendingPods int
+	FailedPods  int
 }
 
 type NodeStatus struct {
@@ -552,7 +550,7 @@ func (status *DeploymentStatus) Display() {
 
               [` + string(status.OverallHealth) + `]
 
-`);
+`)
 
 	fmt.Printf("\nStatus: %s %s\n", healthIcon, healthColor(string(status.OverallHealth)))
 	fmt.Printf("As of: %s\n", status.Timestamp.Format("2006-01-02 15:04:05"))

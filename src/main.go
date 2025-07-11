@@ -258,8 +258,6 @@ func main() {
 	}
 }
 
-
-
 // LoadConfig loads configuration from file
 func LoadConfig(path string) (*Config, error) {
 	if path == "" {
@@ -333,7 +331,7 @@ func confirmDestruction(destroyCluster bool) bool {
          [Uninstall Rulebricks]
 
 
-`);
+`)
 	if destroyCluster {
 		color.Red("\n⚠️  WARNING: This will destroy your entire cluster and all data!")
 		color.Yellow("\nThis action is irreversible and will delete:")

@@ -38,26 +38,26 @@ type DeployerOptions struct {
 
 // Deployer handles the deployment process
 type Deployer struct {
-	config       *Config
-	options      DeployerOptions
-	progress     *ProgressIndicator
-	state        *DeploymentState
-	plan         DeploymentPlan
+	config   *Config
+	options  DeployerOptions
+	progress *ProgressIndicator
+	state    *DeploymentState
+	plan     DeploymentPlan
 
 	// Paths and managers
-	workDir           string
-	terraformDir      string
+	workDir            string
+	terraformDir       string
 	extractedChartPath string
-	chartManager      *ChartManager
-	assetManager      *AssetManager
+	chartManager       *ChartManager
+	assetManager       *AssetManager
 
 	// Operations
-	cloudOps     *CloudOperations
-	k8sOps       *KubernetesOperations
-	supabaseOps  *SupabaseOperations
+	cloudOps    *CloudOperations
+	k8sOps      *KubernetesOperations
+	supabaseOps *SupabaseOperations
 
 	// Shared resources
-	secrets      *SharedSecrets
+	secrets *SharedSecrets
 }
 
 // NewDeployer creates a new deployer instance
@@ -83,10 +83,10 @@ func NewDeployer(config *Config, options DeployerOptions) (*Deployer, error) {
 	}
 
 	d := &Deployer{
-		config:       config,
-		options:      options,
-		progress:     progress,
-		workDir:      workDir,
+		config:   config,
+		options:  options,
+		progress: progress,
+		workDir:  workDir,
 		// Use local terraform directory for transparency and user control
 		// Users should have direct access to their infrastructure code
 		terraformDir: "terraform",
@@ -94,9 +94,9 @@ func NewDeployer(config *Config, options DeployerOptions) (*Deployer, error) {
 		assetManager: assetManager,
 		secrets:      &SharedSecrets{},
 		state: &DeploymentState{
-			ProjectName: config.Project.Name,
-			Version:     config.Version,
-			CreatedAt:   time.Now(),
+			ProjectName:    config.Project.Name,
+			Version:        config.Version,
+			CreatedAt:      time.Now(),
 			Infrastructure: InfrastructureState{},
 			Database:       DatabaseState{},
 			Application:    ApplicationState{},
@@ -279,7 +279,7 @@ func (d *Deployer) displayPlan() {
           [Install Rulebricks]
 
 
-`);
+`)
 	fmt.Println(strings.Repeat("─", 50))
 
 	for i, step := range d.plan.Steps {
@@ -320,22 +320,22 @@ func (d *Deployer) preflight() error {
 	// Add cloud-specific checks
 	switch d.config.Cloud.Provider {
 	case "aws":
-		checks = append(checks, struct{name, command, version string}{
+		checks = append(checks, struct{ name, command, version string }{
 			"aws", "aws", "--version",
 		})
 	case "azure":
-		checks = append(checks, struct{name, command, version string}{
+		checks = append(checks, struct{ name, command, version string }{
 			"az", "az", "--version",
 		})
 	case "gcp":
-		checks = append(checks, struct{name, command, version string}{
+		checks = append(checks, struct{ name, command, version string }{
 			"gcloud", "gcloud", "--version",
 		})
 	}
 
 	// Add Supabase CLI check if needed
 	if d.config.Database.Type == "managed" {
-		checks = append(checks, struct{name, command, version string}{
+		checks = append(checks, struct{ name, command, version string }{
 			"supabase", "supabase", "--version",
 		})
 	}
@@ -462,8 +462,6 @@ func (d *Deployer) loadSecrets() error {
 		return fmt.Errorf("failed to load license key: %w", err)
 	}
 	d.secrets.LicenseKey = licenseKey
-
-
 
 	// For self-hosted Supabase, load from state if available
 	if d.config.Database.Type == "self-hosted" && d.state != nil {
@@ -659,7 +657,7 @@ func (d *Deployer) displayConnectionInfo() {
 
                [Welcome]
 
-`);
+`)
 
 	fmt.Println("\n" + strings.Repeat("=", 60))
 	color.Green("🎉 Deployment Complete!")
@@ -702,7 +700,6 @@ func (d *Deployer) displayConnectionInfo() {
 				fmt.Printf("   Provider: %s\n", d.config.Monitoring.Remote.Provider)
 				fmt.Printf("   Metrics are being sent to your external monitoring system\n")
 			}
-
 
 		}
 	}
@@ -747,15 +744,15 @@ func (d *Deployer) displayConnectionInfo() {
 
 // DeploymentState represents the current state of deployment
 type DeploymentState struct {
-	ProjectName          string               `yaml:"project_name"`
-	Version              string               `yaml:"version"`
-	CreatedAt            time.Time            `yaml:"created_at"`
-	UpdatedAt            time.Time            `yaml:"updated_at"`
-	Infrastructure       InfrastructureState  `yaml:"infrastructure"`
-	Database             DatabaseState        `yaml:"database"`
-	Application          ApplicationState     `yaml:"application"`
-	Monitoring           MonitoringState      `yaml:"monitoring"`
-	LoadBalancerEndpoint string               `yaml:"load_balancer_endpoint,omitempty"`
+	ProjectName          string              `yaml:"project_name"`
+	Version              string              `yaml:"version"`
+	CreatedAt            time.Time           `yaml:"created_at"`
+	UpdatedAt            time.Time           `yaml:"updated_at"`
+	Infrastructure       InfrastructureState `yaml:"infrastructure"`
+	Database             DatabaseState       `yaml:"database"`
+	Application          ApplicationState    `yaml:"application"`
+	Monitoring           MonitoringState     `yaml:"monitoring"`
+	LoadBalancerEndpoint string              `yaml:"load_balancer_endpoint,omitempty"`
 }
 
 // InfrastructureState represents infrastructure state
@@ -771,22 +768,22 @@ type InfrastructureState struct {
 // DatabaseState represents database state
 // DatabaseState holds database deployment state
 type DatabaseState struct {
-	Type              string    `json:"type"`
-	Provider          string    `json:"provider"`
-	URL               string    `json:"url"`
-	Internal          bool      `json:"internal"`
-	AnonKey           string    `json:"anon_key,omitempty"`
-	ServiceKey        string    `json:"service_key,omitempty"`
-	DashboardPassword string    `json:"dashboard_password,omitempty"`
-	DashboardUsername string    `json:"dashboard_username,omitempty"`
-	DashboardURL      string    `json:"dashboard_url,omitempty"`
-	PostgresHost      string    `json:"postgres_host,omitempty"`
-	PostgresPort      int       `json:"postgres_port,omitempty"`
-	PostgresDatabase  string    `json:"postgres_database,omitempty"`
-	PostgresUsername  string    `json:"postgres_username,omitempty"`
+	Type              string `json:"type"`
+	Provider          string `json:"provider"`
+	URL               string `json:"url"`
+	Internal          bool   `json:"internal"`
+	AnonKey           string `json:"anon_key,omitempty"`
+	ServiceKey        string `json:"service_key,omitempty"`
+	DashboardPassword string `json:"dashboard_password,omitempty"`
+	DashboardUsername string `json:"dashboard_username,omitempty"`
+	DashboardURL      string `json:"dashboard_url,omitempty"`
+	PostgresHost      string `json:"postgres_host,omitempty"`
+	PostgresPort      int    `json:"postgres_port,omitempty"`
+	PostgresDatabase  string `json:"postgres_database,omitempty"`
+	PostgresUsername  string `json:"postgres_username,omitempty"`
 	// Secrets for self-hosted Supabase
-	JWTSecret  string    `json:"jwt_secret,omitempty"`
-	DBPassword string    `json:"db_password,omitempty"`
+	JWTSecret  string `json:"jwt_secret,omitempty"`
+	DBPassword string `json:"db_password,omitempty"`
 }
 
 // ApplicationState represents application state

@@ -158,13 +158,13 @@ func (s *Spinner) clear() {
 
 // ProgressBar represents a progress bar
 type ProgressBar struct {
-	pi         *ProgressIndicator
-	total      int
-	current    int
-	message    string
-	width      int
-	startTime  time.Time
-	mu         sync.Mutex
+	pi        *ProgressIndicator
+	total     int
+	current   int
+	message   string
+	width     int
+	startTime time.Time
+	mu        sync.Mutex
 }
 
 // StartProgress creates and displays a progress bar
@@ -255,11 +255,11 @@ func (pb *ProgressBar) Complete(message ...string) {
 
 // TaskList represents a list of tasks with status
 type TaskList struct {
-	pi         *ProgressIndicator
-	tasks      []Task
-	current    int
-	startTime  time.Time
-	mu         sync.Mutex
+	pi        *ProgressIndicator
+	tasks     []Task
+	current   int
+	startTime time.Time
+	mu        sync.Mutex
 }
 
 // Task represents a single task in the list
@@ -298,8 +298,6 @@ func (pi *ProgressIndicator) StartTaskList(taskNames []string) *TaskList {
 		current:   -1,
 		startTime: time.Now(),
 	}
-
-
 
 	return tl
 }
@@ -381,8 +379,6 @@ func (th *TaskHandle) Skip() {
 			th.taskList.tasks[th.index].Name)
 	}
 }
-
-
 
 // Complete finishes the task list
 func (tl *TaskList) Complete() {

@@ -173,8 +173,6 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-
-
 // parsePort validates and parses a port number
 func parsePort(portStr string) (int, error) {
 	if portStr == "" {

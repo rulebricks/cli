@@ -315,10 +315,10 @@ func CommandExists(cmd string) bool {
 
 // Environment variables
 const (
-	EnvPrefix      = "RULEBRICKS"
-	EnvLicenseKey  = "RULEBRICKS_LICENSE_KEY"
-	EnvAPIKey      = "RULEBRICKS_API_KEY"
-	EnvDebug       = "RULEBRICKS_DEBUG"
+	EnvPrefix     = "RULEBRICKS"
+	EnvLicenseKey = "RULEBRICKS_LICENSE_KEY"
+	EnvAPIKey     = "RULEBRICKS_API_KEY"
+	EnvDebug      = "RULEBRICKS_DEBUG"
 )
 
 // Docker registry constants
@@ -337,22 +337,22 @@ const (
 
 // Timeouts
 const (
-	DefaultTimeout      = 5 * time.Minute
-	InfraTimeout        = 30 * time.Minute
-	KubernetesTimeout   = 10 * time.Minute
-	ApplicationTimeout  = 15 * time.Minute
-	DNSTimeout          = 5 * time.Minute
-	CertificateTimeout  = 10 * time.Minute
+	DefaultTimeout     = 5 * time.Minute
+	InfraTimeout       = 30 * time.Minute
+	KubernetesTimeout  = 10 * time.Minute
+	ApplicationTimeout = 15 * time.Minute
+	DNSTimeout         = 5 * time.Minute
+	CertificateTimeout = 10 * time.Minute
 )
 
 // Resource defaults
 const (
-	DefaultHPSReplicas          = 1
-	DefaultHPSMaxReplicas       = 5
-	DefaultWorkerReplicas       = 1
-	DefaultWorkerMaxReplicas    = 10
-	DefaultKafkaPartitions      = 10
-	DefaultKafkaRetentionHours  = 24
+	DefaultHPSReplicas            = 1
+	DefaultHPSMaxReplicas         = 5
+	DefaultWorkerReplicas         = 1
+	DefaultWorkerMaxReplicas      = 10
+	DefaultKafkaPartitions        = 10
+	DefaultKafkaRetentionHours    = 24
 	DefaultKafkaReplicationFactor = 1
 )
 

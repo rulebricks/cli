@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v2"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +40,11 @@ func NewCloudOperations(config *Config, terraformDir string, verbose bool) (*Clo
 
 // CreateInfrastructure provisions cloud infrastructure using Terraform
 func (co *CloudOperations) CreateInfrastructure(ctx context.Context) error {
+	// Refresh GCP authentication if needed
+	if err := co.refreshGCPAuth(); err != nil {
+		return fmt.Errorf("failed to refresh GCP authentication: %w", err)
+	}
+
 	// Set provider-specific terraform directory
 	co.terraformDir = filepath.Join("terraform", co.config.Cloud.Provider)
 
@@ -96,6 +101,11 @@ func (co *CloudOperations) CreateInfrastructure(ctx context.Context) error {
 
 // DestroyInfrastructure destroys the cloud infrastructure
 func (co *CloudOperations) DestroyInfrastructure(ctx context.Context) error {
+	// Refresh GCP authentication if needed
+	if err := co.refreshGCPAuth(); err != nil {
+		return fmt.Errorf("failed to refresh GCP authentication: %w", err)
+	}
+
 	// Set provider-specific terraform directory (same as CreateInfrastructure)
 	co.terraformDir = filepath.Join("terraform", co.config.Cloud.Provider)
 
@@ -215,6 +225,16 @@ func (co *CloudOperations) terraformApply(ctx context.Context) error {
 }
 
 func (co *CloudOperations) terraformDestroy(ctx context.Context) error {
+	// For GCP, handle deletion protection by removing cluster from state first
+	if co.config.Cloud.Provider == "gcp" {
+		if err := co.handleGCPDeletionProtection(ctx); err != nil {
+			if co.verbose {
+				co.progress.Debug("Warning: GCP deletion protection handling failed: %v", err)
+			}
+			// Continue with normal destroy anyway
+		}
+	}
+
 	args := []string{"destroy", "-auto-approve"}
 	args = append(args, co.getTerraformVariables()...)
 
@@ -229,6 +249,102 @@ func (co *CloudOperations) terraformDestroy(ctx context.Context) error {
 	}
 	return cmd.Run()
 }
+
+// handleGCPDeletionProtection removes cluster from terraform state and deletes it manually
+func (co *CloudOperations) handleGCPDeletionProtection(ctx context.Context) error {
+	if co.verbose {
+		co.progress.Debug("Handling GCP deletion protection by removing cluster from terraform state")
+	}
+
+	// Step 1: Find the actual cluster resource in terraform state
+	listCmd := exec.CommandContext(ctx, "terraform", "state", "list")
+	listCmd.Dir = co.terraformDir
+
+	output, err := listCmd.Output()
+	if err != nil {
+		if co.verbose {
+			co.progress.Debug("Failed to list terraform state: %v", err)
+		}
+		return err
+	}
+
+	// Find cluster resource (look for google_container_cluster)
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var clusterResource string
+	for _, line := range lines {
+		if strings.Contains(line, "google_container_cluster") {
+			clusterResource = strings.TrimSpace(line)
+			break
+		}
+	}
+
+	if clusterResource == "" {
+		if co.verbose {
+			co.progress.Debug("No GCP cluster found in terraform state")
+		}
+		return nil // No cluster to remove
+	}
+
+	if co.verbose {
+		co.progress.Debug("Found cluster resource in state: %s", clusterResource)
+	}
+
+	// Step 2: Remove cluster from terraform state
+	rmCmd := exec.CommandContext(ctx, "terraform", "state", "rm", clusterResource)
+	rmCmd.Dir = co.terraformDir
+	if co.verbose {
+		rmCmd.Stdout = os.Stdout
+		rmCmd.Stderr = os.Stderr
+	}
+
+	if err := rmCmd.Run(); err != nil {
+		if co.verbose {
+			co.progress.Debug("Failed to remove cluster from terraform state: %v", err)
+		}
+		// Continue anyway - we'll try gcloud delete
+	}
+
+	// Step 3: Delete cluster using gcloud
+	clusterName := co.config.Kubernetes.ClusterName
+	if clusterName == "" {
+		clusterName = fmt.Sprintf("%s-cluster", co.config.Project.Name)
+	}
+
+	args := []string{
+		"container", "clusters", "delete", clusterName,
+		"--quiet",
+	}
+
+	// Add zone or region
+	if co.config.Cloud.GCP != nil && co.config.Cloud.GCP.Zone != "" {
+		args = append(args, "--zone", co.config.Cloud.GCP.Zone)
+	} else {
+		args = append(args, "--region", co.config.Cloud.Region)
+	}
+
+	// Add project if available
+	if co.config.Cloud.GCP != nil && co.config.Cloud.GCP.ProjectID != "" {
+		args = append(args, "--project", co.config.Cloud.GCP.ProjectID)
+	}
+
+	gcloudCmd := exec.CommandContext(ctx, "gcloud", args...)
+	if co.verbose {
+		gcloudCmd.Stdout = os.Stdout
+		gcloudCmd.Stderr = os.Stderr
+		co.progress.Debug("Running: gcloud %s", strings.Join(args, " "))
+	}
+
+	if err := gcloudCmd.Run(); err != nil {
+		if co.verbose {
+			co.progress.Debug("gcloud cluster delete failed: %v", err)
+		}
+		// Don't return error - cluster might already be deleted
+	}
+
+	return nil
+}
+
+
 
 func (co *CloudOperations) updateKubeconfig(ctx context.Context) error {
 	// First try to get cluster info from terraform outputs
@@ -305,6 +421,16 @@ func (co *CloudOperations) checkClusterHealth(ctx context.Context) error {
 }
 
 func (co *CloudOperations) runCommand(cmd *exec.Cmd, description string) error {
+	// Set Azure environment variables if needed
+	if co.config.Cloud.Provider == "azure" {
+		if err := co.setAzureEnv(cmd); err != nil {
+			// Log warning but continue - Azure CLI auth might work without explicit env vars
+			if co.verbose {
+				co.progress.Warning("Could not set Azure environment variables: %v", err)
+			}
+		}
+	}
+
 	if co.verbose {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -445,14 +571,84 @@ func (co *CloudOperations) getTerraformVariables() []string {
 	return args
 }
 
+// setAzureEnv sets Azure environment variables for Terraform
+func (co *CloudOperations) setAzureEnv(cmd *exec.Cmd) error {
+	// Get subscription ID from Azure CLI
+	subCmd := exec.Command("az", "account", "show", "--query", "id", "-o", "tsv")
+	subOutput, err := subCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get Azure subscription ID: %w", err)
+	}
+	subscriptionID := strings.TrimSpace(string(subOutput))
 
+	// Get tenant ID from Azure CLI
+	tenantCmd := exec.Command("az", "account", "show", "--query", "tenantId", "-o", "tsv")
+	tenantOutput, err := tenantCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get Azure tenant ID: %w", err)
+	}
+	tenantID := strings.TrimSpace(string(tenantOutput))
+
+	// Set environment variables
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, fmt.Sprintf("ARM_SUBSCRIPTION_ID=%s", subscriptionID))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("ARM_TENANT_ID=%s", tenantID))
+
+	if co.verbose {
+		co.progress.Debug("Set Azure environment: ARM_SUBSCRIPTION_ID=%s, ARM_TENANT_ID=%s", subscriptionID, tenantID)
+	}
+
+	return nil
+}
+
+// refreshGCPAuth refreshes GCP authentication to prevent token expiry issues
+func (co *CloudOperations) refreshGCPAuth() error {
+	if co.config.Cloud.Provider != "gcp" {
+		return nil
+	}
+
+	// First check if current credentials work
+	testCmd := exec.Command("gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
+	if output, err := testCmd.Output(); err == nil && len(output) > 0 {
+		// Check if application default credentials are valid
+		adcTestCmd := exec.Command("gcloud", "auth", "application-default", "print-access-token")
+		if err := adcTestCmd.Run(); err == nil {
+			if co.verbose {
+				co.progress.Debug("GCP credentials are valid, skipping refresh")
+			}
+			return nil
+		}
+	}
+
+	if co.verbose {
+		co.progress.Debug("GCP credentials need refresh, updating...")
+	}
+
+	// Try to refresh application default credentials
+	cmd := exec.Command("gcloud", "auth", "application-default", "login")
+	if err := cmd.Run(); err != nil {
+		// Don't fail deployment - warn and continue with existing creds
+		co.progress.Warning("Failed to refresh GCP application default credentials: %v", err)
+		co.progress.Warning("Continuing with existing credentials - deployment may fail if tokens are expired")
+		return nil
+	}
+
+	if co.verbose {
+		co.progress.Debug("GCP application default credentials refreshed successfully")
+	}
+
+	return nil
+}
 
 // KubernetesOperations handles Kubernetes cluster operations
 type KubernetesOperations struct {
-	config    *Config
-	client    kubernetes.Interface
-	verbose   bool
-	progress  *ProgressIndicator
+	config        *Config
+	client        kubernetes.Interface
+	verbose       bool
+	progress      *ProgressIndicator
+	cloudProvider string
 }
 
 // NewKubernetesOperations creates a new Kubernetes operations instance
@@ -470,10 +666,11 @@ func NewKubernetesOperations(config *Config, verbose bool) (*KubernetesOperation
 	}
 
 	return &KubernetesOperations{
-		config:   config,
-		client:   client,
-		verbose:  verbose,
-		progress: NewProgressIndicator(verbose),
+		config:        config,
+		client:        client,
+		verbose:       verbose,
+		progress:      NewProgressIndicator(verbose),
+		cloudProvider: config.Cloud.Provider,
 	}, nil
 }
 
@@ -500,15 +697,48 @@ func (ko *KubernetesOperations) InstallTraefik(ctx context.Context, chartPath st
 	// Use the traefik values file from the extracted chart
 	traefikValuesPath := filepath.Join(chartPath, "rulebricks", "traefik-values-no-tls.yaml")
 
-	// Install Traefik with the values file
+	// Create ARM64 values file for GCP if needed
+	var gcpValuesPath string
+	if ko.cloudProvider == "gcp" {
+		gcpValues := map[string]interface{}{
+			"nodeSelector": map[string]interface{}{
+				"kubernetes.io/arch": "arm64",
+			},
+			"tolerations": []interface{}{
+				map[string]interface{}{
+					"key":      "kubernetes.io/arch",
+					"operator": "Equal",
+					"value":    "arm64",
+					"effect":   "NoSchedule",
+				},
+			},
+		}
+
+		gcpValuesPath = filepath.Join(os.TempDir(), "traefik-gcp-values.yaml")
+		gcpValuesYAML, err := yaml.Marshal(gcpValues)
+		if err != nil {
+			return fmt.Errorf("failed to marshal GCP Traefik values: %w", err)
+		}
+		if err := os.WriteFile(gcpValuesPath, gcpValuesYAML, 0644); err != nil {
+			return fmt.Errorf("failed to write GCP Traefik values file: %w", err)
+		}
+		defer os.Remove(gcpValuesPath)
+	}
+
+	// Install Traefik with the values file(s)
 	args := []string{
 		"upgrade", "--install", "traefik", "traefik/traefik",
 		"--namespace", namespace,
 		"--create-namespace",
 		"-f", traefikValuesPath,
-		"--wait",
-		"--timeout", "10m",
 	}
+
+	// Add GCP ARM64 values if on GCP
+	if ko.cloudProvider == "gcp" {
+		args = append(args, "-f", gcpValuesPath)
+	}
+
+	args = append(args, "--wait", "--timeout", "10m")
 
 	cmd = exec.CommandContext(ctx, "helm", args...)
 	if ko.verbose {
@@ -590,7 +820,26 @@ func (ko *KubernetesOperations) InstallKEDA(ctx context.Context) error {
 		return err
 	}
 
-	return ko.installHelmChart(ctx, "keda", "kedacore/keda", namespace, nil)
+	var values map[string]interface{}
+
+	// Add ARM64 support for GCP
+	if ko.cloudProvider == "gcp" {
+		values = map[string]interface{}{
+			"nodeSelector": map[string]interface{}{
+				"kubernetes.io/arch": "arm64",
+			},
+			"tolerations": []interface{}{
+				map[string]interface{}{
+					"key":      "kubernetes.io/arch",
+					"operator": "Equal",
+					"value":    "arm64",
+					"effect":   "NoSchedule",
+				},
+			},
+		}
+	}
+
+	return ko.installHelmChart(ctx, "keda", "kedacore/keda", namespace, values)
 }
 
 func (ko *KubernetesOperations) UninstallKEDA(ctx context.Context) error {
@@ -716,6 +965,36 @@ func (ko *KubernetesOperations) InstallPrometheusWithRemoteWrite(ctx context.Con
 		}
 	}
 
+	// Add ARM64 support for GCP
+	if ko.cloudProvider == "gcp" {
+		values["prometheus"].(map[string]interface{})["prometheusSpec"].(map[string]interface{})["nodeSelector"] = map[string]interface{}{
+			"kubernetes.io/arch": "arm64",
+		}
+		values["prometheus"].(map[string]interface{})["prometheusSpec"].(map[string]interface{})["tolerations"] = []interface{}{
+			map[string]interface{}{
+				"key":      "kubernetes.io/arch",
+				"operator": "Equal",
+				"value":    "arm64",
+				"effect":   "NoSchedule",
+			},
+		}
+
+		// Add ARM64 support to Grafana if enabled
+		if grafana, ok := values["grafana"].(map[string]interface{}); ok && grafana["enabled"].(bool) {
+			grafana["nodeSelector"] = map[string]interface{}{
+				"kubernetes.io/arch": "arm64",
+			}
+			grafana["tolerations"] = []interface{}{
+				map[string]interface{}{
+					"key":      "kubernetes.io/arch",
+					"operator": "Equal",
+					"value":    "arm64",
+					"effect":   "NoSchedule",
+				},
+			}
+		}
+	}
+
 	return ko.installHelmChart(ctx, "prometheus", "prometheus-community/kube-prometheus-stack", namespace, values)
 }
 
@@ -774,10 +1053,10 @@ func (ko *KubernetesOperations) InstallVector(ctx context.Context, vectorConfig 
 	}
 
 	values := map[string]interface{}{
-		"role":              "Stateless-Aggregator", // Use Deployment instead of DaemonSet
-		"replicas":          2,                      // Start with 2 replicas
-		"customConfig":      configMap,
-		"fullnameOverride":  releaseName, // Make all resources project-specific
+		"role":             "Stateless-Aggregator", // Use Deployment instead of DaemonSet
+		"replicas":         2,                      // Start with 2 replicas
+		"customConfig":     configMap,
+		"fullnameOverride": releaseName, // Make all resources project-specific
 		"rbac": map[string]interface{}{
 			"create":             true,
 			"serviceAccountName": serviceAccountName,
@@ -803,6 +1082,21 @@ func (ko *KubernetesOperations) InstallVector(ctx context.Context, vectorConfig 
 				"memory": "256Mi",
 			},
 		},
+	}
+
+	// Add ARM64 support for GCP
+	if ko.cloudProvider == "gcp" {
+		values["nodeSelector"] = map[string]interface{}{
+			"kubernetes.io/arch": "arm64",
+		}
+		values["tolerations"] = []interface{}{
+			map[string]interface{}{
+				"key":      "kubernetes.io/arch",
+				"operator": "Equal",
+				"value":    "arm64",
+				"effect":   "NoSchedule",
+			},
+		}
 	}
 
 	return ko.installHelmChart(ctx, releaseName, "vector/vector", namespace, values)
@@ -857,11 +1151,11 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 			"enabled": true,
 			"size":    storageSize,
 		},
-		"logRetentionHours": retentionHours,
-		"autoCreateTopicsEnable": true,
-		"defaultReplicationFactor": replicationFactor,
+		"logRetentionHours":             retentionHours,
+		"autoCreateTopicsEnable":        true,
+		"defaultReplicationFactor":      replicationFactor,
 		"offsetsTopicReplicationFactor": replicationFactor,
-		"numPartitions": partitionCount,
+		"numPartitions":                 partitionCount,
 		"service": map[string]interface{}{
 			"type": "LoadBalancer",
 			"ports": map[string]interface{}{
@@ -897,6 +1191,27 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 				"protocol": "PLAINTEXT",
 			},
 		},
+	}
+
+	// Add ARM64 support for GCP
+	if ko.cloudProvider == "gcp" {
+		armNodeSelector := map[string]interface{}{
+			"kubernetes.io/arch": "arm64",
+		}
+		armTolerations := []interface{}{
+			map[string]interface{}{
+				"key":      "kubernetes.io/arch",
+				"operator": "Equal",
+				"value":    "arm64",
+				"effect":   "NoSchedule",
+			},
+		}
+
+		// Apply ARM64 settings to controller section
+		if controller, ok := values["controller"].(map[string]interface{}); ok {
+			controller["nodeSelector"] = armNodeSelector
+			controller["tolerations"] = armTolerations
+		}
 	}
 
 	return ko.installHelmChart(ctx, "kafka", "bitnami/kafka", namespace, values)
@@ -1193,7 +1508,7 @@ func (ko *KubernetesOperations) ensureNamespace(ctx context.Context, namespace s
 			ObjectMeta: metav1.ObjectMeta{
 				Name: namespace,
 				Labels: map[string]string{
-					"app.kubernetes.io/instance": ko.config.Project.Name,
+					"app.kubernetes.io/instance":   ko.config.Project.Name,
 					"app.kubernetes.io/managed-by": "rulebricks",
 				},
 			},
@@ -1336,8 +1651,8 @@ func (ko *KubernetesOperations) generateVectorConfigMap(config *VectorConfig, ka
 	vectorConfig := map[string]interface{}{
 		"sources": map[string]interface{}{
 			"kafka": map[string]interface{}{
-				"type":               "kafka",
-				"bootstrap_servers":  kafkaBrokers,
+				"type":              "kafka",
+				"bootstrap_servers": kafkaBrokers,
 				"topics":            []string{"logs"},
 				"group_id":          "vector-consumers",
 				"auto_offset_reset": "latest",
@@ -1749,11 +2064,11 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 				"pullPolicy": "IfNotPresent",
 			},
 			"environment": map[string]interface{}{
-				"PGRST_DB_SCHEMAS":            "public,storage,graphql_public",
-				"PGRST_DB_EXTRA_SEARCH_PATH":  "public,extensions",
-				"PGRST_DB_MAX_ROWS":           "1000",
-				"PGRST_DB_ANON_ROLE":          "anon",
-				"PGRST_JWT_AUD":               "authenticated",
+				"PGRST_DB_SCHEMAS":           "public,storage,graphql_public",
+				"PGRST_DB_EXTRA_SEARCH_PATH": "public,extensions",
+				"PGRST_DB_MAX_ROWS":          "1000",
+				"PGRST_DB_ANON_ROLE":         "anon",
+				"PGRST_JWT_AUD":              "authenticated",
 			},
 		},
 		"realtime": map[string]interface{}{
@@ -1784,12 +2099,12 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 				"size":    "10Gi",
 			},
 			"environment": map[string]interface{}{
-				"FILE_SIZE_LIMIT":              "52428800",
-				"STORAGE_BACKEND":              "file",
-				"FILE_STORAGE_BACKEND_PATH":    "/var/lib/storage",
-				"TENANT_ID":                    "stub",
-				"REGION":                       "stub",
-				"GLOBAL_S3_BUCKET":             "stub",
+				"FILE_SIZE_LIMIT":           "52428800",
+				"STORAGE_BACKEND":           "file",
+				"FILE_STORAGE_BACKEND_PATH": "/var/lib/storage",
+				"TENANT_ID":                 "stub",
+				"REGION":                    "stub",
+				"GLOBAL_S3_BUCKET":          "stub",
 			},
 		},
 		"imgproxy": map[string]interface{}{
@@ -1811,8 +2126,8 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 				"enabled":   true,
 				"className": "traefik",
 				"annotations": map[string]interface{}{
-					"traefik.ingress.kubernetes.io/router.entrypoints":   "websecure",
-					"traefik.ingress.kubernetes.io/router.tls":           "true",
+					"traefik.ingress.kubernetes.io/router.entrypoints":      "websecure",
+					"traefik.ingress.kubernetes.io/router.tls":              "true",
 					"traefik.ingress.kubernetes.io/router.tls.certresolver": "le",
 				},
 				"hosts": []map[string]interface{}{
@@ -1854,6 +2169,59 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 		"functions": map[string]interface{}{
 			"enabled": false, // Disable functions as the image doesn't exist
 		},
+	}
+
+	// Add ARM64 support for GCP
+	if so.config.Cloud.Provider == "gcp" {
+		armNodeSelector := map[string]interface{}{
+			"kubernetes.io/arch": "arm64",
+		}
+		armTolerations := []interface{}{
+			map[string]interface{}{
+				"key":      "kubernetes.io/arch",
+				"operator": "Equal",
+				"value":    "arm64",
+				"effect":   "NoSchedule",
+			},
+		}
+
+		// Apply ARM64 settings to all components
+		if db, ok := values["db"].(map[string]interface{}); ok {
+			db["nodeSelector"] = armNodeSelector
+			db["tolerations"] = armTolerations
+		}
+		if studio, ok := values["studio"].(map[string]interface{}); ok {
+			studio["nodeSelector"] = armNodeSelector
+			studio["tolerations"] = armTolerations
+		}
+		if auth, ok := values["auth"].(map[string]interface{}); ok {
+			auth["nodeSelector"] = armNodeSelector
+			auth["tolerations"] = armTolerations
+		}
+		if rest, ok := values["rest"].(map[string]interface{}); ok {
+			rest["nodeSelector"] = armNodeSelector
+			rest["tolerations"] = armTolerations
+		}
+		if realtime, ok := values["realtime"].(map[string]interface{}); ok {
+			realtime["nodeSelector"] = armNodeSelector
+			realtime["tolerations"] = armTolerations
+		}
+		if meta, ok := values["meta"].(map[string]interface{}); ok {
+			meta["nodeSelector"] = armNodeSelector
+			meta["tolerations"] = armTolerations
+		}
+		if storage, ok := values["storage"].(map[string]interface{}); ok {
+			storage["nodeSelector"] = armNodeSelector
+			storage["tolerations"] = armTolerations
+		}
+		if imgproxy, ok := values["imgproxy"].(map[string]interface{}); ok {
+			imgproxy["nodeSelector"] = armNodeSelector
+			imgproxy["tolerations"] = armTolerations
+		}
+		if kong, ok := values["kong"].(map[string]interface{}); ok {
+			kong["nodeSelector"] = armNodeSelector
+			kong["tolerations"] = armTolerations
+		}
 	}
 
 	// Create temporary values file
@@ -1924,6 +2292,7 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 
 	return nil
 }
+
 // GetDBPassword returns the database password
 func (so *SupabaseOperations) GetDBPassword() string {
 	return so.dbPassword
@@ -2022,7 +2391,6 @@ func (so *SupabaseOperations) RunMigrations(ctx context.Context) error {
 	}
 	return nil
 }
-
 
 // runSelfHostedMigrations runs migrations on the self-hosted Supabase database
 func (so *SupabaseOperations) runSelfHostedMigrations(ctx context.Context) error {
@@ -2142,8 +2510,6 @@ func (so *SupabaseOperations) runSelfHostedMigrations(ctx context.Context) error
 	so.progress.Success("Database migrations completed")
 	return nil
 }
-
-
 
 // checkSupabaseCLI checks if Supabase CLI is installed
 func (so *SupabaseOperations) checkSupabaseCLI() error {
@@ -2302,30 +2668,30 @@ func (so *SupabaseOperations) createAuthEnvironment() map[string]interface{} {
 	emailTemplates := GetDefaultEmailTemplates()
 
 	env := map[string]interface{}{
-		"GOTRUE_SITE_URL":                  fmt.Sprintf("https://%s", so.config.Project.Domain),
-		"GOTRUE_URI_ALLOW_LIST":            fmt.Sprintf("https://%s,https://%s/*,https://%s/auth/changepass,https://%s/settings/password,https://%s/dashboard", so.config.Project.Domain, so.config.Project.Domain, so.config.Project.Domain, so.config.Project.Domain, so.config.Project.Domain),
-		"API_EXTERNAL_URL":                 fmt.Sprintf("https://supabase.%s", so.config.Project.Domain),
-		"GOTRUE_JWT_EXP":                   "3600",
-		"GOTRUE_JWT_DEFAULT_GROUP_NAME":    "authenticated",
-		"GOTRUE_JWT_ADMIN_ROLES":           "service_role",
-		"GOTRUE_JWT_AUD":                   "authenticated",
-		"GOTRUE_DISABLE_SIGNUP":            "false",
-		"GOTRUE_EXTERNAL_EMAIL_ENABLED":    "true",
-		"GOTRUE_MAILER_AUTOCONFIRM":        "false",
-		"GOTRUE_MAILER_SECURE_EMAIL_CHANGE_ENABLED": "false",
-		"GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED":   "false",
-		"GOTRUE_EXTERNAL_MANUAL_LINKING_ENABLED":    "false",
-		"GOTRUE_RATE_LIMIT_EMAIL_SENT":              "3600",
-		"GOTRUE_RATE_LIMIT_SMS_SENT":                "3600",
-		"GOTRUE_RATE_LIMIT_VERIFY":                  "3600",
-		"GOTRUE_EXTERNAL_PHONE_ENABLED":             "true",
-		"GOTRUE_SMS_AUTOCONFIRM":                    "true",
+		"GOTRUE_SITE_URL":                                fmt.Sprintf("https://%s", so.config.Project.Domain),
+		"GOTRUE_URI_ALLOW_LIST":                          fmt.Sprintf("https://%s,https://%s/*,https://%s/auth/changepass,https://%s/settings/password,https://%s/dashboard", so.config.Project.Domain, so.config.Project.Domain, so.config.Project.Domain, so.config.Project.Domain, so.config.Project.Domain),
+		"API_EXTERNAL_URL":                               fmt.Sprintf("https://supabase.%s", so.config.Project.Domain),
+		"GOTRUE_JWT_EXP":                                 "3600",
+		"GOTRUE_JWT_DEFAULT_GROUP_NAME":                  "authenticated",
+		"GOTRUE_JWT_ADMIN_ROLES":                         "service_role",
+		"GOTRUE_JWT_AUD":                                 "authenticated",
+		"GOTRUE_DISABLE_SIGNUP":                          "false",
+		"GOTRUE_EXTERNAL_EMAIL_ENABLED":                  "true",
+		"GOTRUE_MAILER_AUTOCONFIRM":                      "false",
+		"GOTRUE_MAILER_SECURE_EMAIL_CHANGE_ENABLED":      "false",
+		"GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED":        "false",
+		"GOTRUE_EXTERNAL_MANUAL_LINKING_ENABLED":         "false",
+		"GOTRUE_RATE_LIMIT_EMAIL_SENT":                   "3600",
+		"GOTRUE_RATE_LIMIT_SMS_SENT":                     "3600",
+		"GOTRUE_RATE_LIMIT_VERIFY":                       "3600",
+		"GOTRUE_EXTERNAL_PHONE_ENABLED":                  "true",
+		"GOTRUE_SMS_AUTOCONFIRM":                         "true",
 		"GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED": "true",
 		"GOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL":   "10",
-		"GOTRUE_MAILER_SUBJECTS_INVITE":        "Join your team on Rulebricks",
-		"GOTRUE_MAILER_SUBJECTS_CONFIRMATION":  "Confirm Your Email",
-		"GOTRUE_MAILER_SUBJECTS_RECOVERY":      "Reset Your Password",
-		"GOTRUE_MAILER_SUBJECTS_EMAIL_CHANGE":  "Confirm Email Change",
+		"GOTRUE_MAILER_SUBJECTS_INVITE":                  "Join your team on Rulebricks",
+		"GOTRUE_MAILER_SUBJECTS_CONFIRMATION":            "Confirm Your Email",
+		"GOTRUE_MAILER_SUBJECTS_RECOVERY":                "Reset Your Password",
+		"GOTRUE_MAILER_SUBJECTS_EMAIL_CHANGE":            "Confirm Email Change",
 	}
 
 	// Configure email settings if SMTP is configured

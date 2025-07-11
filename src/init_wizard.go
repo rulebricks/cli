@@ -3,9 +3,9 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"github.com/fatih/color"
 	"os"
 	"strings"
-	"github.com/fatih/color"
 )
 
 // InitWizard handles the interactive project initialization
@@ -64,8 +64,6 @@ func (w *InitWizard) Run() error {
 	if err := w.configureOptionalFeatures(); err != nil {
 		return err
 	}
-
-
 
 	// Apply defaults
 	w.config.ApplyDefaults()
@@ -264,8 +262,6 @@ func (w *InitWizard) configureDatabase() error {
 		w.config.Database.Supabase.Region = w.promptString("Supabase region", "us-east-1", nil)
 		w.config.Database.Supabase.OrgID = w.promptString("Organization ID (optional)", "", nil)
 
-
-
 	case "self-hosted":
 		// Self-hosted uses defaults
 		color.Green("✓ Self-hosted Supabase will be deployed with the cluster")
@@ -282,8 +278,6 @@ func (w *InitWizard) configureDatabase() error {
 
 	return nil
 }
-
-
 
 func (w *InitWizard) configureEmail() error {
 	color.New(color.Bold).Println("\n📧 Email Configuration")
@@ -797,7 +791,7 @@ func (w *InitWizard) displayWelcome() {
          [Configure Rulebricks]
 
 
-`);
+`)
 	fmt.Println("This wizard will help you create a configuration file for your deployment.")
 	fmt.Println("Press Ctrl+C at any time to cancel.")
 }

@@ -23,14 +23,14 @@ type DestroyerOptions struct {
 
 // Destroyer handles the destruction process
 type Destroyer struct {
-	config    *Config
-	options   DestroyerOptions
-	progress  *ProgressIndicator
-	state     *DeploymentState
+	config   *Config
+	options  DestroyerOptions
+	progress *ProgressIndicator
+	state    *DeploymentState
 
 	// Operations
-	cloudOps    *CloudOperations
-	k8sOps      *KubernetesOperations
+	cloudOps *CloudOperations
+	k8sOps   *KubernetesOperations
 
 	// Discovered resources
 	namespaces []string
@@ -231,8 +231,6 @@ func (d *Destroyer) displayPlan() {
 
 	fmt.Println(strings.Repeat("─", 50))
 }
-
-
 
 // quickDeletion performs fast deletion of major components
 func (d *Destroyer) quickDeletion() error {

@@ -4,32 +4,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/fatih/color"
+	"gopkg.in/yaml.v3"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
-	"github.com/fatih/color"
-	"gopkg.in/yaml.v3"
 )
 
 // UpgradeManager handles version upgrades
 type UpgradeManager struct {
-	config      *Config
-	verbose     bool
-	progress    *ProgressIndicator
+	config       *Config
+	verbose      bool
+	progress     *ProgressIndicator
 	chartManager *ChartManager
-	httpClient  *http.Client
+	httpClient   *http.Client
 }
 
 // ChartRelease represents a GitHub release for the charts
 type ChartRelease struct {
-	TagName     string    `json:"tag_name"`
-	Name        string    `json:"name"`
-	CreatedAt   time.Time `json:"created_at"`
-	Prerelease  bool      `json:"prerelease"`
-	Assets      []struct {
+	TagName    string    `json:"tag_name"`
+	Name       string    `json:"name"`
+	CreatedAt  time.Time `json:"created_at"`
+	Prerelease bool      `json:"prerelease"`
+	Assets     []struct {
 		Name               string `json:"name"`
 		BrowserDownloadURL string `json:"browser_download_url"`
 	} `json:"assets"`
@@ -161,7 +161,7 @@ func (um *UpgradeManager) Upgrade(version string, dryRun bool) error {
           [Upgrade Rulebricks]
 
 
-`);
+`)
 	// Display upgrade plan
 	fmt.Println(strings.Repeat("─", 50))
 	if currentVersion == "unknown" {

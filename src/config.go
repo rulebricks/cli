@@ -11,18 +11,18 @@ import (
 
 // Config represents the complete Rulebricks configuration
 type Config struct {
-	Version      string                 `yaml:"version"`
-	Project      ProjectConfig          `yaml:"project"`
-	Cloud        CloudConfig            `yaml:"cloud"`
-	Kubernetes   KubernetesConfig       `yaml:"kubernetes"`
-	Database     DatabaseConfig         `yaml:"database"`
-	Email        EmailConfig            `yaml:"email"`
-	Security     SecurityConfig         `yaml:"security"`
-	Monitoring   MonitoringConfig       `yaml:"monitoring"`
-	Advanced     AdvancedConfig         `yaml:"advanced"`
-	AI           AIConfig               `yaml:"ai"`
-	Logging      LoggingConfig          `yaml:"logging"`
-	Performance  PerformanceConfig      `yaml:"performance"`
+	Version     string            `yaml:"version"`
+	Project     ProjectConfig     `yaml:"project"`
+	Cloud       CloudConfig       `yaml:"cloud"`
+	Kubernetes  KubernetesConfig  `yaml:"kubernetes"`
+	Database    DatabaseConfig    `yaml:"database"`
+	Email       EmailConfig       `yaml:"email"`
+	Security    SecurityConfig    `yaml:"security"`
+	Monitoring  MonitoringConfig  `yaml:"monitoring"`
+	Advanced    AdvancedConfig    `yaml:"advanced"`
+	AI          AIConfig          `yaml:"ai"`
+	Logging     LoggingConfig     `yaml:"logging"`
+	Performance PerformanceConfig `yaml:"performance"`
 }
 
 // ProjectConfig defines project-specific settings
@@ -37,11 +37,11 @@ type ProjectConfig struct {
 
 // CloudConfig defines cloud provider settings
 type CloudConfig struct {
-	Provider string      `yaml:"provider"`
-	Region   string      `yaml:"region"`
-	AWS      *AWSConfig  `yaml:"aws,omitempty"`
+	Provider string       `yaml:"provider"`
+	Region   string       `yaml:"region"`
+	AWS      *AWSConfig   `yaml:"aws,omitempty"`
 	Azure    *AzureConfig `yaml:"azure,omitempty"`
-	GCP      *GCPConfig  `yaml:"gcp,omitempty"`
+	GCP      *GCPConfig   `yaml:"gcp,omitempty"`
 }
 
 // AWSConfig defines AWS-specific settings
@@ -76,10 +76,10 @@ type KubernetesConfig struct {
 
 // DatabaseConfig defines database settings
 type DatabaseConfig struct {
-	Type     string               `yaml:"type"`
-	Provider string               `yaml:"provider,omitempty"`
-	Supabase *SupabaseConfig      `yaml:"supabase,omitempty"`
-	Pooling  *PoolingConfig       `yaml:"pooling,omitempty"`
+	Type     string          `yaml:"type"`
+	Provider string          `yaml:"provider,omitempty"`
+	Supabase *SupabaseConfig `yaml:"supabase,omitempty"`
+	Pooling  *PoolingConfig  `yaml:"pooling,omitempty"`
 }
 
 // SupabaseConfig defines Supabase-specific settings
@@ -88,8 +88,6 @@ type SupabaseConfig struct {
 	Region      string `yaml:"region,omitempty"`
 	OrgID       string `yaml:"org_id,omitempty"`
 }
-
-
 
 // PoolingConfig defines connection pooling settings
 type PoolingConfig struct {
@@ -100,10 +98,10 @@ type PoolingConfig struct {
 
 // EmailConfig defines email provider settings
 type EmailConfig struct {
-	From      string             `yaml:"from"`
-	FromName  string             `yaml:"from_name,omitempty"`
-	SMTP      *SMTPConfig        `yaml:"smtp,omitempty"`
-	Templates *EmailTemplates    `yaml:"templates,omitempty"`
+	From      string          `yaml:"from"`
+	FromName  string          `yaml:"from_name,omitempty"`
+	SMTP      *SMTPConfig     `yaml:"smtp,omitempty"`
+	Templates *EmailTemplates `yaml:"templates,omitempty"`
 }
 
 // SMTPConfig defines SMTP settings
@@ -156,7 +154,7 @@ type NetworkConfig struct {
 // MonitoringConfig defines monitoring settings
 type MonitoringConfig struct {
 	Enabled  bool                    `yaml:"enabled"`
-	Mode     string                  `yaml:"mode,omitempty"` // "local" or "remote"
+	Mode     string                  `yaml:"mode,omitempty"`     // "local" or "remote"
 	Provider string                  `yaml:"provider,omitempty"` // Deprecated, use Mode instead
 	Local    *LocalMonitoringConfig  `yaml:"local,omitempty"`
 	Remote   *RemoteMonitoringConfig `yaml:"remote,omitempty"`
@@ -186,20 +184,20 @@ type LocalMonitoringConfig struct {
 
 // RemoteMonitoringConfig defines remote monitoring settings
 type RemoteMonitoringConfig struct {
-	Provider       string                   `yaml:"provider"` // "prometheus", "grafana-cloud", "newrelic", "custom"
-	PrometheusWrite *PrometheusRemoteWrite  `yaml:"prometheus_write,omitempty"`
-	NewRelic       *NewRelicConfig          `yaml:"newrelic,omitempty"`
+	Provider        string                 `yaml:"provider"` // "prometheus", "grafana-cloud", "newrelic", "custom"
+	PrometheusWrite *PrometheusRemoteWrite `yaml:"prometheus_write,omitempty"`
+	NewRelic        *NewRelicConfig        `yaml:"newrelic,omitempty"`
 }
 
 // PrometheusRemoteWrite defines Prometheus remote write configuration
 type PrometheusRemoteWrite struct {
-	URL               string            `yaml:"url"`
-	Username          string            `yaml:"username,omitempty"`
-	PasswordFrom      string            `yaml:"password_from,omitempty"`
-	BearerToken       string            `yaml:"bearer_token,omitempty"`
-	BearerTokenFrom   string            `yaml:"bearer_token_from,omitempty"`
-	Headers           map[string]string `yaml:"headers,omitempty"`
-	WriteRelabelConfigs []RelabelConfig `yaml:"write_relabel_configs,omitempty"`
+	URL                 string            `yaml:"url"`
+	Username            string            `yaml:"username,omitempty"`
+	PasswordFrom        string            `yaml:"password_from,omitempty"`
+	BearerToken         string            `yaml:"bearer_token,omitempty"`
+	BearerTokenFrom     string            `yaml:"bearer_token_from,omitempty"`
+	Headers             map[string]string `yaml:"headers,omitempty"`
+	WriteRelabelConfigs []RelabelConfig   `yaml:"write_relabel_configs,omitempty"`
 }
 
 // RelabelConfig defines Prometheus relabel configuration
@@ -257,7 +255,7 @@ type AIConfig struct {
 
 // LoggingConfig defines centralized logging settings
 type LoggingConfig struct {
-	Enabled bool         `yaml:"enabled"`
+	Enabled bool          `yaml:"enabled"`
 	Vector  *VectorConfig `yaml:"vector,omitempty"`
 }
 
@@ -276,21 +274,21 @@ type VectorSink struct {
 
 // PerformanceConfig defines performance tuning settings
 type PerformanceConfig struct {
-	VolumeLevel            string            `yaml:"volume_level,omitempty"`
-	HPSReplicas            int               `yaml:"hps_replicas,omitempty"`
-	HPSMaxReplicas         int               `yaml:"hps_max_replicas,omitempty"`
-	HPSWorkerReplicas      int               `yaml:"hps_worker_replicas,omitempty"`
-	HPSWorkerMaxReplicas   int               `yaml:"hps_worker_max_replicas,omitempty"`
-	KafkaPartitions        int               `yaml:"kafka_partitions,omitempty"`
-	KafkaLagThreshold      int               `yaml:"kafka_lag_threshold,omitempty"`
-	KafkaRetentionHours    int               `yaml:"kafka_retention_hours,omitempty"`
-	KafkaStorageSize       string            `yaml:"kafka_storage_size,omitempty"`
-	KafkaReplicationFactor int               `yaml:"kafka_replication_factor,omitempty"`
-	ScaleUpStabilization   int               `yaml:"scale_up_stabilization,omitempty"`
-	ScaleDownStabilization int               `yaml:"scale_down_stabilization,omitempty"`
-	KedaPollingInterval    int               `yaml:"keda_polling_interval,omitempty"`
-	HPSResources           *ResourceConfig   `yaml:"hps_resources,omitempty"`
-	WorkerResources        *ResourceConfig   `yaml:"worker_resources,omitempty"`
+	VolumeLevel            string          `yaml:"volume_level,omitempty"`
+	HPSReplicas            int             `yaml:"hps_replicas,omitempty"`
+	HPSMaxReplicas         int             `yaml:"hps_max_replicas,omitempty"`
+	HPSWorkerReplicas      int             `yaml:"hps_worker_replicas,omitempty"`
+	HPSWorkerMaxReplicas   int             `yaml:"hps_worker_max_replicas,omitempty"`
+	KafkaPartitions        int             `yaml:"kafka_partitions,omitempty"`
+	KafkaLagThreshold      int             `yaml:"kafka_lag_threshold,omitempty"`
+	KafkaRetentionHours    int             `yaml:"kafka_retention_hours,omitempty"`
+	KafkaStorageSize       string          `yaml:"kafka_storage_size,omitempty"`
+	KafkaReplicationFactor int             `yaml:"kafka_replication_factor,omitempty"`
+	ScaleUpStabilization   int             `yaml:"scale_up_stabilization,omitempty"`
+	ScaleDownStabilization int             `yaml:"scale_down_stabilization,omitempty"`
+	KedaPollingInterval    int             `yaml:"keda_polling_interval,omitempty"`
+	HPSResources           *ResourceConfig `yaml:"hps_resources,omitempty"`
+	WorkerResources        *ResourceConfig `yaml:"worker_resources,omitempty"`
 }
 
 // ResourceConfig defines resource limits and requests
