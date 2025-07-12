@@ -346,7 +346,9 @@ rulebricks vector setup-azure --storage-account mylogs --container logs
 
 ### System Overview
 
-Rulebricks deploys a complete, production-ready microservices architecture:
+Rulebricks deploys a complete microservices architecture that can be hosted air-gapped, or in a way where databases and logs are configured externally.
+
+Our CLI is designed exclusively to deploy on a standalone cluster for high-performance. Kafka, KEDA, and presets around resource scaling and worker nodes enable signficant volume/throughput with minimal effort.
 
 ```mermaid
 flowchart TD
