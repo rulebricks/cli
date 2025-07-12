@@ -348,40 +348,56 @@ rulebricks vector setup-azure --storage-account mylogs --container logs
 
 Rulebricks deploys a complete, production-ready microservices architecture:
 
+```mermaid
+flowchart TD
+    LB("Load Balancer<br/>Cloud Provider LB") --> Traefik("Traefik Ingress<br/>TLS Termination & Routing")
+    
+    Traefik --> RB("Rulebricks App<br/>API & Management")
+    Traefik -.-> SB("Supabase Dashboard<br/>Optional Admin UI")
+    Traefik -.-> GF("Grafana Dashboard<br/>Optional Monitoring")
+    
+    RB --> Redis[("Redis<br/>Cache Layer")]
+    RB --> PG[("PostgreSQL<br/>Primary Database")]
+    Redis -.->|"Cache miss<br/>fallback"| PG
+    SB -.-> PG
+    
+    %% Rule execution flow
+    RB -->|"Rule Execution<br/>Requests"| Kafka("Kafka Cluster<br/>Event Streaming & Job Queue")
+    
+    %% Worker scaling and execution
+    KEDA("KEDA<br/>Auto Scaler") -.->|"Scales based on<br/>Kafka queue depth"| WorkerPool
+    
+    subgraph WorkerPool [" "]
+        direction LR
+        W1("Worker 1<br/>Rule Executor") 
+        W2("Worker 2<br/>Rule Executor") 
+        W3("Worker N<br/>Rule Executor")
+    end
+    
+    Kafka -->|"Consumes execution<br/>requests"| WorkerPool
+    
+    %% Logging flows
+    RB -->|"Rule execution<br/>logs & metrics"| Vector("Vector<br/>Log Processing & Forwarding")
+    Kafka -->|"Event logs<br/>(with lag)"| Vector
+    
+    %% Simplified sinks
+    Vector --> Sinks("External Log Sinks<br/>Elasticsearch, S3, DataDog, etc.")
+    
+    %% Styling
+    classDef primary fill:#e3f2fd,stroke:#1976d2,stroke-width:3px,color:#000
+    classDef secondary fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#000
+    classDef storage fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#000
+    classDef processing fill:#fff8e1,stroke:#f57c00,stroke-width:2px,color:#000
+    classDef scaling fill:#fce4ec,stroke:#c2185b,stroke-width:2px,color:#000
+    classDef optional stroke-dasharray: 5 5,color:#fff
+    
+    class LB,Traefik primary
+    class RB secondary
+    class PG,Redis,Kafka,Sinks storage
+    class WorkerPool,W1,W2,W3,Vector processing
+    class KEDA scaling
+    class SB,GF optional
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Load Balancer                        │
-│                    (Cloud Provider LB)                      │
-└────────────────────────────┬────────────────────────────────┘
-                             │
-┌────────────────────────────┴────────────────────────────────┐
-│                     Traefik Ingress                         │
-│              (TLS Termination, Routing)                     │
-└────────────────────────────┬────────────────────────────────┘
-                             │
-        ┌────────────────────┼───────────────────┐
-        │                    │                   │
-┌───────▼────────┐  ┌────────▼────────┐  ┌───────▼────────┐
-│   Rulebricks   │  │    Supabase     │  │    Grafana     │
-│      App       │  │    Dashboard    │  │   Dashboard    │
-│                │  │        *        │  │   (Optional)   │
-└────────────────┘  └─────────────────┘  └────────────────┘
-        │                    │
-        ├────────────────────┤
-        │                    │
-┌───────▼────────┐  ┌────────▼────────┐
-│    Workers     │  │   PostgreSQL    │
-│   (Solvers)    │  │    Database     │
-└────────────────┘  └─────────────────┘
-        │
-┌───────▼────────────────────────────────┐
-│             Kafka Cluster              │
-│        (Event Streaming Bus)           │
-└────────────────────────────────────────┘
-```
-
-*: For "self-hosted" deployments. Managed deployments will have a dashboard hosted outside the cluster by Supabase.
-**: Vector is also setup for rule/flow execution log forwarding
 
 ### Core Components
 
