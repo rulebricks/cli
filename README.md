@@ -364,14 +364,14 @@ Rulebricks deploys a complete, production-ready microservices architecture:
 ┌───────▼────────┐  ┌────────▼────────┐  ┌───────▼────────┐
 │   Rulebricks   │  │    Supabase     │  │    Grafana     │
 │      App       │  │    Dashboard    │  │   Dashboard    │
-│                │  │                 │  │                │
+│                │  │        *        │  │   (Optional)   │
 └────────────────┘  └─────────────────┘  └────────────────┘
         │                    │
         ├────────────────────┤
         │                    │
 ┌───────▼────────┐  ┌────────▼────────┐
 │    Workers     │  │   PostgreSQL    │
-│  (HPS/Kafka)   │  │    Database     │
+│   (Solvers)    │  │    Database     │
 └────────────────┘  └─────────────────┘
         │
 ┌───────▼────────────────────────────────┐
@@ -379,6 +379,9 @@ Rulebricks deploys a complete, production-ready microservices architecture:
 │        (Event Streaming Bus)           │
 └────────────────────────────────────────┘
 ```
+
+*: For "self-hosted" deployments. Managed deployments will have a dashboard hosted outside the cluster by Supabase.
+**: Vector is also setup for rule/flow execution log forwarding
 
 ### Core Components
 
