@@ -359,8 +359,8 @@ Rulebricks deploys a complete, production-ready microservices architecture:
 │              (TLS Termination, Routing)                     │
 └────────────────────────────┬────────────────────────────────┘
                              │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
+        ┌────────────────────┼───────────────────┐
+        │                    │                   │
 ┌───────▼────────┐  ┌────────▼────────┐  ┌───────▼────────┐
 │   Rulebricks   │  │    Supabase     │  │    Grafana     │
 │      App       │  │    Dashboard    │  │   Dashboard    │
