@@ -350,13 +350,13 @@ Rulebricks deploys a complete, production-ready microservices architecture:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        Load Balancer                         │
-│                    (Cloud Provider LB)                       │
+│                        Load Balancer                        │
+│                    (Cloud Provider LB)                      │
 └────────────────────────────┬────────────────────────────────┘
                              │
 ┌────────────────────────────┴────────────────────────────────┐
-│                     Traefik Ingress                          │
-│              (TLS Termination, Routing)                      │
+│                     Traefik Ingress                         │
+│              (TLS Termination, Routing)                     │
 └────────────────────────────┬────────────────────────────────┘
                              │
         ┌────────────────────┼────────────────────┐
