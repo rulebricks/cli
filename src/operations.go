@@ -863,6 +863,12 @@ func (ko *KubernetesOperations) InstallApplication(ctx context.Context, chartPat
 		return err
 	}
 
+	// Install metrics-server if not already present (required for HPA)
+	if err := ko.ensureMetricsServer(ctx); err != nil {
+		ko.progress.Warning("Failed to install metrics-server: %v", err)
+		// Continue with deployment even if metrics-server fails
+	}
+
 	// The chart is in the rulebricks subdirectory of the extracted path
 	rulebricksChartPath := filepath.Join(chartPath, "rulebricks")
 	return ko.installHelmChart(ctx, "rulebricks", rulebricksChartPath, namespace, values)
@@ -876,6 +882,26 @@ func (ko *KubernetesOperations) UninstallApplication(ctx context.Context) error 
 func (ko *KubernetesOperations) WaitForApplicationReady(ctx context.Context) error {
 	namespace := ko.config.GetNamespace("app")
 	return ko.waitForDeploymentReady(ctx, namespace, "rulebricks-app", 5*time.Minute)
+}
+
+func (ko *KubernetesOperations) ensureMetricsServer(ctx context.Context) error {
+	// Check if metrics-server is already installed
+	cmd := exec.CommandContext(ctx, "kubectl", "get", "deployment", "metrics-server", "-n", "kube-system")
+	if err := cmd.Run(); err == nil {
+		// Already installed
+		return nil
+	}
+
+	// Install metrics-server
+	ko.progress.Info("Installing metrics-server for pod autoscaling...")
+	cmd = exec.CommandContext(ctx, "kubectl", "apply", "-f", "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to install metrics-server: %w\n%s", err, string(output))
+	}
+
+	// Wait for metrics-server to be ready
+	ko.progress.Info("Waiting for metrics-server to be ready...")
+	return ko.waitForDeploymentReady(ctx, "kube-system", "metrics-server", 2*time.Minute)
 }
 
 // Monitoring installation
