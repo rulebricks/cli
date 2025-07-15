@@ -843,8 +843,30 @@ func (ko *KubernetesOperations) InstallCertManager(ctx context.Context) error {
 		return err
 	}
 
+	// Check if cert-manager is already installed
+	cmd := exec.CommandContext(ctx, "helm", "list", "-n", namespace, "-q")
+	output, _ := cmd.Output()
+	if strings.Contains(string(output), "cert-manager") {
+		// cert-manager already installed, skip
+		if ko.verbose {
+			ko.progress.Debug("cert-manager already installed in namespace %s", namespace)
+		}
+		return nil
+	}
+
+	// Check if CRDs already exist
+	checkCmd := exec.CommandContext(ctx, "kubectl", "get", "crd", "certificates.cert-manager.io")
+	crdExists := checkCmd.Run() == nil
+
 	values := map[string]interface{}{
-		"installCRDs": true,
+		"installCRDs": !crdExists, // Only install CRDs if they don't exist
+	}
+
+	// If CRDs exist but cert-manager isn't installed, we need to install without CRDs
+	if crdExists {
+		if ko.verbose {
+			ko.progress.Debug("cert-manager CRDs already exist, installing without CRDs")
+		}
 	}
 
 	return ko.installHelmChart(ctx, "cert-manager", "jetstack/cert-manager", namespace, values)
@@ -1315,6 +1337,10 @@ spec:
     - http01:
         ingress:
           class: traefik
+          ingressTemplate:
+            metadata:
+              annotations:
+                kubernetes.io/ingress.class: traefik
 `, tlsConfig.AcmeEmail)
 
 	return ko.applyYAML(ctx, issuerYAML)
@@ -1710,7 +1736,11 @@ func (ko *KubernetesOperations) createTLSSecret(ctx context.Context, namespace, 
 func (ko *KubernetesOperations) applyYAML(ctx context.Context, yaml string) error {
 	cmd := exec.CommandContext(ctx, "kubectl", "apply", "-f", "-")
 	cmd.Stdin = strings.NewReader(yaml)
-	return cmd.Run()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("kubectl apply failed: %w\nOutput: %s", err, string(output))
+	}
+	return nil
 }
 
 func (ko *KubernetesOperations) generateVectorConfigMap(config *VectorConfig, kafkaBrokers string) map[string]interface{} {

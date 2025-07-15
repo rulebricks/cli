@@ -168,7 +168,14 @@ func (d *Destroyer) discoverResources() error {
 		spinner.Fail()
 		return err
 	}
-	d.namespaces = namespaces
+	// Filter out cert-manager namespace - we preserve it for faster redeploys
+	filteredNamespaces := []string{}
+	for _, ns := range namespaces {
+		if ns != "cert-manager" {
+			filteredNamespaces = append(filteredNamespaces, ns)
+		}
+	}
+	d.namespaces = filteredNamespaces
 
 	// Discover components
 	components := []string{}
@@ -227,6 +234,12 @@ func (d *Destroyer) displayPlan() {
 		fmt.Printf("  • Kubernetes cluster: %s\n", d.config.Kubernetes.ClusterName)
 		fmt.Printf("  • Cloud provider: %s\n", d.config.Cloud.Provider)
 		fmt.Printf("  • Region: %s\n", d.config.Cloud.Region)
+	}
+
+	// Show preserved components
+	if !d.options.DestroyCluster && d.isComponentDeployed("cert-manager") {
+		fmt.Println("\nComponents to preserve:")
+		fmt.Printf("  • cert-manager (retains certificates for faster redeploys)\n")
 	}
 
 	fmt.Println(strings.Repeat("─", 50))
@@ -483,13 +496,11 @@ func (d *Destroyer) deleteIngress(ctx context.Context) error {
 		return nil
 	}
 
-	// Delete cert-manager first if it exists
-	if d.isComponentDeployed("cert-manager") {
-		if err := d.k8sOps.UninstallCertManager(ctx); err != nil {
-			d.progress.Debug("Failed to uninstall cert-manager: %v", err)
-		}
-	}
+	// NOTE: We intentionally preserve cert-manager to retain certificates
+	// This allows faster redeploys with existing valid certificates,
+	// avoids Let's Encrypt rate limits, and uses minimal resources when idle
 
+	// Only delete Traefik
 	return d.k8sOps.UninstallTraefik(ctx)
 }
 

@@ -621,7 +621,7 @@ func GetDefaultNamespace(projectName, component string) string {
 	case "traefik":
 		return fmt.Sprintf("%s-traefik", prefix)
 	case "cert-manager":
-		return fmt.Sprintf("%s-cert-manager", prefix)
+		return "cert-manager"
 	case "monitoring", "prometheus", "grafana":
 		return fmt.Sprintf("%s-monitoring", prefix)
 	case "supabase":
