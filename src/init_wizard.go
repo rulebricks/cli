@@ -685,7 +685,6 @@ func (w *InitWizard) configurePerformance() {
 		// Workers - up to 4 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
 		w.config.Performance.HPSWorkerReplicas = 3
 		w.config.Performance.HPSWorkerMaxReplicas = 8
-		w.config.Performance.KafkaPartitions = 24 // 3 topics * 8 max workers
 		w.config.Performance.KafkaRetentionHours = 24
 		w.config.Performance.KafkaReplicationFactor = 1
 		w.config.Performance.KafkaStorageSize = "10Gi"
@@ -708,7 +707,6 @@ func (w *InitWizard) configurePerformance() {
 		// Workers - up to 18 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
 		w.config.Performance.HPSWorkerReplicas = 5
 		w.config.Performance.HPSWorkerMaxReplicas = 20 // Balanced for 16 vCPU max capacity
-		w.config.Performance.KafkaPartitions = 60 // 3 topics * 20 max workers
 		w.config.Performance.KafkaRetentionHours = 72
 		w.config.Performance.KafkaReplicationFactor = 2
 		w.config.Performance.KafkaStorageSize = "50Gi"
@@ -731,7 +729,6 @@ func (w *InitWizard) configurePerformance() {
 		// Workers - up to 30 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
 		w.config.Performance.HPSWorkerReplicas = 10
 		w.config.Performance.HPSWorkerMaxReplicas = 40 // Balanced for 32 vCPU max capacity
-		w.config.Performance.KafkaPartitions = 120 // 3 topics * 40 max workers
 		w.config.Performance.KafkaRetentionHours = 168
 		w.config.Performance.KafkaReplicationFactor = 3
 		w.config.Performance.KafkaStorageSize = "100Gi"

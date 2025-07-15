@@ -500,7 +500,7 @@ func (s *KafkaStep) Execute(ctx context.Context, d *Deployer) error {
 
 	// Install Kafka
 	kafkaConfig := KafkaConfig{
-		Partitions:        d.config.Performance.KafkaPartitions,
+		Partitions:        d.config.GetKafkaPartitions(),
 		ReplicationFactor: d.config.Performance.KafkaReplicationFactor,
 		RetentionHours:    d.config.Performance.KafkaRetentionHours,
 		StorageSize:       d.config.Performance.KafkaStorageSize,
@@ -1444,6 +1444,11 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 		"enabled":      true,
 		"nodeSelector": nodeSelector,
 		"tolerations":  tolerations,
+		"responseTopics": map[string]interface{}{
+			"bulkSolve":     "bulk-solve-response",
+			"flows":         "flows-response",
+			"parallelSolve": "parallel-solve-response",
+		},
 		"autoscaling": map[string]interface{}{
 			"enabled": true,
 			"minReplicas": func() int {
@@ -1471,6 +1476,28 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 			"topics":       "bulk-solve,flows,parallel-solve",
 			"nodeSelector": nodeSelector,
 			"tolerations":  tolerations,
+			"topologySpreadConstraints": []interface{}{
+				map[string]interface{}{
+					"maxSkew":           1,
+					"topologyKey":       "topology.kubernetes.io/zone",
+					"whenUnsatisfiable": "DoNotSchedule",
+					"labelSelector": map[string]interface{}{
+						"matchLabels": map[string]interface{}{
+							"app": "rulebricks-hps-worker",
+						},
+					},
+				},
+				map[string]interface{}{
+					"maxSkew":           1,
+					"topologyKey":       "kubernetes.io/hostname",
+					"whenUnsatisfiable": "ScheduleAnyway",
+					"labelSelector": map[string]interface{}{
+						"matchLabels": map[string]interface{}{
+							"app": "rulebricks-hps-worker",
+						},
+					},
+				},
+			},
 			"keda": map[string]interface{}{
 				"enabled":         true,
 				"minReplicaCount": d.config.Performance.HPSWorkerReplicas,
@@ -1478,7 +1505,7 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 				"lagThreshold":    d.config.Performance.KafkaLagThreshold,
 				"pollingInterval": d.config.Performance.KedaPollingInterval,
 				"cooldownPeriod":  d.config.Performance.ScaleDownStabilization,
-				"partitions":      d.config.Performance.KafkaPartitions / 3, // Divide by 3 topics (bulk-solve, flows, parallel-solve)
+				"partitions":      d.config.GetKafkaPartitions() / 6, // max_workers partitions per topic
 			},
 		}
 	}

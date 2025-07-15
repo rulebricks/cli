@@ -1280,6 +1280,29 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 				"protocol": "PLAINTEXT",
 			},
 		},
+		"affinity": map[string]interface{}{
+			"podAntiAffinity": map[string]interface{}{
+				"requiredDuringSchedulingIgnoredDuringExecution": []interface{}{
+					map[string]interface{}{
+						"labelSelector": map[string]interface{}{
+							"matchExpressions": []interface{}{
+								map[string]interface{}{
+									"key":      "app.kubernetes.io/instance",
+									"operator": "In",
+									"values":   []string{"kafka"},
+								},
+								map[string]interface{}{
+									"key":      "app.kubernetes.io/component",
+									"operator": "In",
+									"values":   []string{"controller"},
+								},
+							},
+						},
+						"topologyKey": "topology.kubernetes.io/zone",
+					},
+				},
+			},
+		},
 	}
 
 	// Add ARM64 support for GCP
@@ -1318,8 +1341,10 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 	ko.progress.Info("Waiting for Kafka to be ready...")
 	time.Sleep(30 * time.Second)
 
-	// Calculate partitions per topic (divide by 3 for bulk-solve, flows, parallel-solve)
-	partitionsPerTopic := config.Partitions / 3
+	// Calculate partitions per topic
+	// config.Partitions should be max_workers * 6 (3 main + 3 response topics)
+	// This gives each topic max_workers partitions
+	partitionsPerTopic := config.Partitions / 6
 	if partitionsPerTopic < 1 {
 		partitionsPerTopic = 1
 	}
@@ -1331,6 +1356,7 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 
 	topics := []string{"bulk-solve", "flows", "parallel-solve"}
 
+	// Create main topics
 	for _, topic := range topics {
 		ko.progress.Info("Creating Kafka topic '%s' with %d partitions...", topic, partitionsPerTopic)
 
@@ -1354,7 +1380,35 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 		}
 	}
 
-	ko.progress.Success("Kafka topics created successfully")
+	// Response topics get the same number of partitions as main topics
+	responsePartitions := partitionsPerTopic
+
+	// Create response topics
+	for _, topic := range topics {
+		responseTopic := topic + "-response"
+		ko.progress.Info("Creating Kafka response topic '%s' with %d partitions...", responseTopic, responsePartitions)
+
+		cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, "kafka-controller-0", "--",
+			"kafka-topics.sh",
+			"--bootstrap-server", "localhost:9092",
+			"--create",
+			"--if-not-exists",
+			"--topic", responseTopic,
+			"--partitions", fmt.Sprintf("%d", responsePartitions),
+			"--replication-factor", fmt.Sprintf("%d", replicationFactor))
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			// Check if topic already exists
+			if strings.Contains(string(output), "already exists") {
+				ko.progress.Info("Response topic '%s' already exists", responseTopic)
+			} else {
+				return fmt.Errorf("failed to create response topic '%s': %w\nOutput: %s", responseTopic, err, string(output))
+			}
+		}
+	}
+
+	ko.progress.Success("Kafka topics and response topics created successfully")
 	return nil
 }
 

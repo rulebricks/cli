@@ -553,9 +553,7 @@ func (c *Config) ApplyDefaults() {
 	if c.Performance.HPSMaxReplicas == 0 {
 		c.Performance.HPSMaxReplicas = 5
 	}
-	if c.Performance.KafkaPartitions == 0 {
-		c.Performance.KafkaPartitions = 10
-	}
+
 	if c.Performance.KafkaRetentionHours == 0 {
 		c.Performance.KafkaRetentionHours = 24
 	}
@@ -635,4 +633,25 @@ func GetDefaultNamespace(projectName, component string) string {
 	default:
 		return fmt.Sprintf("%s-default", prefix)
 	}
+}
+
+// GetKafkaPartitions returns the total number of Kafka partitions based on max workers
+// Formula ensures each topic (main and response) gets at least max_workers partitions
+func (c *Config) GetKafkaPartitions() int {
+	// If KafkaPartitions is explicitly set and greater than 0, use it
+	if c.Performance.KafkaPartitions > 0 {
+		return c.Performance.KafkaPartitions
+	}
+
+	// Otherwise derive from max workers
+	// We have 3 main topics and 3 response topics (6 total)
+	// Each should have at least max_workers partitions
+	maxWorkers := c.Performance.HPSWorkerMaxReplicas
+	if maxWorkers < 1 {
+		maxWorkers = 1
+	}
+
+	// Total partitions = max_workers * 6
+	// This ensures each topic gets max_workers partitions
+	return maxWorkers * 6
 }
