@@ -1303,7 +1303,59 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 		}
 	}
 
-	return ko.installHelmChart(ctx, "kafka", "bitnami/kafka", namespace, values)
+	if err := ko.installHelmChart(ctx, "kafka", "bitnami/kafka", namespace, values); err != nil {
+		return err
+	}
+
+	// Create topics with correct partition count
+	return ko.createKafkaTopics(ctx, config)
+}
+
+func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config KafkaConfig) error {
+	namespace := ko.config.GetNamespace("execution")
+
+	// Wait for Kafka to be ready
+	ko.progress.Info("Waiting for Kafka to be ready...")
+	time.Sleep(30 * time.Second)
+
+	// Calculate partitions per topic (divide by 3 for bulk-solve, flows, parallel-solve)
+	partitionsPerTopic := config.Partitions / 3
+	if partitionsPerTopic < 1 {
+		partitionsPerTopic = 1
+	}
+
+	replicationFactor := config.ReplicationFactor
+	if replicationFactor < 1 {
+		replicationFactor = 1
+	}
+
+	topics := []string{"bulk-solve", "flows", "parallel-solve"}
+
+	for _, topic := range topics {
+		ko.progress.Info("Creating Kafka topic '%s' with %d partitions...", topic, partitionsPerTopic)
+
+		cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, "kafka-controller-0", "--",
+			"kafka-topics.sh",
+			"--bootstrap-server", "localhost:9092",
+			"--create",
+			"--if-not-exists",
+			"--topic", topic,
+			"--partitions", fmt.Sprintf("%d", partitionsPerTopic),
+			"--replication-factor", fmt.Sprintf("%d", replicationFactor))
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			// Check if topic already exists
+			if strings.Contains(string(output), "already exists") {
+				ko.progress.Info("Topic '%s' already exists", topic)
+			} else {
+				return fmt.Errorf("failed to create topic '%s': %w\nOutput: %s", topic, err, string(output))
+			}
+		}
+	}
+
+	ko.progress.Success("Kafka topics created successfully")
+	return nil
 }
 
 func (ko *KubernetesOperations) UninstallKafka(ctx context.Context) error {

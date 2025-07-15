@@ -1082,11 +1082,12 @@ spec:
     - match: Host(%s)
       kind: Rule
       services:
-        - name: traefik
+        - name: rulebricks
+          namespace: %s
           port: 80
   tls:
     secretName: %s-tls`, d.config.Project.Name, traefikNamespace,
-			fmt.Sprintf("`%s`", d.config.Project.Domain), d.config.Project.Name)
+			fmt.Sprintf("`%s`", d.config.Project.Domain), d.config.GetNamespace("app"), d.config.Project.Name)
 
 	if err := d.k8sOps.applyYAML(ctx, ingressRouteYAML); err != nil {
 		spinner.Fail()
@@ -1123,6 +1124,48 @@ spec:
 
 			if err := d.k8sOps.applyYAML(ctx, subdomainYAML); err != nil {
 				d.progress.Debug("Failed to create HTTP redirect for subdomain %s: %v", domain, err)
+			}
+
+			// Create HTTPS IngressRoute for subdomain
+			var serviceName, serviceNamespace string
+			var servicePort int
+
+			// Determine service based on subdomain
+			if strings.HasPrefix(domain, "supabase.") {
+				serviceName = "supabase-kong"
+				serviceNamespace = d.config.GetNamespace("supabase")
+				servicePort = 8000
+			} else if strings.HasPrefix(domain, "grafana.") {
+				serviceName = "grafana"
+				serviceNamespace = d.config.GetNamespace("monitoring")
+				servicePort = 80
+			} else {
+				// Skip unknown subdomains
+				continue
+			}
+
+			httpsSubdomainYAML := fmt.Sprintf(`
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: %s-tls-%s
+  namespace: %s
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(%s)
+      kind: Rule
+      services:
+        - name: %s
+          namespace: %s
+          port: %d
+  tls:
+    secretName: %s-tls`, d.config.Project.Name, strings.ReplaceAll(domain, ".", "-"), traefikNamespace,
+				fmt.Sprintf("`%s`", domain), serviceName, serviceNamespace, servicePort, d.config.Project.Name)
+
+			if err := d.k8sOps.applyYAML(ctx, httpsSubdomainYAML); err != nil {
+				d.progress.Debug("Failed to create HTTPS route for subdomain %s: %v", domain, err)
 			}
 		}
 	}
