@@ -695,6 +695,7 @@ func (ko *KubernetesOperations) InstallTraefik(ctx context.Context, chartPath st
 	}
 
 	// Use the traefik values file from the extracted chart
+	// Always start with no-TLS values - TLS will be configured later in a separate step
 	traefikValuesPath := filepath.Join(chartPath, "rulebricks", "traefik-values-no-tls.yaml")
 
 	// Create ARM64 values file for GCP if needed

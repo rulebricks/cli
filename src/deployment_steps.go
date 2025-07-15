@@ -807,325 +807,244 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 	// Create a temporary values file that overrides the ACME configuration
 	traefikNamespace := d.config.GetNamespace("traefik")
 
-	// Determine storage class based on cloud provider
-	storageClass := "gp2" // AWS default
-	switch d.config.Cloud.Provider {
-	case "azure":
-		storageClass = "default"
-	case "gcp":
-		storageClass = "standard"
-	}
+	// Install cert-manager first if not already installed
+	spinner := d.progress.StartSpinner("Installing cert-manager")
+		if err := d.k8sOps.InstallCertManager(ctx); err != nil {
+			spinner.Fail()
+			return fmt.Errorf("failed to install cert-manager: %w", err)
+		}
+		spinner.Success()
 
-	tlsOverrides := map[string]interface{}{
-		"additionalArguments": []string{
-			"--api.insecure=false",
-			"--api.dashboard=true",
-			"--log.level=DEBUG",
-			"--accesslog=true",
-			"--entrypoints.metrics.address=:9100",
-			"--entrypoints.traefik.address=:9000",
-			"--entrypoints.web.address=:8000",
-			"--entrypoints.websecure.address=:8443",
-			"--entrypoints.web.http.redirections.entryPoint.to=websecure",
-			"--entrypoints.web.http.redirections.entryPoint.scheme=https",
-			fmt.Sprintf("--certificatesresolvers.le.acme.email=%s", tlsConfig.AcmeEmail),
-			"--certificatesresolvers.le.acme.storage=/data/acme.json",
-			"--certificatesresolvers.le.acme.tlschallenge=true",
-			"--certificatesresolvers.le.acme.caserver=https://acme-v02.api.letsencrypt.org/directory",
-		},
-		"ports": map[string]interface{}{
-			"websecure": map[string]interface{}{
-				"port":        8443,
-				"exposedPort": 443,
-				"expose": map[string]interface{}{
-					"enabled": true,
-					"port":    443,
-				},
-				"tls": map[string]interface{}{
-					"enabled":      true,
-					"certResolver": "le",
-					"domains": []map[string]interface{}{
-						{
-							"main": d.config.Project.Domain,
-						},
+		// Configure Let's Encrypt issuer
+		spinner = d.progress.StartSpinner("Configuring Let's Encrypt issuer")
+		if err := d.k8sOps.ConfigureLetsEncrypt(ctx, &TLSConfig{
+			AcmeEmail: tlsConfig.AcmeEmail,
+		}); err != nil {
+			spinner.Fail()
+			return fmt.Errorf("failed to configure Let's Encrypt: %w", err)
+		}
+		spinner.Success()
+
+		// Create certificates for domains
+		spinner = d.progress.StartSpinner("Creating TLS certificates")
+
+		// Build list of all domains
+		var allDomains []string
+		allDomains = append(allDomains, d.config.Project.Domain)
+
+		// Add monitoring domain if enabled
+		includeGrafana := false
+		if d.config.Monitoring.Enabled {
+			mode := d.config.Monitoring.Mode
+			if mode == "" {
+				mode = "local"
+			}
+			if mode == "local" {
+				includeGrafana = true
+			}
+		}
+		if includeGrafana {
+			allDomains = append(allDomains, fmt.Sprintf("grafana.%s", d.config.Project.Domain))
+		}
+
+		// Add Supabase domain if self-hosted
+		if d.config.Database.Type == "self-hosted" {
+			allDomains = append(allDomains, fmt.Sprintf("supabase.%s", d.config.Project.Domain))
+		}
+
+		// Add any additional domains from config
+		allDomains = append(allDomains, tlsConfig.Domains...)
+
+		// Create certificate with all domains
+		dnsNamesYAML := ""
+		for _, domain := range allDomains {
+			dnsNamesYAML += fmt.Sprintf("\n  - %s", domain)
+		}
+
+		certYAML := fmt.Sprintf(`
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: %s-tls
+  namespace: %s
+spec:
+  secretName: %s-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  commonName: %s
+  dnsNames:%s`, d.config.Project.Name, traefikNamespace, d.config.Project.Name,
+			d.config.Project.Domain, dnsNamesYAML)
+
+		// Apply the certificate
+		if err := d.k8sOps.applyYAML(ctx, certYAML); err != nil {
+			spinner.Fail()
+			return fmt.Errorf("failed to create certificate: %w", err)
+		}
+		spinner.Success()
+
+		// Now update Traefik to use TLS without persistence
+		spinner = d.progress.StartSpinner("Updating Traefik for TLS with cert-manager")
+
+		// Use the TLS values file but disable persistence since cert-manager handles certs
+		traefikTLSValuesPath := filepath.Join(d.extractedChartPath, "rulebricks", "traefik-values-tls.yaml")
+
+		// Create override values that disable persistence and ACME
+		certManagerOverrides := map[string]interface{}{
+			"persistence": map[string]interface{}{
+				"enabled": false, // No persistence needed with cert-manager
+			},
+			"ports": map[string]interface{}{
+				"websecure": map[string]interface{}{
+					"port":        8443,
+					"exposedPort": 443,
+					"expose": map[string]interface{}{
+						"enabled": true,
+						"port":    443,
+					},
+					"tls": map[string]interface{}{
+						"enabled": true,
+						// No certResolver - cert-manager provides certs
 					},
 				},
 			},
-		},
-		"persistence": map[string]interface{}{
-			"enabled":      true,
-			"storageClass": storageClass,
-		},
-	}
-
-	// Add ARM64 support for GCP
-	if d.config.Cloud.Provider == "gcp" {
-		tlsOverrides["nodeSelector"] = map[string]interface{}{
-			"kubernetes.io/arch": "arm64",
-		}
-		tlsOverrides["tolerations"] = []interface{}{
-			map[string]interface{}{
-				"key":      "kubernetes.io/arch",
-				"operator": "Equal",
-				"value":    "arm64",
-				"effect":   "NoSchedule",
+			// Remove ACME-related arguments
+			"additionalArguments": []string{
+				"--api.insecure=false",
+				"--api.dashboard=true",
+				"--log.level=INFO",
+				"--accesslog=false",
+				"--entrypoints.metrics.address=:9100",
+				"--entrypoints.traefik.address=:9000",
+				"--entrypoints.web.address=:8000",
+				"--entrypoints.websecure.address=:8443",
+				"--entrypoints.web.http.redirections.entryPoint.to=websecure",
+				"--entrypoints.web.http.redirections.entryPoint.scheme=https",
 			},
 		}
-	}
 
-	// Add SANs if needed
-	domains := tlsOverrides["ports"].(map[string]interface{})["websecure"].(map[string]interface{})["tls"].(map[string]interface{})["domains"].([]map[string]interface{})[0]
-
-	var sans []string
-	// Add monitoring domain if enabled
-	// Check if Grafana is enabled based on monitoring mode
-	includeGrafana := false
-	if d.config.Monitoring.Enabled {
-		mode := d.config.Monitoring.Mode
-		if mode == "" {
-			mode = "local"
+		// Write override values to temp file
+		overrideValuesPath := filepath.Join(os.TempDir(), "traefik-certmanager-values.yaml")
+		overrideValuesYAML, err := yaml.Marshal(certManagerOverrides)
+		if err != nil {
+			spinner.Fail()
+			return fmt.Errorf("failed to marshal cert-manager override values: %w", err)
 		}
-		if mode == "local" {
-			includeGrafana = true
+		if err := os.WriteFile(overrideValuesPath, overrideValuesYAML, 0644); err != nil {
+			spinner.Fail()
+			return fmt.Errorf("failed to write cert-manager override values: %w", err)
 		}
-	}
+		defer os.Remove(overrideValuesPath)
 
-	if includeGrafana {
-		sans = append(sans, fmt.Sprintf("grafana.%s", d.config.Project.Domain))
-	}
-	// Add Supabase domain if self-hosted
-	if d.config.Database.Type == "self-hosted" {
-		sans = append(sans, fmt.Sprintf("supabase.%s", d.config.Project.Domain))
-	}
-	// Add any additional domains from config
-	sans = append(sans, tlsConfig.Domains...)
-
-	if len(sans) > 0 {
-		domains["sans"] = sans
-	}
-
-	// Create temporary values file
-	tlsValuesFile, err := createTempFile("traefik-tls-", ".yaml", nil)
-	if err != nil {
-		return fmt.Errorf("failed to create TLS values file: %w", err)
-	}
-	defer os.Remove(tlsValuesFile)
-
-	// Write the values to the file
-	valuesYAML, err := yaml.Marshal(tlsOverrides)
-	if err != nil {
-		return fmt.Errorf("failed to marshal TLS values: %w", err)
-	}
-	if err := os.WriteFile(tlsValuesFile, valuesYAML, 0644); err != nil {
-		return fmt.Errorf("failed to write TLS values file: %w", err)
-	}
-
-	// Use the traefik-values-tls.yaml from the extracted chart
-	traefikTLSValuesPath := filepath.Join(d.extractedChartPath, "rulebricks", "traefik-values-tls.yaml")
-
-	// Build helm upgrade command with BOTH values files (just like the old implementation)
-	args := []string{
-		"upgrade", "--install", "traefik", "traefik/traefik",
-		"--namespace", traefikNamespace,
-		"-f", traefikTLSValuesPath, // Base TLS configuration
-		"-f", tlsValuesFile, // Our overrides
-		"--wait",
-	}
-
-	cmd := exec.CommandContext(ctx, "helm", args...)
-
-	spinner := d.progress.StartSpinner("Configuring TLS certificates")
-
-	var output []byte
-	if d.options.Verbose {
-		d.progress.Debug("Running: helm %s", strings.Join(args, " "))
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		err = cmd.Run()
-	} else {
-		output, err = cmd.CombinedOutput()
-	}
-
-	if err != nil {
-		spinner.Fail()
-		if len(output) > 0 {
-			return fmt.Errorf("failed to configure TLS: %w\nOutput: %s", err, string(output))
-		}
-		return fmt.Errorf("failed to configure TLS: %w", err)
-	}
-	spinner.Success()
-
-	// Wait for Traefik to be ready
-	cmd = exec.CommandContext(ctx, "kubectl", "wait", "--for=condition=ready", "pod",
-		"-l", "app.kubernetes.io/name=traefik",
-		"-n", traefikNamespace,
-		"--timeout=300s")
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("traefik pod failed to become ready: %w", err)
-	}
-
-	// Check certificate status with retries
-	maxAttempts := 30 // 5 minutes total
-	certificateObtained := false
-
-	for i := 0; i < maxAttempts; i++ {
-		// For multi-replica deployments, check any available pod
-		// First get a running traefik pod
-		getPodCmd := exec.CommandContext(ctx, "kubectl", "get", "pods", "-n", traefikNamespace,
-			"-l", "app.kubernetes.io/name=traefik",
-			"-o", "jsonpath={.items[0].metadata.name}")
-
-		podOutput, err := getPodCmd.Output()
-		if err != nil || len(podOutput) == 0 {
-			time.Sleep(10 * time.Second)
-			continue
+		// Update Traefik with TLS configuration
+		args := []string{
+			"upgrade", "--install", "traefik", "traefik/traefik",
+			"--namespace", traefikNamespace,
+			"-f", traefikTLSValuesPath,
+			"-f", overrideValuesPath,
+			"--wait", "--timeout", "5m",
 		}
 
-		podName := strings.TrimSpace(string(podOutput))
-
-		// Check if certificate is ready by querying the pod
-		checkCmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", traefikNamespace,
-			podName, "--",
-			"cat", "/data/acme.json")
-
-		output, err := checkCmd.Output()
-		if err == nil && len(output) > 100 { // acme.json should have content
-			if d.options.Verbose {
-				d.progress.Debug("ACME storage file size: %d bytes", len(output))
-			}
-			certificateObtained = true
-			fmt.Println() // Clear the progress line
-			break
-		}
-
-		if i%6 == 0 {
-			fmt.Printf("\r⏳ Waiting for TLS certificate... (%d seconds elapsed)", i*10)
-			if d.options.Verbose {
-				// Check traefik logs for any errors - use label selector for multi-replica
-				logsCmd := exec.CommandContext(ctx, "kubectl", "logs", "-n", traefikNamespace,
-					"-l", "app.kubernetes.io/name=traefik", "--tail=20", "--prefix=true")
-				if logsOutput, err := logsCmd.Output(); err == nil {
-					d.progress.Debug("Recent Traefik logs:\n%s", string(logsOutput))
-				}
-			}
-		}
-
-		// Give more time on the first attempt for DNS propagation
-		if i == 0 {
-			time.Sleep(20 * time.Second)
-		} else {
-			time.Sleep(10 * time.Second)
-		}
-	}
-
-	if !certificateObtained {
-		fmt.Println() // Clear the progress line
+		cmd := exec.CommandContext(ctx, "helm", args...)
+		var output []byte
 		if d.options.Verbose {
-			// Get final traefik logs for debugging
-			logsCmd := exec.CommandContext(ctx, "kubectl", "logs", "-n", traefikNamespace,
-				"deployment/traefik", "--tail=50")
-			if logsOutput, err := logsCmd.Output(); err == nil {
-				d.progress.Error("TLS configuration failed. Traefik logs:\n%s", string(logsOutput))
-			}
-
-			// Check traefik pod status
-			podCmd := exec.CommandContext(ctx, "kubectl", "describe", "pod", "-n", traefikNamespace,
-				"-l", "app.kubernetes.io/name=traefik")
-			if podOutput, err := podCmd.Output(); err == nil {
-				d.progress.Debug("Traefik pod status:\n%s", string(podOutput))
-			}
+			d.progress.Debug("Running: helm %s", strings.Join(args, " "))
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			err = cmd.Run()
+		} else {
+			output, err = cmd.CombinedOutput()
 		}
 
-		return fmt.Errorf("timeout waiting for TLS certificate after 5 minutes - check if domain is accessible and DNS is properly configured")
-	}
+		if err != nil {
+			spinner.Fail()
+			if len(output) > 0 {
+				return fmt.Errorf("failed to update Traefik for TLS: %w\nOutput: %s", err, string(output))
+			}
+			return fmt.Errorf("failed to update Traefik for TLS: %w", err)
+		}
+		spinner.Success()
 
-	// Give DNS and certificate a moment to propagate
-	time.Sleep(10 * time.Second)
+		// Wait for certificate to be ready
+		spinner = d.progress.StartSpinner("Waiting for certificate to be issued")
+		if err := d.k8sOps.WaitForCertificates(ctx); err != nil {
+			spinner.Fail()
+			return fmt.Errorf("failed waiting for certificate: %w", err)
+		}
+		spinner.Success()
 
-	// Verify HTTPS is working
-	httpsURL := fmt.Sprintf("https://%s", d.config.Project.Domain)
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: false,
+		// Create IngressRoute for TLS termination
+		ingressRouteYAML := fmt.Sprintf(`
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: %s-tls
+  namespace: %s
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(%s)
+      kind: Rule
+      services:
+        - name: traefik
+          port: 80
+  tls:
+    secretName: %s-tls`, d.config.Project.Name, traefikNamespace,
+			fmt.Sprintf("`%s`", d.config.Project.Domain), d.config.Project.Name)
+
+		if err := d.k8sOps.applyYAML(ctx, ingressRouteYAML); err != nil {
+			return fmt.Errorf("failed to create IngressRoute: %w", err)
+		}
+
+		d.progress.Success("TLS configured successfully with cert-manager")
+
+		// Verify HTTPS is working
+		httpsURL := fmt.Sprintf("https://%s", d.config.Project.Domain)
+		client := &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: false,
+				},
 			},
-		},
-	}
+		}
 
-	// Wait indefinitely for HTTPS to be ready
-	for i := 0; ; i++ {
-		resp, err := client.Get(httpsURL)
-		if err == nil {
-			defer resp.Body.Close()
-			if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
-				cert := resp.TLS.PeerCertificates[0]
-				// Check if certificate is valid for the domain
-				if err := cert.VerifyHostname(d.config.Project.Domain); err == nil {
-					// Also get the load balancer endpoint for information
-					lbCmd := exec.CommandContext(ctx, "kubectl", "get", "svc", "traefik",
-						"-n", traefikNamespace,
-						"-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}")
+		// Wait for HTTPS to be ready
+		d.progress.Info("Waiting for HTTPS endpoints to be ready...")
+		for i := 0; i < 30; i++ { // 5 minutes max
+			resp, err := client.Get(httpsURL)
+			if err == nil {
+				defer resp.Body.Close()
+				if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
+					cert := resp.TLS.PeerCertificates[0]
+					// Check if certificate is valid for the domain
+					if err := cert.VerifyHostname(d.config.Project.Domain); err == nil {
+						d.progress.Success("Main application HTTPS verified")
 
-					if lbOutput, err := lbCmd.Output(); err == nil {
-						lbEndpoint := strings.TrimSpace(string(lbOutput))
-						if lbEndpoint != "" {
-							d.progress.Info("Load balancer endpoint: %s", lbEndpoint)
-						}
-					}
-
-					d.progress.Success("Main application HTTPS verified")
-
-					// For self-hosted Supabase, also verify the Supabase domain
-					if d.config.Database.Type == "self-hosted" {
-						supabaseURL := fmt.Sprintf("https://supabase.%s", d.config.Project.Domain)
-						d.progress.Info("Verifying Supabase HTTPS endpoint...")
-
-						// Give Supabase endpoint a bit more time to propagate
-						time.Sleep(5 * time.Second)
-
-						// Wait indefinitely for Supabase HTTPS to be ready
-						for j := 0; ; j++ {
+						// For self-hosted Supabase, also verify the Supabase domain
+						if d.config.Database.Type == "self-hosted" {
+							supabaseURL := fmt.Sprintf("https://supabase.%s", d.config.Project.Domain)
 							supabaseResp, err := client.Get(supabaseURL)
 							if err == nil {
 								defer supabaseResp.Body.Close()
-								if supabaseResp.TLS != nil && len(supabaseResp.TLS.PeerCertificates) > 0 {
-									cert := supabaseResp.TLS.PeerCertificates[0]
-									// Check if certificate is valid for the subdomain
-									if err := cert.VerifyHostname(fmt.Sprintf("supabase.%s", d.config.Project.Domain)); err == nil {
-										d.progress.Success("Supabase HTTPS verified")
-										return nil
-									}
-								}
+								d.progress.Success("Supabase HTTPS verified")
 							}
-
-							if d.options.Verbose {
-								d.progress.Debug("Supabase HTTPS not ready yet, retrying in 10 seconds... (attempt %d)", j+1)
-								if err != nil {
-									d.progress.Debug("Error: %v", err)
-								}
-							}
-							time.Sleep(10 * time.Second)
 						}
-					}
 
-					return nil
+						return nil
+					}
 				}
 			}
-		}
 
-		if d.options.Verbose {
-			d.progress.Debug("HTTPS not ready yet, retrying in 10 seconds... (attempt %d)", i+1)
-			if err != nil {
-				d.progress.Debug("Error: %v", err)
+			// Show progress
+			if i%6 == 0 && i > 0 { // Every minute
+				fmt.Printf("\r⌛ Still waiting for HTTPS... (%ds elapsed)", i*10)
 			}
+			time.Sleep(10 * time.Second)
 		}
-		time.Sleep(10 * time.Second)
-	}
 
-	// This should never be reached since we loop indefinitely
-	return nil
+		return fmt.Errorf("timeout waiting for HTTPS after 5 minutes")
 }
 
 func (s *TLSConfigurationStep) Rollback(ctx context.Context, d *Deployer) error {
