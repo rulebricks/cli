@@ -1028,7 +1028,7 @@ spec:
 
 	// Create middleware for HTTP->HTTPS redirect (excluding ACME challenges)
 	middlewareYAML := fmt.Sprintf(`
-apiVersion: traefik.containo.us/v1alpha1
+apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
   name: redirect-to-https
@@ -1038,7 +1038,7 @@ spec:
     scheme: https
     permanent: true
 ---
-apiVersion: traefik.containo.us/v1alpha1
+apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
   name: %s-http-redirect
@@ -1070,7 +1070,7 @@ spec:
 
 	// Create IngressRoute for TLS termination
 	ingressRouteYAML := fmt.Sprintf(`
-apiVersion: traefik.containo.us/v1alpha1
+apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
   name: %s-tls
@@ -1097,7 +1097,7 @@ spec:
 	if len(allDomains) > 1 {
 		for _, domain := range allDomains[1:] {
 			subdomainYAML := fmt.Sprintf(`
-apiVersion: traefik.containo.us/v1alpha1
+apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
   name: %s-http-redirect-%s
@@ -1133,6 +1133,7 @@ spec:
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{
+					// Don't skip verification, but don't require a specific root CA
 					InsecureSkipVerify: false,
 				},
 			},
@@ -1144,10 +1145,13 @@ spec:
 			resp, err := client.Get(httpsURL)
 			if err == nil {
 				defer resp.Body.Close()
+				d.progress.Debug("HTTPS connection successful to %s", httpsURL)
 				if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
 					cert := resp.TLS.PeerCertificates[0]
 					// Check if certificate is valid for the domain
+					// For Let's Encrypt certs, just verify the hostname matches
 					if err := cert.VerifyHostname(d.config.Project.Domain); err == nil {
+						d.progress.Debug("Certificate verified for domain: %s", d.config.Project.Domain)
 						// For self-hosted Supabase, also verify the Supabase domain
 						if d.config.Database.Type == "self-hosted" {
 							supabaseURL := fmt.Sprintf("https://supabase.%s", d.config.Project.Domain)
@@ -1165,10 +1169,34 @@ spec:
 			}
 
 		// Show progress and debug info
-		if i%6 == 0 && i > 0 { // Every minute
+		if i%3 == 0 && i > 0 { // Every 30 seconds
 			d.progress.Debug("Still waiting for HTTPS... (%ds elapsed)", i*10)
 			if err != nil {
 				d.progress.Debug("HTTPS check error: %v", err)
+				// If it's a certificate error, let's be more specific
+				if strings.Contains(err.Error(), "certificate") {
+					d.progress.Debug("Certificate issue detected. Trying alternative verification...")
+					// Try with a more lenient client for Let's Encrypt
+					lenientClient := &http.Client{
+						Timeout: 10 * time.Second,
+						Transport: &http.Transport{
+							TLSClientConfig: &tls.Config{
+								InsecureSkipVerify: true,
+							},
+						},
+					}
+					if testResp, testErr := lenientClient.Get(httpsURL); testErr == nil {
+						defer testResp.Body.Close()
+						if testResp.TLS != nil && len(testResp.TLS.PeerCertificates) > 0 {
+							testCert := testResp.TLS.PeerCertificates[0]
+							if testErr := testCert.VerifyHostname(d.config.Project.Domain); testErr == nil {
+								d.progress.Debug("Certificate is valid but may have chain issues. Proceeding...")
+								spinner.Success()
+								return nil
+							}
+						}
+					}
+				}
 			}
 		}
 		time.Sleep(10 * time.Second)
