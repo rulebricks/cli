@@ -725,12 +725,53 @@ func (ko *KubernetesOperations) InstallTraefik(ctx context.Context, chartPath st
 		defer os.Remove(gcpValuesPath)
 	}
 
+	// Create minimal overrides for HPA and storage class
+	overrideValues := map[string]interface{}{}
+
+	// Configure autoscaling based on performance settings
+	minReplicas := ko.config.Performance.TraefikMinReplicas
+	maxReplicas := ko.config.Performance.TraefikMaxReplicas
+		if minReplicas == 0 {
+			minReplicas = 1
+		}
+		if maxReplicas == 0 {
+			maxReplicas = 2
+		}
+
+	overrideValues["autoscaling"] = map[string]interface{}{
+		"minReplicas": minReplicas,
+		"maxReplicas": maxReplicas,
+	}
+
+	// Set storage class based on cloud provider
+	storageClass := "gp2" // AWS default
+	switch ko.config.Cloud.Provider {
+	case "azure":
+		storageClass = "default"
+	case "gcp":
+		storageClass = "standard"
+	}
+	overrideValues["persistence"] = map[string]interface{}{
+		"storageClass": storageClass,
+	}
+
+	overrideValuesPath := filepath.Join(os.TempDir(), "traefik-override-values.yaml")
+	overrideValuesYAML, err := yaml.Marshal(overrideValues)
+	if err != nil {
+		return fmt.Errorf("failed to marshal Traefik override values: %w", err)
+	}
+	if err := os.WriteFile(overrideValuesPath, overrideValuesYAML, 0644); err != nil {
+		return fmt.Errorf("failed to write Traefik override values file: %w", err)
+	}
+	defer os.Remove(overrideValuesPath)
+
 	// Install Traefik with the values file(s)
 	args := []string{
 		"upgrade", "--install", "traefik", "traefik/traefik",
 		"--namespace", namespace,
 		"--create-namespace",
 		"-f", traefikValuesPath,
+		"-f", overrideValuesPath, // Include minimal overrides
 	}
 
 	// Add GCP ARM64 values if on GCP
@@ -751,7 +792,6 @@ func (ko *KubernetesOperations) InstallTraefik(ctx context.Context, chartPath st
 
 	// Capture output for debugging
 	var output []byte
-	var err error
 	if ko.verbose {
 		err = cmd.Run()
 	} else {

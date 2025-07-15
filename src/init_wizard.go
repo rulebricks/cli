@@ -647,22 +647,22 @@ func (w *InitWizard) configurePerformance() {
 
 	fmt.Printf("│ ")
 	color.New(color.FgGreen, color.Bold).Printf("%-10s", "Small")
-	fmt.Printf(" │ %-25s │ %-35s │\n", "Development/Testing", "2-4 CPUs, 4-8GB RAM, 1-2 nodes")
-	fmt.Printf("│            │ %-25s │ %-35s │\n", "", "<100 rules/sec")
+	fmt.Printf(" │ %-25s │ %-35s │\n", "Development/Testing", "6-8 CPUs, 11-15GB RAM, 3-4 nodes")
+	fmt.Printf("│            │ %-25s │ %-35s │\n", "", "<1000 rules/sec")
 
 	color.New(color.FgCyan).Println("├──────────────────────────────────────────────────────────────────────────────┤")
 
 	fmt.Printf("│ ")
 	color.New(color.FgYellow, color.Bold).Printf("%-10s", "Medium")
-	fmt.Printf(" │ %-25s │ %-35s │\n", "Production", "6-12 CPUs, 12-24GB RAM, 3+ nodes")
-	fmt.Printf("│            │ %-25s │ %-35s │\n", "", "100-1,000 rules/sec")
+	fmt.Printf(" │ %-25s │ %-35s │\n", "Production", "6-16 CPUs, 11-30GB RAM, 3-8 nodes")
+	fmt.Printf("│            │ %-25s │ %-35s │\n", "", "1,000-10,000 rules/sec")
 
 	color.New(color.FgCyan).Println("├──────────────────────────────────────────────────────────────────────────────┤")
 
 	fmt.Printf("│ ")
 	color.New(color.FgRed, color.Bold).Printf("%-10s", "Large")
-	fmt.Printf(" │ %-25s │ %-35s │\n", "High Performance", "15+ CPUs, 30+ GB RAM, 5+ nodes")
-	fmt.Printf("│            │ %-25s │ %-35s │\n", "", ">1,000 rules/sec")
+	fmt.Printf(" │ %-25s │ %-35s │\n", "High Performance", "10-32 CPUs, 19-61GB RAM, 5-16 nodes")
+	fmt.Printf("│            │ %-25s │ %-35s │\n", "", ">10,000 rules/sec")
 
 	color.New(color.FgCyan).Println("└──────────────────────────────────────────────────────────────────────────────┘")
 	fmt.Println()
@@ -674,48 +674,72 @@ func (w *InitWizard) configurePerformance() {
 	switch tierChoice {
 	case "small":
 		w.config.Performance.VolumeLevel = "small"
+		// Node configuration: c8g.large (2 vCPUs, 3.8 GB RAM per node)
+		// Total resources: 6-8 vCPUs, 11.4-15.2 GB RAM
+		w.config.Kubernetes.NodeCount = 3
+		w.config.Kubernetes.MinNodes = 3
+		w.config.Kubernetes.MaxNodes = 4
+		// HPS - up to 2 vCPU consumption (limit per replica: 1 vCPU, 1 GB RAM)
 		w.config.Performance.HPSReplicas = 1
 		w.config.Performance.HPSMaxReplicas = 2
+		// Workers - up to 4 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
 		w.config.Performance.HPSWorkerReplicas = 3
-		w.config.Performance.HPSWorkerMaxReplicas = 10
-		w.config.Performance.KafkaPartitions = 3
+		w.config.Performance.HPSWorkerMaxReplicas = 8
+		w.config.Performance.KafkaPartitions = 24 // 3 topics * 8 max workers
 		w.config.Performance.KafkaRetentionHours = 24
 		w.config.Performance.KafkaReplicationFactor = 1
 		w.config.Performance.KafkaStorageSize = "10Gi"
-		// Node configuration
-		w.config.Kubernetes.NodeCount = 2
-		w.config.Kubernetes.MinNodes = 1
-		w.config.Kubernetes.MaxNodes = 3
+		// Traefik - up to 4 vCPU consumption (limit per replica: 2 vCPU, 4 GB RAM)
+		w.config.Performance.TraefikMinReplicas = 1
+		w.config.Performance.TraefikMaxReplicas = 2
+		// Total resource consumption: 4.5-10 vCPUs (HPS: 1-2, Workers: 1.5-4, Traefik: 2-4)
+		// Available resources: 6-8 vCPUs - may need to scale to 4 nodes under peak load
 
 	case "medium":
 		w.config.Performance.VolumeLevel = "medium"
+		// Node configuration: c8g.large (2 vCPUs, 3.8 GB RAM per node)
+		// Total resources: 6-16 vCPUs, 11.4-30.4 GB RAM
+		w.config.Kubernetes.NodeCount = 3
+		w.config.Kubernetes.MinNodes = 3
+		w.config.Kubernetes.MaxNodes = 8
+		// HPS - up to 6 vCPU consumption (limit per replica: 1 vCPU, 1 GB RAM)
 		w.config.Performance.HPSReplicas = 2
 		w.config.Performance.HPSMaxReplicas = 6
+		// Workers - up to 18 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
 		w.config.Performance.HPSWorkerReplicas = 5
-		w.config.Performance.HPSWorkerMaxReplicas = 30
-		w.config.Performance.KafkaPartitions = 10
+		w.config.Performance.HPSWorkerMaxReplicas = 20 // Balanced for 16 vCPU max capacity
+		w.config.Performance.KafkaPartitions = 60 // 3 topics * 20 max workers
 		w.config.Performance.KafkaRetentionHours = 72
 		w.config.Performance.KafkaReplicationFactor = 2
 		w.config.Performance.KafkaStorageSize = "50Gi"
-		// Node configuration
-		w.config.Kubernetes.NodeCount = 3
-		w.config.Kubernetes.MinNodes = 3
-		w.config.Kubernetes.MaxNodes = 6
+		// Traefik - up to 8 vCPU consumption (limit per replica: 2 vCPU, 4 GB RAM)
+		w.config.Performance.TraefikMinReplicas = 2
+		w.config.Performance.TraefikMaxReplicas = 4
+		// Total resource consumption: 8.5-24 vCPUs (HPS: 2-6, Workers: 2.5-10, Traefik: 4-8)
+		// Available resources: 6-16 vCPUs - will auto-scale nodes based on demand
 
 	case "large":
 		w.config.Performance.VolumeLevel = "large"
+		// Node configuration: c8g.large (2 vCPUs, 3.8 GB RAM per node)
+		// Total resources: 10-32 vCPUs, 19-60.8 GB RAM
+		w.config.Kubernetes.NodeCount = 5
+		w.config.Kubernetes.MinNodes = 5
+		w.config.Kubernetes.MaxNodes = 16
+		// HPS - up to 8 vCPU consumption (limit per replica: 1 vCPU, 1 GB RAM)
 		w.config.Performance.HPSReplicas = 3
 		w.config.Performance.HPSMaxReplicas = 8
+		// Workers - up to 30 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
 		w.config.Performance.HPSWorkerReplicas = 10
-		w.config.Performance.HPSWorkerMaxReplicas = 50
-		w.config.Performance.KafkaPartitions = 20
+		w.config.Performance.HPSWorkerMaxReplicas = 40 // Balanced for 32 vCPU max capacity
+		w.config.Performance.KafkaPartitions = 120 // 3 topics * 40 max workers
 		w.config.Performance.KafkaRetentionHours = 168
 		w.config.Performance.KafkaReplicationFactor = 3
 		w.config.Performance.KafkaStorageSize = "100Gi"
-		// Node configuration
-		w.config.Kubernetes.NodeCount = 5
-		w.config.Kubernetes.MinNodes = 5
-		w.config.Kubernetes.MaxNodes = 10
+		// Traefik - up to 12 vCPU consumption (limit per replica: 2 vCPU, 4 GB RAM)
+		w.config.Performance.TraefikMinReplicas = 2
+		w.config.Performance.TraefikMaxReplicas = 6
+		// Total resource consumption: 12-40 vCPUs (HPS: 3-8, Workers: 5-20, Traefik: 4-12)
+		// Available resources: 10-32 vCPUs - designed for high throughput with headroom
 	}
 
 	// Set common performance parameters

@@ -831,6 +831,7 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 			fmt.Sprintf("--certificatesresolvers.le.acme.email=%s", tlsConfig.AcmeEmail),
 			"--certificatesresolvers.le.acme.storage=/data/acme.json",
 			"--certificatesresolvers.le.acme.tlschallenge=true",
+			"--certificatesresolvers.le.acme.caserver=https://acme-v02.api.letsencrypt.org/directory",
 		},
 		"ports": map[string]interface{}{
 			"websecure": map[string]interface{}{
@@ -969,9 +970,23 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 	certificateObtained := false
 
 	for i := 0; i < maxAttempts; i++ {
-		// Check if certificate is ready by querying traefik
+		// For multi-replica deployments, check any available pod
+		// First get a running traefik pod
+		getPodCmd := exec.CommandContext(ctx, "kubectl", "get", "pods", "-n", traefikNamespace,
+			"-l", "app.kubernetes.io/name=traefik",
+			"-o", "jsonpath={.items[0].metadata.name}")
+
+		podOutput, err := getPodCmd.Output()
+		if err != nil || len(podOutput) == 0 {
+			time.Sleep(10 * time.Second)
+			continue
+		}
+
+		podName := strings.TrimSpace(string(podOutput))
+
+		// Check if certificate is ready by querying the pod
 		checkCmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", traefikNamespace,
-			"deployment/traefik", "--",
+			podName, "--",
 			"cat", "/data/acme.json")
 
 		output, err := checkCmd.Output()
@@ -987,9 +1002,9 @@ func (s *TLSConfigurationStep) Execute(ctx context.Context, d *Deployer) error {
 		if i%6 == 0 {
 			fmt.Printf("\r⏳ Waiting for TLS certificate... (%d seconds elapsed)", i*10)
 			if d.options.Verbose {
-				// Check traefik logs for any errors
+				// Check traefik logs for any errors - use label selector for multi-replica
 				logsCmd := exec.CommandContext(ctx, "kubectl", "logs", "-n", traefikNamespace,
-					"deployment/traefik", "--tail=20")
+					"-l", "app.kubernetes.io/name=traefik", "--tail=20", "--prefix=true")
 				if logsOutput, err := logsCmd.Output(); err == nil {
 					d.progress.Debug("Recent Traefik logs:\n%s", string(logsOutput))
 				}
@@ -1342,6 +1357,7 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 				"lagThreshold":    d.config.Performance.KafkaLagThreshold,
 				"pollingInterval": d.config.Performance.KedaPollingInterval,
 				"cooldownPeriod":  d.config.Performance.ScaleDownStabilization,
+				"partitions":      d.config.Performance.KafkaPartitions / 3, // Divide by 3 topics (bulk-solve, flows, parallel-solve)
 			},
 		}
 	}

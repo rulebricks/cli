@@ -353,38 +353,38 @@ Our CLI is designed exclusively to deploy on a standalone cluster for high-perfo
 ```mermaid
 flowchart TD
     LB("Load Balancer<br/>Cloud Provider LB") --> Traefik("Traefik Ingress<br/>TLS Termination & Routing")
-    
+
     Traefik --> RB("Rulebricks App<br/>API & Management")
     Traefik -.-> SB("Supabase Dashboard<br/>Optional Admin UI")
     Traefik -.-> GF("Grafana Dashboard<br/>Optional Monitoring")
-    
+
     RB --> Redis[("Redis<br/>Cache Layer")]
     RB --> PG[("PostgreSQL<br/>Primary Database")]
     Redis -.->|"Cache miss<br/>fallback"| PG
     SB -.-> PG
-    
+
     %% Rule execution flow
     RB -->|"Rule Execution<br/>Requests"| Kafka("Kafka Cluster<br/>Event Streaming & Job Queue")
-    
+
     %% Worker scaling and execution
     KEDA("KEDA<br/>Auto Scaler") -.->|"Scales based on<br/>Kafka queue depth"| WorkerPool
-    
+
     subgraph WorkerPool [" "]
         direction LR
-        W1("Worker 1<br/>Rule Executor") 
-        W2("Worker 2<br/>Rule Executor") 
+        W1("Worker 1<br/>Rule Executor")
+        W2("Worker 2<br/>Rule Executor")
         W3("Worker N<br/>Rule Executor")
     end
-    
+
     Kafka -->|"Consumes execution<br/>requests"| WorkerPool
-    
+
     %% Logging flows
     RB -->|"Rule execution<br/>logs & metrics"| Vector("Vector<br/>Log Processing & Forwarding")
     Kafka -->|"Event logs<br/>(with lag)"| Vector
-    
+
     %% Simplified sinks
     Vector --> Sinks("External Log Sinks<br/>Elasticsearch, S3, DataDog, etc.")
-    
+
     %% Styling
     classDef primary fill:#e3f2fd,stroke:#1976d2,stroke-width:3px,color:#000
     classDef secondary fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#000
@@ -392,7 +392,7 @@ flowchart TD
     classDef processing fill:#fff8e1,stroke:#f57c00,stroke-width:2px,color:#000
     classDef scaling fill:#fce4ec,stroke:#c2185b,stroke-width:2px,color:#000
     classDef optional stroke-dasharray: 5 5,color:#fff
-    
+
     class LB,Traefik primary
     class RB secondary
     class PG,Redis,Kafka,Sinks storage
@@ -478,16 +478,16 @@ Three deployment options:
 
 | Tier | Use Case | Expected Load | Total Resources Needed |
 |------|----------|---------------|------------------------|
-| **Small** | Development/Testing | <100 rules/sec | 2-4 CPUs, 4-8GB RAM, 1-2 nodes |
-| **Medium** | Production | 100-1,000 rules/sec | 6-12 CPUs, 12-24GB RAM, 3+ nodes |
-| **Large** | High Performance | >1,000 rules/sec | 15+ CPUs, 30+ GB RAM, 5+ nodes |
+| **Small** | Development/Testing | <1000 rules/sec | 6-8 CPUs, 11-15GB RAM, 3-4 nodes |
+| **Medium** | Production | 1,000-10,000 rules/sec | 6-16 CPUs, 11-30GB RAM, 3-8 nodes |
+| **Large** | High Performance | >10,000 rules/sec | 10-32 CPUs, 19-61GB RAM, 5-16 nodes |
 
 ### What's Running in Your Cluster
 
 **Core Services** (always required):
 - **Rulebricks App**: Web interface and API (1-6 replicas)
 - **HPS Service**: Rule processing engine (1-8 replicas)
-- **HPS Workers**: Background job processors (3-50 replicas)
+- **HPS Workers**: Background job processors (3-40 replicas)
 - **Redis**: Caching layer (single instance)
 - **Kafka**: Message queue (1-3 brokers)
 
@@ -510,9 +510,9 @@ Three deployment options:
 
 ### Quick Start Recommendations
 
-- **Development**: 2x t4g.medium instances
-- **Production**: 3x c8g.xlarge instances
-- **High Performance**: 5x c8g.2xlarge instances
+- **Development**: 3x c8g.large instances (Small tier)
+- **Production**: 3-8x c8g.large instances (Medium tier)
+- **High Performance**: 5-16x c8g.large instances (Large tier)
 
 All resource limits apply per pod/replica, not total across replicas.
 

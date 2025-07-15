@@ -289,6 +289,8 @@ type PerformanceConfig struct {
 	KedaPollingInterval    int             `yaml:"keda_polling_interval,omitempty"`
 	HPSResources           *ResourceConfig `yaml:"hps_resources,omitempty"`
 	WorkerResources        *ResourceConfig `yaml:"worker_resources,omitempty"`
+	TraefikMinReplicas     int             `yaml:"traefik_min_replicas,omitempty"`
+	TraefikMaxReplicas     int             `yaml:"traefik_max_replicas,omitempty"`
 }
 
 // ResourceConfig defines resource limits and requests
@@ -559,6 +561,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Performance.KafkaReplicationFactor == 0 {
 		c.Performance.KafkaReplicationFactor = 1
+	}
+	if c.Performance.TraefikMinReplicas == 0 {
+		c.Performance.TraefikMinReplicas = 1
+	}
+	if c.Performance.TraefikMaxReplicas == 0 {
+		c.Performance.TraefikMaxReplicas = 2
 	}
 }
 
