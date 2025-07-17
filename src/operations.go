@@ -1280,6 +1280,20 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 				"protocol": "PLAINTEXT",
 			},
 		},
+		"topologySpreadConstraints": []interface{}{
+			map[string]interface{}{
+				"maxSkew":           1,
+				"topologyKey":       "kubernetes.io/hostname",
+				"whenUnsatisfiable": "DoNotSchedule",
+				"labelSelector": map[string]interface{}{
+					"matchLabels": map[string]interface{}{
+						"app.kubernetes.io/instance":  "kafka",
+						"app.kubernetes.io/name":      "kafka",
+						"app.kubernetes.io/component": "controller-eligible",
+					},
+				},
+			},
+		},
 		"affinity": map[string]interface{}{
 			"podAntiAffinity": map[string]interface{}{
 				"requiredDuringSchedulingIgnoredDuringExecution": []interface{}{
@@ -1298,7 +1312,7 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 								},
 							},
 						},
-						"topologyKey": "topology.kubernetes.io/zone",
+						"topologyKey": "kubernetes.io/hostname",
 					},
 				},
 			},
@@ -1342,9 +1356,9 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 	time.Sleep(30 * time.Second)
 
 	// Calculate partitions per topic
-	// config.Partitions should be max_workers * 6 (3 main + 3 response topics)
+	// config.Partitions should be max_workers * 2 (1 main + 1 response topic)
 	// This gives each topic max_workers partitions
-	partitionsPerTopic := config.Partitions / 6
+	partitionsPerTopic := config.Partitions
 	if partitionsPerTopic < 1 {
 		partitionsPerTopic = 1
 	}
@@ -1354,7 +1368,7 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 		replicationFactor = 1
 	}
 
-	topics := []string{"bulk-solve", "flows", "parallel-solve"}
+	topics := []string{"solution"}
 
 	// Create main topics
 	for _, topic := range topics {

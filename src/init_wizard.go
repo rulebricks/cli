@@ -679,12 +679,11 @@ func (w *InitWizard) configurePerformance() {
 		w.config.Kubernetes.NodeCount = 3
 		w.config.Kubernetes.MinNodes = 3
 		w.config.Kubernetes.MaxNodes = 4
-		// HPS - up to 2 vCPU consumption (limit per replica: 1 vCPU, 1 GB RAM)
+		// HPS - fixed at 2 replicas (limit per replica: 2 vCPU, 2 GB RAM)
 		w.config.Performance.HPSReplicas = 2
-		w.config.Performance.HPSMaxReplicas = 5
 		// Workers - up to 4 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
 		w.config.Performance.HPSWorkerReplicas = 4
-		w.config.Performance.HPSWorkerMaxReplicas = 12
+		w.config.Performance.HPSWorkerMaxReplicas = 8
 		w.config.Performance.KafkaRetentionHours = 24
 		w.config.Performance.KafkaReplicationFactor = 1
 		w.config.Performance.KafkaStorageSize = "10Gi"
@@ -701,12 +700,11 @@ func (w *InitWizard) configurePerformance() {
 		w.config.Kubernetes.NodeCount = 3
 		w.config.Kubernetes.MinNodes = 3
 		w.config.Kubernetes.MaxNodes = 8
-		// HPS - up to 6 vCPU consumption (limit per replica: 1 vCPU, 1 GB RAM)
+		// HPS - fixed at 2 replicas (limit per replica: 2 vCPU, 2 GB RAM)
 		w.config.Performance.HPSReplicas = 2
-		w.config.Performance.HPSMaxReplicas = 10
 		// Workers - up to 18 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
-		w.config.Performance.HPSWorkerReplicas = 5
-		w.config.Performance.HPSWorkerMaxReplicas = 25 // Balanced for 16 vCPU max capacity
+		w.config.Performance.HPSWorkerReplicas = 10
+		w.config.Performance.HPSWorkerMaxReplicas = 24
 		w.config.Performance.KafkaRetentionHours = 72
 		w.config.Performance.KafkaReplicationFactor = 2
 		w.config.Performance.KafkaStorageSize = "50Gi"
@@ -723,12 +721,11 @@ func (w *InitWizard) configurePerformance() {
 		w.config.Kubernetes.NodeCount = 5
 		w.config.Kubernetes.MinNodes = 5
 		w.config.Kubernetes.MaxNodes = 16
-		// HPS - up to 8 vCPU consumption (limit per replica: 1 vCPU, 1 GB RAM)
+		// HPS - fixed at 4 replicas (limit per replica: 2 vCPU, 2 GB RAM)
 		w.config.Performance.HPSReplicas = 4
-		w.config.Performance.HPSMaxReplicas = 20
 		// Workers - up to 30 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
 		w.config.Performance.HPSWorkerReplicas = 10
-		w.config.Performance.HPSWorkerMaxReplicas = 50 // Balanced for 32 vCPU max capacity
+		w.config.Performance.HPSWorkerMaxReplicas = 48
 		w.config.Performance.KafkaRetentionHours = 168
 		w.config.Performance.KafkaReplicationFactor = 3
 		w.config.Performance.KafkaStorageSize = "100Gi"
@@ -743,14 +740,14 @@ func (w *InitWizard) configurePerformance() {
 	w.config.Performance.ScaleUpStabilization = 30
 	w.config.Performance.ScaleDownStabilization = 300
 	w.config.Performance.KedaPollingInterval = 10
-	w.config.Performance.KafkaLagThreshold = 50
+	w.config.Performance.KafkaLagThreshold = 8
 
 	fmt.Println()
 	color.New(color.FgGreen).Printf("✓ Performance tier '%s' selected\n", tierChoice)
 	fmt.Println()
 	fmt.Println("Configuration summary:")
 	fmt.Printf("  • Cluster nodes: %d-%d (autoscaling enabled)\n", w.config.Kubernetes.MinNodes, w.config.Kubernetes.MaxNodes)
-	fmt.Printf("  • HPS replicas: %d-%d\n", w.config.Performance.HPSReplicas, w.config.Performance.HPSMaxReplicas)
+	fmt.Printf("  • HPS replicas: %d (fixed)\n", w.config.Performance.HPSReplicas)
 	fmt.Printf("  • Worker replicas: %d-%d\n", w.config.Performance.HPSWorkerReplicas, w.config.Performance.HPSWorkerMaxReplicas)
 	fmt.Printf("  • Kafka partitions: %d\n", w.config.Performance.KafkaPartitions)
 	fmt.Printf("  • Storage size: %s\n", w.config.Performance.VolumeLevel)

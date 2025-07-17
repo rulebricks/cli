@@ -276,7 +276,6 @@ type VectorSink struct {
 type PerformanceConfig struct {
 	VolumeLevel            string          `yaml:"volume_level,omitempty"`
 	HPSReplicas            int             `yaml:"hps_replicas,omitempty"`
-	HPSMaxReplicas         int             `yaml:"hps_max_replicas,omitempty"`
 	HPSWorkerReplicas      int             `yaml:"hps_worker_replicas,omitempty"`
 	HPSWorkerMaxReplicas   int             `yaml:"hps_worker_max_replicas,omitempty"`
 	KafkaPartitions        int             `yaml:"kafka_partitions,omitempty"`
@@ -550,9 +549,7 @@ func (c *Config) ApplyDefaults() {
 	if c.Performance.HPSReplicas == 0 {
 		c.Performance.HPSReplicas = 1
 	}
-	if c.Performance.HPSMaxReplicas == 0 {
-		c.Performance.HPSMaxReplicas = 5
-	}
+
 
 	if c.Performance.KafkaRetentionHours == 0 {
 		c.Performance.KafkaRetentionHours = 24
@@ -644,14 +641,14 @@ func (c *Config) GetKafkaPartitions() int {
 	}
 
 	// Otherwise derive from max workers
-	// We have 3 main topics and 3 response topics (6 total)
+	// We have 2 main topics and 2 response topics (4 total)
 	// Each should have at least max_workers partitions
 	maxWorkers := c.Performance.HPSWorkerMaxReplicas
 	if maxWorkers < 1 {
 		maxWorkers = 1
 	}
 
-	// Total partitions = max_workers * 6
+	// Total partitions = max_workers * 2
 	// This ensures each topic gets max_workers partitions
-	return maxWorkers * 6
+	return maxWorkers
 }

@@ -1445,26 +1445,16 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 		"nodeSelector": nodeSelector,
 		"tolerations":  tolerations,
 		"responseTopics": map[string]interface{}{
-			"bulkSolve":     "bulk-solve-response",
-			"flows":         "flows-response",
-			"parallelSolve": "parallel-solve-response",
+			"solution":     "solution-response",
 		},
+		"replicas": func() int {
+			if d.config.Performance.HPSReplicas > 0 {
+				return d.config.Performance.HPSReplicas
+			}
+			return 1
+		}(),
 		"autoscaling": map[string]interface{}{
-			"enabled": true,
-			"minReplicas": func() int {
-				if d.config.Performance.HPSReplicas > 0 {
-					return d.config.Performance.HPSReplicas
-				}
-				return 1
-			}(),
-			"maxReplicas": func() int {
-				if d.config.Performance.HPSMaxReplicas > 0 {
-					return d.config.Performance.HPSMaxReplicas
-				}
-				return 10
-			}(),
-			"targetCPUUtilizationPercentage":    50,
-			"targetMemoryUtilizationPercentage": 80,
+			"enabled": false,
 		},
 	}
 
@@ -1473,7 +1463,7 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 		hpsConfig["workers"] = map[string]interface{}{
 			"enabled":      true,
 			"replicas":     d.config.Performance.HPSWorkerReplicas,
-			"topics":       "bulk-solve,flows,parallel-solve",
+			"topics":       "solution",
 			"nodeSelector": nodeSelector,
 			"tolerations":  tolerations,
 			"topologySpreadConstraints": []interface{}{
@@ -1505,7 +1495,7 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 				"lagThreshold":    d.config.Performance.KafkaLagThreshold,
 				"pollingInterval": d.config.Performance.KedaPollingInterval,
 				"cooldownPeriod":  d.config.Performance.ScaleDownStabilization,
-				"partitions":      d.config.GetKafkaPartitions() / 6, // max_workers partitions per topic
+				"partitions":      d.config.GetKafkaPartitions(), // max_workers partitions per topic
 			},
 		}
 	}
