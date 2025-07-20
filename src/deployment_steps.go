@@ -1466,28 +1466,6 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 			"topics":       "solution",
 			"nodeSelector": nodeSelector,
 			"tolerations":  tolerations,
-			"topologySpreadConstraints": []interface{}{
-				map[string]interface{}{
-					"maxSkew":           1,
-					"topologyKey":       "topology.kubernetes.io/zone",
-					"whenUnsatisfiable": "DoNotSchedule",
-					"labelSelector": map[string]interface{}{
-						"matchLabels": map[string]interface{}{
-							"app": "rulebricks-hps-worker",
-						},
-					},
-				},
-				map[string]interface{}{
-					"maxSkew":           1,
-					"topologyKey":       "kubernetes.io/hostname",
-					"whenUnsatisfiable": "ScheduleAnyway",
-					"labelSelector": map[string]interface{}{
-						"matchLabels": map[string]interface{}{
-							"app": "rulebricks-hps-worker",
-						},
-					},
-				},
-			},
 			"keda": map[string]interface{}{
 				"enabled":         true,
 				"minReplicaCount": d.config.Performance.HPSWorkerReplicas,

@@ -1234,90 +1234,182 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 		storageSize = "50Gi"
 	}
 
-	values := map[string]interface{}{
-		"replicaCount": replicationFactor,
-		"persistence": map[string]interface{}{
-			"enabled": true,
-			"size":    storageSize,
-		},
-		"logRetentionHours":             retentionHours,
-		"autoCreateTopicsEnable":        true,
-		"defaultReplicationFactor":      replicationFactor,
-		"offsetsTopicReplicationFactor": replicationFactor,
-		"numPartitions":                 partitionCount,
-		"service": map[string]interface{}{
-			"type": "LoadBalancer",
-			"ports": map[string]interface{}{
-				"client": 9092,
-			},
-		},
-		"controller": map[string]interface{}{
-			"resources": map[string]interface{}{
-				"requests": map[string]interface{}{
-					"cpu":    "250m",
-					"memory": "512Mi",
-				},
-				"limits": map[string]interface{}{
-					"cpu":    "500m",
-					"memory": "2Gi",
-				},
-			},
-		},
-		"kraft": map[string]interface{}{
-			"enabled": true,
-		},
-		"zookeeper": map[string]interface{}{
-			"enabled": false,
-		},
-		"listeners": map[string]interface{}{
-			"client": map[string]interface{}{
-				"protocol": "PLAINTEXT",
-			},
-			"controller": map[string]interface{}{
-				"protocol": "PLAINTEXT",
-			},
-			"interbroker": map[string]interface{}{
-				"protocol": "PLAINTEXT",
-			},
-		},
-		"topologySpreadConstraints": []interface{}{
-			map[string]interface{}{
-				"maxSkew":           1,
-				"topologyKey":       "kubernetes.io/hostname",
-				"whenUnsatisfiable": "DoNotSchedule",
-				"labelSelector": map[string]interface{}{
-					"matchLabels": map[string]interface{}{
-						"app.kubernetes.io/instance":  "kafka",
-						"app.kubernetes.io/name":      "kafka",
-						"app.kubernetes.io/component": "controller-eligible",
-					},
-				},
-			},
-		},
-		"affinity": map[string]interface{}{
-			"podAntiAffinity": map[string]interface{}{
-				"requiredDuringSchedulingIgnoredDuringExecution": []interface{}{
-					map[string]interface{}{
-						"labelSelector": map[string]interface{}{
-							"matchExpressions": []interface{}{
-								map[string]interface{}{
-									"key":      "app.kubernetes.io/instance",
-									"operator": "In",
-									"values":   []string{"kafka"},
-								},
-								map[string]interface{}{
-									"key":      "app.kubernetes.io/component",
-									"operator": "In",
-									"values":   []string{"controller"},
-								},
-							},
-						},
-						"topologyKey": "kubernetes.io/hostname",
-					},
-				},
-			},
-		},
-	}
+	var storageClass = "default"
+	switch ko.cloudProvider {
+    case "aws":
+    	storageClass =  "gp3" // Up to 16,000 IOPS, 1,000 MB/s throughput, cost-effective
+    case "azure":
+    	storageClass = "managed-csi-premium" // Premium SSD v2, better price/performance
+    case "gcp":
+    	storageClass = "pd-ssd" // Up to 100,000 IOPS, more cost-effective
+    default:
+        storageClass = "default"
+    }
+
+    values := map[string]interface{}{
+        // Global settings
+        "replicaCount": replicationFactor,  // This sets the total number of nodes
+        "persistence": map[string]interface{}{
+            "enabled": true,
+            "size":    storageSize,
+            "storageClass": storageClass,
+        },
+
+        // Global env vars (applies to all nodes)
+        "extraEnvVars": []map[string]interface{}{
+            {
+                "name": "KAFKA_HEAP_OPTS",
+                "value": "-Xmx2g -Xms2g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:G1HeapRegionSize=16M -XX:MaxDirectMemorySize=1G -XX:+AlwaysPreTouch",
+            },
+            {
+                "name": "KAFKA_JVM_PERFORMANCE_OPTS",
+                "value": "-XX:MaxDirectMemorySize=2G -Djdk.nio.maxCachedBufferSize=262144",
+            },
+            // Add all server.properties as environment variables (Bitnami way)
+            {
+                "name": "KAFKA_CFG_QUEUED_MAX_REQUESTS",
+                "value": "10000",
+            },
+            {
+                "name": "KAFKA_CFG_NUM_NETWORK_THREADS",
+                "value": "8",
+            },
+            {
+                "name": "KAFKA_CFG_NUM_IO_THREADS",
+                "value": "8",
+            },
+            {
+                "name": "KAFKA_CFG_SOCKET_SEND_BUFFER_BYTES",
+                "value": "1048576",
+            },
+            {
+                "name": "KAFKA_CFG_SOCKET_RECEIVE_BUFFER_BYTES",
+                "value": "1048576",
+            },
+            {
+                "name": "KAFKA_CFG_SOCKET_REQUEST_MAX_BYTES",
+                "value": "209715200",
+            },
+            {
+                "name": "KAFKA_CFG_LOG_RETENTION_BYTES",
+                "value": "4294967296",
+            },
+            {
+                "name": "KAFKA_CFG_LOG_SEGMENT_BYTES",
+                "value": "1073741824",
+            },
+            {
+                "name": "KAFKA_CFG_NUM_REPLICA_FETCHERS",
+                "value": "4",
+            },
+            {
+                "name": "KAFKA_CFG_REPLICA_SOCKET_RECEIVE_BUFFER_BYTES",
+                "value": "1048576",
+            },
+            {
+                "name": "KAFKA_CFG_LOG_CLEANER_DEDUPE_BUFFER_SIZE",
+                "value": "268435456",
+            },
+            {
+                "name": "KAFKA_CFG_LOG_CLEANER_IO_BUFFER_SIZE",
+                "value": "1048576",
+            },
+            {
+                "name": "KAFKA_CFG_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION",
+                "value": "10",
+            },
+        },
+
+        // Controller-specific settings
+        "controller": map[string]interface{}{
+            "resources": map[string]interface{}{
+                "requests": map[string]interface{}{
+                    "cpu":    "500m",
+                    "memory": "2Gi",
+                },
+                "limits": map[string]interface{}{
+                    "cpu":    "2000m",
+                    "memory": "3Gi",
+                },
+            },
+            // Init container resources (fix for OOM during topic creation)
+            "initContainerResources": map[string]interface{}{
+                "requests": map[string]interface{}{
+                    "cpu":    "250m",
+                    "memory": "512Mi",
+                },
+                "limits": map[string]interface{}{
+                    "cpu":    "500m",
+                    "memory": "1Gi",
+                },
+            },
+        },
+
+        // Kafka configuration
+        "logRetentionHours":             retentionHours,
+        "autoCreateTopicsEnable":        true,
+        "defaultReplicationFactor":      replicationFactor,
+        "offsetsTopicReplicationFactor": replicationFactor,
+        "numPartitions":                 partitionCount,
+
+        // KRaft mode
+        "kraft": map[string]interface{}{
+            "enabled": true,
+        },
+        "zookeeper": map[string]interface{}{
+            "enabled": false,
+        },
+
+        // Service configuration
+        "service": map[string]interface{}{
+            "type": "ClusterIP",
+            "ports": map[string]interface{}{
+                "client": 9092,
+            },
+        },
+
+        // Listeners configuration
+        "listeners": map[string]interface{}{
+            "client": map[string]interface{}{
+                "protocol": "PLAINTEXT",
+            },
+            "controller": map[string]interface{}{
+                "protocol": "PLAINTEXT",
+            },
+            "interbroker": map[string]interface{}{
+                "protocol": "PLAINTEXT",
+            },
+        },
+
+        // Pod distribution
+        "topologySpreadConstraints": []interface{}{
+            map[string]interface{}{
+                "maxSkew":           2,  // Allow flexibility
+                "topologyKey":       "kubernetes.io/hostname",
+                "whenUnsatisfiable": "ScheduleAnyway",
+            },
+        },
+
+        // Anti-affinity
+        "affinity": map[string]interface{}{
+            "podAntiAffinity": map[string]interface{}{
+                "preferredDuringSchedulingIgnoredDuringExecution": []interface{}{
+                    map[string]interface{}{
+                        "weight": 100,
+                        "podAffinityTerm": map[string]interface{}{
+                            "labelSelector": map[string]interface{}{
+                                "matchLabels": map[string]interface{}{
+                                    "app.kubernetes.io/name": "kafka",
+                                },
+                            },
+                            "topologyKey": "kubernetes.io/hostname",
+                        },
+                    },
+                },
+            },
+        },
+    }
+
 
 	// Add ARM64 support for GCP
 	if ko.cloudProvider == "gcp" {
@@ -1368,57 +1460,81 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 		replicationFactor = 1
 	}
 
-	topics := []string{"solution"}
+	// Create solution topic
+	ko.progress.Info("Creating Kafka topic 'solution' with %d partitions...", partitionsPerTopic)
 
-	// Create main topics
-	for _, topic := range topics {
-		ko.progress.Info("Creating Kafka topic '%s' with %d partitions...", topic, partitionsPerTopic)
+	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, "kafka-controller-0", "--",
+		"kafka-topics.sh",
+		"--bootstrap-server", "localhost:9092",
+		"--create",
+		"--if-not-exists",
+		"--topic", "solution",
+		"--partitions", fmt.Sprintf("%d", partitionsPerTopic),
+		"--replication-factor", fmt.Sprintf("%d", replicationFactor),
+		"--config", "retention.ms=30000",
+		"--config", "segment.ms=10000",
+		"--config", "segment.bytes=16777216",
+	)
 
-		cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, "kafka-controller-0", "--",
-			"kafka-topics.sh",
-			"--bootstrap-server", "localhost:9092",
-			"--create",
-			"--if-not-exists",
-			"--topic", topic,
-			"--partitions", fmt.Sprintf("%d", partitionsPerTopic),
-			"--replication-factor", fmt.Sprintf("%d", replicationFactor))
-
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			// Check if topic already exists
-			if strings.Contains(string(output), "already exists") {
-				ko.progress.Info("Topic '%s' already exists", topic)
-			} else {
-				return fmt.Errorf("failed to create topic '%s': %w\nOutput: %s", topic, err, string(output))
-			}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Check if topic already exists
+		if strings.Contains(string(output), "already exists") {
+			ko.progress.Info("Topic 'solution' already exists")
+		} else {
+			return fmt.Errorf("failed to create topic 'solution': %w\nOutput: %s", err, string(output))
 		}
 	}
 
-	// Response topics get the same number of partitions as main topics
-	responsePartitions := partitionsPerTopic
+	// Create solution-response topic
+	ko.progress.Info("Creating Kafka response topic 'solution-response' with %d partitions...", partitionsPerTopic)
 
-	// Create response topics
-	for _, topic := range topics {
-		responseTopic := topic + "-response"
-		ko.progress.Info("Creating Kafka response topic '%s' with %d partitions...", responseTopic, responsePartitions)
+	cmd = exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, "kafka-controller-0", "--",
+		"kafka-topics.sh",
+		"--bootstrap-server", "localhost:9092",
+		"--create",
+		"--if-not-exists",
+		"--topic", "solution-response",
+		"--partitions", fmt.Sprintf("%d", partitionsPerTopic),
+		"--replication-factor", fmt.Sprintf("%d", replicationFactor),
+		"--config", "retention.ms=30000",
+		"--config", "segment.ms=10000",
+		"--config", "segment.bytes=16777216",
+	)
 
-		cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, "kafka-controller-0", "--",
-			"kafka-topics.sh",
-			"--bootstrap-server", "localhost:9092",
-			"--create",
-			"--if-not-exists",
-			"--topic", responseTopic,
-			"--partitions", fmt.Sprintf("%d", responsePartitions),
-			"--replication-factor", fmt.Sprintf("%d", replicationFactor))
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		// Check if topic already exists
+		if strings.Contains(string(output), "already exists") {
+			ko.progress.Info("Response topic 'solution-response' already exists")
+		} else {
+			return fmt.Errorf("failed to create response topic 'solution-response': %w\nOutput: %s", err, string(output))
+		}
+	}
 
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			// Check if topic already exists
-			if strings.Contains(string(output), "already exists") {
-				ko.progress.Info("Response topic '%s' already exists", responseTopic)
-			} else {
-				return fmt.Errorf("failed to create response topic '%s': %w\nOutput: %s", responseTopic, err, string(output))
-			}
+	// Create logs topic
+	ko.progress.Info("Creating Kafka topic 'logs' with %d partitions...", partitionsPerTopic)
+
+	cmd = exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, "kafka-controller-0", "--",
+		"kafka-topics.sh",
+		"--bootstrap-server", "localhost:9092",
+		"--create",
+		"--if-not-exists",
+		"--topic", "logs",
+		"--partitions", fmt.Sprintf("%d", partitionsPerTopic),
+		"--replication-factor", fmt.Sprintf("%d", replicationFactor),
+		"--config", "retention.bytes=4294967296",
+		"--config", "segment.bytes=1073741824",
+		"--config", "compression.type=gzip",
+	)
+
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		// Check if topic already exists
+		if strings.Contains(string(output), "already exists") {
+			ko.progress.Info("Topic 'logs' already exists")
+		} else {
+			return fmt.Errorf("failed to create topic 'logs': %w\nOutput: %s", err, string(output))
 		}
 	}
 
