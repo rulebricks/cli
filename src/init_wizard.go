@@ -3,9 +3,12 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"github.com/fatih/color"
 	"os"
 	"strings"
+	"syscall"
+
+	"github.com/fatih/color"
+	"golang.org/x/term"
 )
 
 // InitWizard handles the interactive project initialization
@@ -131,9 +134,13 @@ func (w *InitWizard) configureProject() error {
 	// Create a chart manager to fetch versions
 	chartManager, err := NewChartManager("", false)
 	if err == nil {
-		if fetchedVersion, err := chartManager.GetLatestVersion(); err == nil {
-			latestVersion = fetchedVersion
-			color.Green("✓ Latest version: %s", latestVersion)
+		if releaseInfo, err := chartManager.GetLatestReleaseInfo(); err == nil {
+			latestVersion = releaseInfo.Version
+			if releaseInfo.ReleaseDate != "" {
+				color.Green("✓ Latest version: %s (released %s)", latestVersion, releaseInfo.ReleaseDate)
+			} else {
+				color.Green("✓ Latest version: %s", latestVersion)
+			}
 		} else {
 			color.Yellow("⚠️  Could not fetch latest version, using fallback: %s", latestVersion)
 		}
@@ -878,10 +885,19 @@ func (w *InitWizard) promptString(prompt string, defaultValue string, validator 
 }
 
 func (w *InitWizard) promptPassword(prompt string) string {
-	// In a real implementation, this would hide the input
 	fmt.Printf("%s: ", prompt)
-	w.scanner.Scan()
-	return strings.TrimSpace(w.scanner.Text())
+
+	// Read password without echoing to terminal
+	bytePassword, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Println() // Print newline after password input
+
+	if err != nil {
+		color.Yellow("⚠️  Could not read password securely, falling back to visible input")
+		w.scanner.Scan()
+		return strings.TrimSpace(w.scanner.Text())
+	}
+
+	return strings.TrimSpace(string(bytePassword))
 }
 
 func (w *InitWizard) promptInt(prompt string, defaultValue, min, max int) int {

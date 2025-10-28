@@ -147,32 +147,62 @@ func (cm *ChartManager) getChart(name, version string) (*ChartInfo, error) {
 	}, nil
 }
 
+// ReleaseInfo contains version and release date information
+type ReleaseInfo struct {
+	Version     string
+	ReleaseDate string
+}
+
 // GetLatestVersion fetches the latest available version
 func (cm *ChartManager) GetLatestVersion() (string, error) {
+	info, err := cm.GetLatestReleaseInfo()
+	if err != nil {
+		return "", err
+	}
+	return info.Version, nil
+}
+
+// GetLatestReleaseInfo fetches the latest available version with release date
+func (cm *ChartManager) GetLatestReleaseInfo() (*ReleaseInfo, error) {
 	// Check GitHub API for latest release
 	resp, err := cm.httpClient.Get("https://api.github.com/repos/rulebricks/charts/releases/latest")
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch latest release: %w", err)
+		return nil, fmt.Errorf("failed to fetch latest release: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
 	}
 
-	// Parse JSON response to get tag_name
+	// Parse JSON response to get tag_name and published_at
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	re := regexp.MustCompile(`"tag_name":\s*"v?([^"]+)"`)
-	matches := re.FindSubmatch(body)
-	if len(matches) < 2 {
-		return "", fmt.Errorf("could not find version in GitHub response")
+	reVersion := regexp.MustCompile(`"tag_name":\s*"v?([^"]+)"`)
+	matchesVersion := reVersion.FindSubmatch(body)
+	if len(matchesVersion) < 2 {
+		return nil, fmt.Errorf("could not find version in GitHub response")
 	}
 
-	return string(matches[1]), nil
+	reDate := regexp.MustCompile(`"published_at":\s*"([^"]+)"`)
+	matchesDate := reDate.FindSubmatch(body)
+
+	info := &ReleaseInfo{
+		Version: string(matchesVersion[1]),
+	}
+
+	if len(matchesDate) >= 2 {
+		// Parse and format the date
+		publishedAt, err := time.Parse(time.RFC3339, string(matchesDate[1]))
+		if err == nil {
+			info.ReleaseDate = publishedAt.Format("2006-01-02")
+		}
+	}
+
+	return info, nil
 }
 
 // ExtractChart extracts a chart to a temporary directory
