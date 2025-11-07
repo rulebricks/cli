@@ -13,12 +13,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// DeploymentPlan represents the deployment steps to be executed
 type DeploymentPlan struct {
 	Steps []DeploymentStep
 }
 
-// DeploymentStep represents a single deployment step
 type DeploymentStep interface {
 	Name() string
 	Description() string
@@ -29,14 +27,12 @@ type DeploymentStep interface {
 	Rollback(ctx context.Context, d *Deployer) error
 }
 
-// DeployerOptions contains options for the deployer
 type DeployerOptions struct {
 	ChartVersion string
 	Verbose      bool
 	DryRun       bool
 }
 
-// Deployer handles the deployment process
 type Deployer struct {
 	config   *Config
 	options  DeployerOptions
@@ -44,34 +40,26 @@ type Deployer struct {
 	state    *DeploymentState
 	plan     DeploymentPlan
 
-	// Paths and managers
 	workDir            string
 	terraformDir       string
 	extractedChartPath string
 	chartManager       *ChartManager
 	assetManager       *AssetManager
-
-	// Operations
-	cloudOps    *CloudOperations
-	k8sOps      *KubernetesOperations
-	supabaseOps *SupabaseOperations
-
-	// Shared resources
-	secrets *SharedSecrets
+	cloudOps           *CloudOperations
+	k8sOps             *KubernetesOperations
+	supabaseOps        *SupabaseOperations
+	secrets            *SharedSecrets
 }
 
-// NewDeployer creates a new deployer instance
 func NewDeployer(config *Config, options DeployerOptions) (*Deployer, error) {
 	progress := NewProgressIndicator(options.Verbose)
 
-	// Create work directory
 	homeDir, _ := os.UserHomeDir()
 	workDir := filepath.Join(homeDir, ".rulebricks", "deploy", config.Project.Name)
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create work directory: %w", err)
 	}
 
-	// Initialize managers
 	chartManager, err := NewChartManager("", options.Verbose)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize chart manager: %w", err)
@@ -85,10 +73,8 @@ func NewDeployer(config *Config, options DeployerOptions) (*Deployer, error) {
 	d := &Deployer{
 		config:   config,
 		options:  options,
-		progress: progress,
-		workDir:  workDir,
-		// Use local terraform directory for transparency and user control
-		// Users should have direct access to their infrastructure code
+		progress:     progress,
+		workDir:      workDir,
 		terraformDir: "terraform",
 		chartManager: chartManager,
 		assetManager: assetManager,
@@ -104,20 +90,15 @@ func NewDeployer(config *Config, options DeployerOptions) (*Deployer, error) {
 		},
 	}
 
-	// Load existing state if available (will overwrite the default state)
 	d.loadState()
-
-	// Create deployment plan
 	d.plan = d.createPlan()
 
 	return d, nil
 }
 
-// Execute runs the deployment
 func (d *Deployer) Execute() error {
 	startTime := time.Now()
 
-	// Display deployment plan
 	d.displayPlan()
 
 	if !nonInteractive && !d.confirmDeployment() {
@@ -126,22 +107,18 @@ func (d *Deployer) Execute() error {
 
 	d.progress.Section("Starting Deployment")
 
-	// Run preflight checks
 	if err := d.preflight(); err != nil {
 		return fmt.Errorf("preflight checks failed: %w", err)
 	}
 
-	// Load secrets
 	if err := d.loadSecrets(); err != nil {
 		return fmt.Errorf("failed to load secrets: %w", err)
 	}
 
-	// Initialize operations
 	if err := d.initializeOperations(); err != nil {
 		return fmt.Errorf("failed to initialize operations: %w", err)
 	}
 
-	// Extract chart once at the beginning
 	d.progress.Info("Downloading and extracting deployment chart...")
 	chartInfo, err := d.chartManager.PullChart(d.options.ChartVersion)
 	if err != nil {
@@ -154,7 +131,6 @@ func (d *Deployer) Execute() error {
 	}
 	defer os.RemoveAll(d.extractedChartPath)
 
-	// Execute deployment steps
 	totalSteps := len(d.plan.Steps)
 	taskNames := make([]string, totalSteps)
 	for i, step := range d.plan.Steps {
@@ -218,23 +194,19 @@ func (d *Deployer) Execute() error {
 	return nil
 }
 
-// createPlan creates the deployment plan based on configuration
 func (d *Deployer) createPlan() DeploymentPlan {
 	var steps []DeploymentStep
 
-	// Infrastructure
 	if d.state == nil || d.state.Infrastructure.ClusterEndpoint == "" {
 		steps = append(steps, &InfrastructureStep{})
 	}
 
-	// Core services
 	steps = append(steps,
 		&CoreServicesStep{},
 		&DatabaseStep{},
 		&EmailConfigStep{},
 	)
 
-	// Optional services
 	if d.config.Monitoring.Enabled {
 		steps = append(steps, &MonitoringStep{})
 	}
@@ -243,16 +215,13 @@ func (d *Deployer) createPlan() DeploymentPlan {
 		steps = append(steps, &LoggingStep{})
 	}
 
-	// Kafka is required
 	steps = append(steps, &KafkaStep{})
 
-	// Application
 	steps = append(steps,
 		&ApplicationStep{},
 		&DNSVerificationStep{},
 	)
 
-	// TLS must be last
 	if d.config.Security.TLS != nil && d.config.Security.TLS.Enabled {
 		steps = append(steps, &TLSConfigurationStep{})
 	}
@@ -260,10 +229,8 @@ func (d *Deployer) createPlan() DeploymentPlan {
 	return DeploymentPlan{Steps: steps}
 }
 
-// displayPlan shows the deployment plan to the user
 func (d *Deployer) displayPlan() {
-	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
-	// Print the welcome message with ASCII art
+	fmt.Print("\033[H\033[2J")
 	color.New(color.Bold, color.FgCyan).Printf(`
 
 
@@ -303,7 +270,6 @@ func (d *Deployer) displayPlan() {
 	fmt.Println(strings.Repeat("─", 50))
 }
 
-// preflight runs preflight checks
 func (d *Deployer) preflight() error {
 	spinner := d.progress.StartSpinner("Running preflight checks")
 
@@ -317,7 +283,6 @@ func (d *Deployer) preflight() error {
 		{"terraform", "terraform", "version"},
 	}
 
-	// Add cloud-specific checks
 	switch d.config.Cloud.Provider {
 	case "aws":
 		checks = append(checks, struct{ name, command, version string }{
@@ -333,7 +298,6 @@ func (d *Deployer) preflight() error {
 		})
 	}
 
-	// Add Supabase CLI check if needed
 	if d.config.Database.Type == "managed" {
 		checks = append(checks, struct{ name, command, version string }{
 			"supabase", "supabase", "--version",
@@ -371,11 +335,9 @@ func (d *Deployer) preflight() error {
 	return nil
 }
 
-// initializeOperations initializes cloud and kubernetes operations
 func (d *Deployer) initializeOperations() error {
 	spinner := d.progress.StartSpinner("Initializing operations")
 
-	// Initialize cloud operations
 	cloudOps, err := NewCloudOperations(d.config, d.terraformDir, d.options.Verbose)
 	if err != nil {
 		spinner.Fail()
@@ -406,7 +368,6 @@ func (d *Deployer) initializeOperations() error {
 	return nil
 }
 
-// checkCloudCredentials verifies cloud provider credentials
 func (d *Deployer) checkCloudCredentials() error {
 	switch d.config.Cloud.Provider {
 	case "aws":
@@ -420,7 +381,6 @@ func (d *Deployer) checkCloudCredentials() error {
 	}
 }
 
-// checkAWSCredentials checks AWS credentials
 func (d *Deployer) checkAWSCredentials() error {
 	cmd := exec.Command("aws", "sts", "get-caller-identity")
 	output, err := cmd.Output()
@@ -435,16 +395,14 @@ func (d *Deployer) checkAWSCredentials() error {
 	return nil
 }
 
-// checkAzureCredentials checks Azure credentials
 func (d *Deployer) checkAzureCredentials() error {
 	cmd := exec.Command("az", "account", "show")
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("Azure credentials not configured properly. Run 'az login'")
+		return fmt.Errorf("azure credentials not configured properly. Run 'az login'")
 	}
 	return nil
 }
 
-// checkGCPCredentials checks GCP credentials
 func (d *Deployer) checkGCPCredentials() error {
 	cmd := exec.Command("gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
 	output, err := cmd.Output()
@@ -454,16 +412,13 @@ func (d *Deployer) checkGCPCredentials() error {
 	return nil
 }
 
-// loadSecrets loads all required secrets from their configured sources
 func (d *Deployer) loadSecrets() error {
-	// License key
 	licenseKey, err := resolveSecretValue(d.config.Project.License)
 	if err != nil {
 		return fmt.Errorf("failed to load license key: %w", err)
 	}
 	d.secrets.LicenseKey = licenseKey
 
-	// For self-hosted Supabase, load from state if available
 	if d.config.Database.Type == "self-hosted" && d.state != nil {
 		if d.state.Database.JWTSecret != "" {
 			d.secrets.JWTSecret = d.state.Database.JWTSecret
@@ -474,7 +429,6 @@ func (d *Deployer) loadSecrets() error {
 		}
 	}
 
-	// Email credentials
 	if d.config.Email.SMTP != nil {
 		password, err := resolveSecretValue(d.config.Email.SMTP.PasswordFrom)
 		if err != nil {
@@ -483,20 +437,17 @@ func (d *Deployer) loadSecrets() error {
 		d.secrets.SMTPPassword = password
 	}
 
-	// AI API key (if enabled)
 	if d.config.AI.Enabled && d.config.AI.OpenAIAPIKeyFrom != "" {
 		apiKey, err := resolveSecretValue(d.config.AI.OpenAIAPIKeyFrom)
 		if err != nil {
 			return fmt.Errorf("failed to load OpenAI API key: %w", err)
 		}
-		// Store in environment for application use
 		os.Setenv("OPENAI_API_KEY", apiKey)
 	}
 
 	return nil
 }
 
-// confirmDeployment asks for deployment confirmation
 func (d *Deployer) confirmDeployment() bool {
 	fmt.Println("\nThis will deploy the following:")
 	fmt.Printf("  • Project: %s\n", d.config.Project.Name)
@@ -523,7 +474,6 @@ func (d *Deployer) confirmDeployment() bool {
 	return strings.ToLower(response) == "y" || strings.ToLower(response) == "yes"
 }
 
-// confirmRollback asks for rollback confirmation
 func (d *Deployer) confirmRollback() bool {
 	if nonInteractive {
 		return true
@@ -536,19 +486,15 @@ func (d *Deployer) confirmRollback() bool {
 	return strings.ToLower(response) == "y" || strings.ToLower(response) == "yes"
 }
 
-// shouldSkipStep determines if a step should be skipped
 func (d *Deployer) shouldSkipStep(step DeploymentStep) bool {
-	// Check if step is already completed
 	return d.isStepCompleted(step.Name())
 }
 
-// isStepCompleted checks if a step is already completed
 func (d *Deployer) isStepCompleted(stepName string) bool {
 	if d.state == nil {
 		return false
 	}
 
-	// Check state for completion
 	switch stepName {
 	case "Infrastructure":
 		return d.state.Infrastructure.ClusterEndpoint != ""
@@ -561,7 +507,6 @@ func (d *Deployer) isStepCompleted(stepName string) bool {
 	}
 }
 
-// updateState updates the deployment state
 func (d *Deployer) updateState(step, status string) {
 	if d.state == nil {
 		d.state = &DeploymentState{
@@ -573,7 +518,6 @@ func (d *Deployer) updateState(step, status string) {
 
 	d.state.UpdatedAt = time.Now()
 
-	// Update specific state based on step
 	switch step {
 	case "Infrastructure":
 		if status == "completed" && d.cloudOps != nil {
@@ -582,7 +526,6 @@ func (d *Deployer) updateState(step, status string) {
 	case "Database":
 		if status == "completed" && d.supabaseOps != nil {
 			d.state.Database = d.supabaseOps.GetDatabaseState()
-			// Also store secrets for self-hosted Supabase
 			if d.config.Database.Type == "self-hosted" {
 				d.state.Database.JWTSecret = d.secrets.JWTSecret
 				d.state.Database.DBPassword = d.secrets.DBPassword
@@ -597,16 +540,14 @@ func (d *Deployer) updateState(step, status string) {
 		}
 	}
 
-	// Save state after each update
 	d.saveState()
 }
 
-// loadState loads existing deployment state
 func (d *Deployer) loadState() error {
 	statePath := ".rulebricks-state.yaml"
 
 	if _, err := os.Stat(statePath); os.IsNotExist(err) {
-		return nil // No existing state
+		return nil
 	}
 
 	data, err := os.ReadFile(statePath)
@@ -623,7 +564,6 @@ func (d *Deployer) loadState() error {
 	return nil
 }
 
-// saveState saves the deployment state
 func (d *Deployer) saveState() error {
 	if d.state == nil {
 		return nil
@@ -639,10 +579,8 @@ func (d *Deployer) saveState() error {
 	return os.WriteFile(statePath, data, 0644)
 }
 
-// displayConnectionInfo shows connection details after deployment
 func (d *Deployer) displayConnectionInfo() {
-	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
-	// Print the welcome message with ASCII art
+	fmt.Print("\033[H\033[2J")
 	color.New(color.Bold, color.FgGreen).Printf(`
 
 
@@ -742,7 +680,6 @@ func (d *Deployer) displayConnectionInfo() {
 	fmt.Println("\n" + strings.Repeat("=", 60))
 }
 
-// DeploymentState represents the current state of deployment
 type DeploymentState struct {
 	ProjectName          string              `yaml:"project_name"`
 	Version              string              `yaml:"version"`
@@ -755,7 +692,6 @@ type DeploymentState struct {
 	LoadBalancerEndpoint string              `yaml:"load_balancer_endpoint,omitempty"`
 }
 
-// InfrastructureState represents infrastructure state
 type InfrastructureState struct {
 	Provider        string    `yaml:"provider"`
 	Region          string    `yaml:"region"`
@@ -765,8 +701,6 @@ type InfrastructureState struct {
 	CreatedAt       time.Time `yaml:"created_at"`
 }
 
-// DatabaseState represents database state
-// DatabaseState holds database deployment state
 type DatabaseState struct {
 	Type              string `json:"type"`
 	Provider          string `json:"provider"`
@@ -781,12 +715,10 @@ type DatabaseState struct {
 	PostgresPort      int    `json:"postgres_port,omitempty"`
 	PostgresDatabase  string `json:"postgres_database,omitempty"`
 	PostgresUsername  string `json:"postgres_username,omitempty"`
-	// Secrets for self-hosted Supabase
-	JWTSecret  string `json:"jwt_secret,omitempty"`
+	JWTSecret         string `json:"jwt_secret,omitempty"`
 	DBPassword string `json:"db_password,omitempty"`
 }
 
-// ApplicationState represents application state
 type ApplicationState struct {
 	Deployed       bool   `yaml:"deployed"`
 	Version        string `yaml:"version"`
@@ -796,7 +728,6 @@ type ApplicationState struct {
 	KafkaBrokers   string `yaml:"kafka_brokers,omitempty"`
 }
 
-// MonitoringState represents monitoring state
 type MonitoringState struct {
 	Enabled         bool   `yaml:"enabled"`
 	Provider        string `yaml:"provider,omitempty"`

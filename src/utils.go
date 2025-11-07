@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"math/big"
 	"os"
@@ -27,15 +26,6 @@ func generateRandomString(length int) string {
 		b[i] = charset[n.Int64()]
 	}
 	return string(b)
-}
-
-// generateSecureToken creates a secure random token suitable for API keys
-func generateSecureToken(length int) string {
-	bytes := make([]byte, length)
-	if _, err := rand.Read(bytes); err != nil {
-		panic(fmt.Errorf("failed to generate secure token: %w", err))
-	}
-	return base64.URLEncoding.EncodeToString(bytes)
 }
 
 // generateDatabasePassword creates a strong database password
@@ -132,23 +122,18 @@ func validateEmail(email string) error {
 	return nil
 }
 
-// sanitizeProjectName ensures project name is valid for Kubernetes resources
+// ensures project name is valid for Kubernetes resources
 func sanitizeProjectName(name string) string {
-	// Convert to lowercase
 	name = strings.ToLower(name)
 
-	// Replace invalid characters with hyphens
 	name = regexp.MustCompile(`[^a-z0-9\-]`).ReplaceAllString(name, "-")
 
-	// Remove consecutive hyphens
 	name = regexp.MustCompile(`-+`).ReplaceAllString(name, "-")
 
-	// Ensure it doesn't start or end with hyphen
 	name = strings.Trim(name, "-")
 
-	// Ensure it's not empty and not too long
 	if name == "" {
-		name = "rulebricks"
+		name = DefaultProjectName
 	}
 	if len(name) > 63 {
 		name = name[:63]
@@ -173,60 +158,17 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-// parsePort validates and parses a port number
-func parsePort(portStr string) (int, error) {
-	if portStr == "" {
-		return 0, fmt.Errorf("port cannot be empty")
-	}
 
-	// Convert string to int
-	port := 0
-	for _, ch := range portStr {
-		if ch < '0' || ch > '9' {
-			return 0, fmt.Errorf("port must contain only digits")
-		}
-		port = port*10 + int(ch-'0')
-		if port > 65535 {
-			return 0, fmt.Errorf("port must be between 1 and 65535")
-		}
-	}
-
-	if port < 1 {
-		return 0, fmt.Errorf("port must be between 1 and 65535")
-	}
-
-	return port, nil
-}
-
-// isValidDomain checks if a domain name is valid
 func isValidDomain(domain string) bool {
 	if domain == "" || len(domain) > 253 {
 		return false
 	}
 
-	// Check for valid characters and structure
 	domainRegex := regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$`)
 	return domainRegex.MatchString(domain)
 }
 
-// mergeStringMaps merges two string maps, with values from 'override' taking precedence
-func mergeStringMaps(base, override map[string]string) map[string]string {
-	result := make(map[string]string)
 
-	// Copy base values
-	for k, v := range base {
-		result[k] = v
-	}
-
-	// Override with new values
-	for k, v := range override {
-		result[k] = v
-	}
-
-	return result
-}
-
-// stringSliceContains checks if a string slice contains a value
 func stringSliceContains(slice []string, value string) bool {
 	for _, item := range slice {
 		if item == value {
@@ -236,7 +178,6 @@ func stringSliceContains(slice []string, value string) bool {
 	return false
 }
 
-// uniqueStringSlice returns a slice with duplicate values removed
 func uniqueStringSlice(slice []string) []string {
 	seen := make(map[string]bool)
 	result := []string{}

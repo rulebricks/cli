@@ -4,17 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/fatih/color"
-	"gopkg.in/yaml.v3"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/fatih/color"
+	"gopkg.in/yaml.v3"
 )
 
-// UpgradeManager handles version upgrades
 type UpgradeManager struct {
 	config       *Config
 	verbose      bool
@@ -23,7 +23,6 @@ type UpgradeManager struct {
 	httpClient   *http.Client
 }
 
-// ChartRelease represents a GitHub release for the charts
 type ChartRelease struct {
 	TagName    string    `json:"tag_name"`
 	Name       string    `json:"name"`
@@ -35,7 +34,6 @@ type ChartRelease struct {
 	} `json:"assets"`
 }
 
-// NewUpgradeManager creates a new upgrade manager
 func NewUpgradeManager(config *Config, verbose bool) *UpgradeManager {
 	chartManager, _ := NewChartManager("", verbose)
 
@@ -50,7 +48,6 @@ func NewUpgradeManager(config *Config, verbose bool) *UpgradeManager {
 	}
 }
 
-// ListVersions lists available versions
 func (um *UpgradeManager) ListVersions() error {
 	spinner := um.progress.StartSpinner("Fetching available versions")
 
@@ -62,10 +59,8 @@ func (um *UpgradeManager) ListVersions() error {
 
 	spinner.Success()
 
-	// Get current version
 	currentVersion, _ := um.getCurrentVersion()
 
-	// Display versions
 	color.New(color.Bold).Println("\n📦 Available Versions")
 	fmt.Println(strings.Repeat("─", 50))
 
@@ -94,21 +89,17 @@ func (um *UpgradeManager) ListVersions() error {
 	return nil
 }
 
-// CheckStatus checks current version and available updates
 func (um *UpgradeManager) CheckStatus() error {
-	// Get current version
 	currentVersion, err := um.getCurrentVersion()
 	if err != nil {
 		return fmt.Errorf("failed to get current version: %w", err)
 	}
 
-	// Get latest version
 	latestVersion, err := um.getLatestVersion()
 	if err != nil {
 		return fmt.Errorf("failed to get latest version: %w", err)
 	}
 
-	// Display status
 	color.New(color.Bold).Println("\n🔄 Upgrade Status")
 	fmt.Println(strings.Repeat("─", 50))
 	fmt.Printf("Current version: %s\n", color.CyanString(currentVersion))
@@ -124,9 +115,7 @@ func (um *UpgradeManager) CheckStatus() error {
 	return nil
 }
 
-// Upgrade performs the upgrade to the specified version
 func (um *UpgradeManager) Upgrade(version string, dryRun bool) error {
-	// Resolve version
 	if version == "latest" {
 		var err error
 		version, err = um.getLatestVersion()
@@ -135,7 +124,6 @@ func (um *UpgradeManager) Upgrade(version string, dryRun bool) error {
 		}
 	}
 
-	// Get current version
 	currentVersion, err := um.getCurrentVersion()
 	if err != nil {
 		um.progress.Warning("Could not determine current version: %v", err)
@@ -144,8 +132,7 @@ func (um *UpgradeManager) Upgrade(version string, dryRun bool) error {
 		return fmt.Errorf("already running version %s", version)
 	}
 
-	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
-	// Print the welcome message with ASCII art
+	fmt.Print("\033[H\033[2J")
 	color.New(color.Bold, color.FgYellow).Printf(`
 
 
@@ -446,7 +433,7 @@ func (um *UpgradeManager) performUpgrade(version string) error {
 				errorDetails += "\nPlease check if the chart was extracted correctly."
 			}
 
-			return fmt.Errorf(errorDetails)
+			return fmt.Errorf("%s", errorDetails)
 		}
 	}
 	spinner.Success()
@@ -552,7 +539,6 @@ func (um *UpgradeManager) updateDeploymentState(version string) error {
 	return os.WriteFile(statePath, data, 0644)
 }
 
-// runDatabaseMigrations runs any new database migrations from the upgraded version
 func (um *UpgradeManager) runDatabaseMigrations(ctx context.Context, extractedChartPath string, version string) (int, error) {
 	// Use the same persistent work directory as initial deployment
 	homeDir, _ := os.UserHomeDir()

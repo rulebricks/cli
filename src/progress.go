@@ -446,12 +446,6 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh%dm", hour, min)
 }
 
-func getSpinnerFrame(elapsed time.Duration) string {
-	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	index := int(elapsed.Milliseconds()/100) % len(frames)
-	return color.CyanString(frames[index])
-}
-
 // Section prints a section header
 func (pi *ProgressIndicator) Section(title string) {
 	fmt.Fprintf(pi.writer, "\n%s\n%s\n",

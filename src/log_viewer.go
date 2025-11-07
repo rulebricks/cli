@@ -7,18 +7,16 @@ import (
 	"strings"
 
 	"github.com/fatih/color"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// LogViewer handles log viewing operations
 type LogViewer struct {
 	config   *Config
 	k8sOps   *KubernetesOperations
 	progress *ProgressIndicator
 }
 
-// NewLogViewer creates a new log viewer
 func NewLogViewer(config *Config) *LogViewer {
 	return &LogViewer{
 		config:   config,
@@ -26,24 +24,19 @@ func NewLogViewer(config *Config) *LogViewer {
 	}
 }
 
-// ViewLogs displays logs for the specified component
 func (lv *LogViewer) ViewLogs(component string, follow bool, tail int) error {
-	// Initialize Kubernetes operations
 	k8sOps, err := NewKubernetesOperations(lv.config, false)
 	if err != nil {
 		return fmt.Errorf("failed to connect to cluster: %w", err)
 	}
 	lv.k8sOps = k8sOps
 
-	// Map component names to namespaces and label selectors
 	componentMap := lv.getComponentMap()
 
-	// Handle 'all' component
 	if component == "all" {
 		return lv.viewAllLogs(componentMap, follow, tail)
 	}
 
-	// Get component info
 	info, exists := componentMap[strings.ToLower(component)]
 	if !exists {
 		return fmt.Errorf("unknown component: %s\nAvailable components: %s",

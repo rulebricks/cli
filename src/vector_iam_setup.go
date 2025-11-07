@@ -10,7 +10,6 @@ import (
 	"github.com/fatih/color"
 )
 
-// IAMSetup handles IAM configuration for Vector sinks
 type IAMSetup struct {
 	config         interface{}
 	namespace      string
@@ -19,7 +18,6 @@ type IAMSetup struct {
 	nonInteractive bool
 }
 
-// NewIAMSetup creates a new IAM setup handler
 func NewIAMSetup(config interface{}, namespace, clusterName string, verbose, nonInteractive bool) *IAMSetup {
 	return &IAMSetup{
 		config:         config,
@@ -30,23 +28,19 @@ func NewIAMSetup(config interface{}, namespace, clusterName string, verbose, non
 	}
 }
 
-// SetupS3 configures AWS IAM for S3 sink
 func (s *IAMSetup) SetupS3(bucket, region string) error {
 	fmt.Println("🔧 Setting up AWS S3 permissions...")
 
-	// Check for required dependencies
 	depChecker := NewDependencyChecker("aws")
 	if err := depChecker.CheckDependencies(); err != nil {
 		return err
 	}
 
-	// Get AWS account ID
 	accountID, err := s.getAWSAccountID()
 	if err != nil {
 		return fmt.Errorf("failed to get AWS account ID: %w", err)
 	}
 
-	// Check if OIDC provider exists
 	oidcExists, err := s.checkOIDCProvider()
 	if err != nil {
 		return fmt.Errorf("failed to check OIDC provider: %w", err)
@@ -59,7 +53,6 @@ func (s *IAMSetup) SetupS3(bucket, region string) error {
 		}
 	}
 
-	// Create IAM policy
 	policyName := fmt.Sprintf("VectorS3Access-%s", bucket)
 	policyArn := fmt.Sprintf("arn:aws:iam::%s:policy/%s", accountID, policyName)
 
@@ -68,14 +61,12 @@ func (s *IAMSetup) SetupS3(bucket, region string) error {
 		return fmt.Errorf("failed to create IAM policy: %w", err)
 	}
 
-	// Create service account with IRSA
 	serviceAccountName := "vector-s3-access"
 	fmt.Printf("  ✓ Creating service account: %s\n", serviceAccountName)
 	if err := s.createIRSAServiceAccount(serviceAccountName, policyArn); err != nil {
 		return fmt.Errorf("failed to create service account: %w", err)
 	}
 
-	// Update Vector configuration
 	fmt.Println("  ✓ Updating Vector configuration...")
 	if err := s.updateVectorServiceAccount(serviceAccountName); err != nil {
 		return fmt.Errorf("failed to update Vector: %w", err)
@@ -96,11 +87,9 @@ func (s *IAMSetup) SetupS3(bucket, region string) error {
 	return nil
 }
 
-// SetupGCS configures GCP IAM for Cloud Storage sink
 func (s *IAMSetup) SetupGCS(bucket, projectID string) error {
 	fmt.Println("🔧 Setting up GCP Cloud Storage permissions...")
 
-	// Check for required dependencies
 	depChecker := NewDependencyChecker("gcp")
 	if err := depChecker.CheckDependencies(); err != nil {
 		return err
@@ -180,7 +169,6 @@ func (s *IAMSetup) SetupGCS(bucket, projectID string) error {
 	return nil
 }
 
-// SetupAzure configures Azure IAM for Blob Storage sink
 func (s *IAMSetup) SetupAzure(container, storageAccount, resourceGroup string) error {
 	fmt.Println("🔧 Setting up Azure Blob Storage permissions...")
 
@@ -558,7 +546,6 @@ func (s *IAMSetup) updateVectorPodIdentity(identityName string) error {
 
 // Helper methods
 
-// GenerateIAMConfig generates IAM configuration for manual setup
 func (s *IAMSetup) GenerateIAMConfig(sinkType, bucket string) error {
 	switch sinkType {
 	case "aws_s3":

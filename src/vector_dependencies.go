@@ -7,7 +7,6 @@ import (
 	"strings"
 )
 
-// Dependency represents a required CLI tool
 type Dependency struct {
 	Name       string
 	Command    string
@@ -15,12 +14,10 @@ type Dependency struct {
 	InstallCmd map[string]string // OS-specific install commands
 }
 
-// DependencyChecker checks for required CLI dependencies
 type DependencyChecker struct {
 	dependencies []Dependency
 }
 
-// NewDependencyChecker creates a new dependency checker for the specified provider
 func NewDependencyChecker(provider string) *DependencyChecker {
 	dc := &DependencyChecker{}
 
@@ -109,7 +106,6 @@ func (dc *DependencyChecker) CheckDependencies() error {
 	return nil
 }
 
-// formatMissingDependencyError creates a helpful error message with installation instructions
 func (dc *DependencyChecker) formatMissingDependencyError(missingDeps []Dependency) error {
 	var sb strings.Builder
 
@@ -138,7 +134,6 @@ func (dc *DependencyChecker) formatMissingDependencyError(missingDeps []Dependen
 	return fmt.Errorf("%s", sb.String())
 }
 
-// CheckSpecificDependency checks if a specific dependency is available
 func (dc *DependencyChecker) CheckSpecificDependency(command string) error {
 	for _, dep := range dc.dependencies {
 		if dep.Command == command {
@@ -151,7 +146,6 @@ func (dc *DependencyChecker) CheckSpecificDependency(command string) error {
 	return nil
 }
 
-// GetInstallInstructions returns installation instructions for a specific dependency
 func (dc *DependencyChecker) GetInstallInstructions(command string) string {
 	for _, dep := range dc.dependencies {
 		if dep.Command == command {

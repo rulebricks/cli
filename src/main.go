@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/fatih/color"
@@ -14,18 +15,14 @@ import (
 )
 
 var (
-	// Version information
-	version   = "dev"
-	gitCommit = "unknown"
-	buildDate = "unknown"
-
-	// Global flags
+	version        = "dev"
+	gitCommit      = "unknown"
+	buildDate      = "unknown"
 	cfgFile        string
 	nonInteractive bool
 	verbose        bool
 )
 
-// rootCmd represents the base command
 var rootCmd = &cobra.Command{
 	Use:   "rulebricks",
 	Short: "Rulebricks deployment and management CLI",
@@ -50,7 +47,6 @@ on Kubernetes clusters across multiple cloud providers.`,
 	SilenceErrors: true,
 }
 
-// initCmd handles project initialization
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize a new Rulebricks project",
@@ -61,7 +57,6 @@ var initCmd = &cobra.Command{
 	},
 }
 
-// deployCmd handles deployment
 var deployCmd = &cobra.Command{
 	Use:   "deploy",
 	Short: "Deploy Rulebricks to your cluster",
@@ -97,7 +92,6 @@ var deployCmd = &cobra.Command{
 	},
 }
 
-// destroyCmd handles destruction
 var destroyCmd = &cobra.Command{
 	Use:   "destroy",
 	Short: "Destroy Rulebricks deployment",
@@ -127,7 +121,6 @@ var destroyCmd = &cobra.Command{
 	},
 }
 
-// statusCmd shows deployment status
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show deployment status",
@@ -160,7 +153,6 @@ var statusCmd = &cobra.Command{
 	},
 }
 
-// logsCmd handles log viewing
 var logsCmd = &cobra.Command{
 	Use:   "logs [component]",
 	Short: "View component logs",
@@ -186,14 +178,12 @@ Available components: app, hps, workers, redis, database, supabase, traefik, pro
 	},
 }
 
-// upgradeCmd handles version upgrades
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
 	Short: "Upgrade Rulebricks to a new version",
 	Long:  `Upgrade your Rulebricks deployment to a newer version.`,
 }
 
-// versionCmd shows version information
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show version information",
@@ -208,7 +198,6 @@ var versionCmd = &cobra.Command{
 	},
 }
 
-// vectorCmd handles Vector logging configuration
 var vectorCmd = &cobra.Command{
 	Use:   "vector",
 	Short: "Manage Vector logging configuration",
@@ -216,29 +205,21 @@ var vectorCmd = &cobra.Command{
 }
 
 func init() {
-	// Global flags
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default: rulebricks.yaml)")
 	rootCmd.PersistentFlags().BoolVarP(&nonInteractive, "non-interactive", "n", false, "run in non-interactive mode")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
 
-	// Deploy flags
 	deployCmd.Flags().String("chart-version", "", "specific chart version to deploy")
 
-	// Destroy flags
 	destroyCmd.Flags().Bool("cluster", false, "destroy the entire cluster infrastructure")
 	destroyCmd.Flags().Bool("force", false, "force destruction without confirmation")
 
-	// Logs flags
 	logsCmd.Flags().BoolP("follow", "f", false, "follow log output")
 	logsCmd.Flags().IntP("tail", "t", 100, "number of lines to show from the end of logs")
 
-	// Add upgrade subcommands
 	upgradeCmd.AddCommand(createUpgradeSubcommands()...)
-
-	// Add vector subcommands
 	vectorCmd.AddCommand(createVectorSubcommands()...)
 
-	// Add commands to root
 	rootCmd.AddCommand(
 		initCmd,
 		deployCmd,
@@ -258,13 +239,11 @@ func main() {
 	}
 }
 
-// LoadConfig loads configuration from file
 func LoadConfig(path string) (*Config, error) {
 	if path == "" {
 		path = "rulebricks.yaml"
 	}
 
-	// Check if file exists
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("configuration file not found: %s\nRun 'rulebricks init' to create one", path)
@@ -282,13 +261,11 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
-	// Apply defaults
 	config.ApplyDefaults()
 
 	return config, nil
 }
 
-// SaveConfig saves configuration to file
 func SaveConfig(config *Config, path string) error {
 	if path == "" {
 		path = "rulebricks.yaml"
@@ -299,13 +276,11 @@ func SaveConfig(config *Config, path string) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	// Create directory if needed
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Write with proper permissions
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
@@ -314,8 +289,7 @@ func SaveConfig(config *Config, path string) error {
 }
 
 func confirmDestruction(destroyCluster bool) bool {
-	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
-	// Print the welcome message with ASCII art
+	fmt.Print("\033[H\033[2J")
 	color.New(color.Bold, color.FgRed).Printf(`
 
 
@@ -360,7 +334,6 @@ func confirmDestruction(destroyCluster bool) bool {
 }
 
 func createUpgradeSubcommands() []*cobra.Command {
-	// List available versions
 	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List available versions",
@@ -375,7 +348,6 @@ func createUpgradeSubcommands() []*cobra.Command {
 		},
 	}
 
-	// Check current version
 	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show current version and available updates",
@@ -390,7 +362,6 @@ func createUpgradeSubcommands() []*cobra.Command {
 		},
 	}
 
-	// Perform upgrade
 	runCmd := &cobra.Command{
 		Use:   "run [version]",
 		Short: "Upgrade to a specific version (or latest)",
@@ -419,17 +390,14 @@ func createUpgradeSubcommands() []*cobra.Command {
 }
 
 func getGoVersion() string {
-	// This would be set at build time
-	return "go1.21"
+	return runtime.Version()
 }
 
 func getPlatform() string {
-	// This would detect the actual platform
-	return "darwin/arm64"
+	return fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
 }
 
 func createVectorSubcommands() []*cobra.Command {
-	// Setup S3 permissions
 	setupS3Cmd := &cobra.Command{
 		Use:   "setup-s3",
 		Short: "Configure AWS IAM permissions for S3 logging",
@@ -445,10 +413,10 @@ func createVectorSubcommands() []*cobra.Command {
 				return fmt.Errorf("logging is not enabled in configuration")
 			}
 			if config.Logging.Vector == nil || config.Logging.Vector.Sink == nil {
-				return fmt.Errorf("Vector sink is not configured")
+				return fmt.Errorf("vector sink is not configured")
 			}
 			if config.Logging.Vector.Sink.Type != "aws_s3" {
-				return fmt.Errorf("Vector sink type is not aws_s3")
+				return fmt.Errorf("vector sink type is not aws_s3")
 			}
 
 			bucket, _ := cmd.Flags().GetString("bucket")
@@ -488,7 +456,6 @@ func createVectorSubcommands() []*cobra.Command {
 	setupS3Cmd.Flags().String("region", "", "AWS region")
 	setupS3Cmd.Flags().String("cluster", "", "EKS cluster name")
 
-	// Setup GCS permissions
 	setupGCSCmd := &cobra.Command{
 		Use:   "setup-gcs",
 		Short: "Configure GCP IAM permissions for Cloud Storage logging",
@@ -504,10 +471,10 @@ func createVectorSubcommands() []*cobra.Command {
 				return fmt.Errorf("logging is not enabled in configuration")
 			}
 			if config.Logging.Vector == nil || config.Logging.Vector.Sink == nil {
-				return fmt.Errorf("Vector sink is not configured")
+				return fmt.Errorf("vector sink is not configured")
 			}
 			if config.Logging.Vector.Sink.Type != "gcp_cloud_storage" {
-				return fmt.Errorf("Vector sink type is not gcp_cloud_storage")
+				return fmt.Errorf("vector sink type is not gcp_cloud_storage")
 			}
 
 			bucket, _ := cmd.Flags().GetString("bucket")
@@ -547,7 +514,6 @@ func createVectorSubcommands() []*cobra.Command {
 	setupGCSCmd.Flags().String("project", "", "GCP project ID")
 	setupGCSCmd.Flags().String("cluster", "", "GKE cluster name")
 
-	// Setup Azure permissions
 	setupAzureCmd := &cobra.Command{
 		Use:   "setup-azure",
 		Short: "Configure Azure IAM permissions for Blob Storage logging",
@@ -563,10 +529,10 @@ func createVectorSubcommands() []*cobra.Command {
 				return fmt.Errorf("logging is not enabled in configuration")
 			}
 			if config.Logging.Vector == nil || config.Logging.Vector.Sink == nil {
-				return fmt.Errorf("Vector sink is not configured")
+				return fmt.Errorf("vector sink is not configured")
 			}
 			if config.Logging.Vector.Sink.Type != "azure_blob" {
-				return fmt.Errorf("Vector sink type is not azure_blob")
+				return fmt.Errorf("vector sink type is not azure_blob")
 			}
 
 			storageAccount, _ := cmd.Flags().GetString("storage-account")
@@ -608,7 +574,6 @@ func createVectorSubcommands() []*cobra.Command {
 	setupAzureCmd.Flags().String("resource-group", "", "Azure resource group")
 	setupAzureCmd.Flags().String("cluster", "", "AKS cluster name")
 
-	// Generate IAM configuration
 	generateIAMCmd := &cobra.Command{
 		Use:   "generate-iam-config",
 		Short: "Generate IAM configuration for manual setup",
@@ -653,18 +618,15 @@ func createVectorSubcommands() []*cobra.Command {
 	return []*cobra.Command{setupS3Cmd, setupGCSCmd, setupAzureCmd, generateIAMCmd}
 }
 
-// NewVectorIAMSetup creates a new Vector IAM setup instance
 func NewVectorIAMSetup(config interface{}, namespace, clusterName string, verbose, nonInteractive bool) *IAMSetup {
 	return NewIAMSetup(config, namespace, clusterName, verbose, nonInteractive)
 }
 
-// getClusterNameWithFallback attempts to get the cluster name from multiple sources
 func getClusterNameWithFallback() (string, error) {
 	if verbose {
 		fmt.Println("🔍 Detecting cluster name from available sources...")
 	}
 
-	// First try to get from kubectl context (most reliable for deployed clusters)
 	cmd := exec.Command("kubectl", "config", "current-context")
 	output, err := cmd.Output()
 	if err == nil {
@@ -672,7 +634,6 @@ func getClusterNameWithFallback() (string, error) {
 		if verbose {
 			fmt.Printf("  Current kubectl context: %s\n", context)
 		}
-		// Extract cluster name from ARN if it's an EKS ARN
 		if strings.Contains(context, "arn:aws:eks") {
 			parts := strings.Split(context, "/")
 			if len(parts) >= 2 {
@@ -683,12 +644,9 @@ func getClusterNameWithFallback() (string, error) {
 				return clusterName, nil
 			}
 		}
-		// For Azure AKS context format
 		if strings.Contains(context, "aks-") {
-			// AKS contexts are typically just the cluster name
 			return context, nil
 		}
-		// For GKE context format (typically gke_PROJECT_ZONE_CLUSTER)
 		if strings.HasPrefix(context, "gke_") {
 			parts := strings.Split(context, "_")
 			if len(parts) >= 4 {
@@ -697,7 +655,6 @@ func getClusterNameWithFallback() (string, error) {
 		}
 	}
 
-	// Fallback to deployment state
 	statePath := ".rulebricks-state.yaml"
 	if verbose {
 		fmt.Printf("  Checking deployment state file: %s\n", statePath)
@@ -714,7 +671,6 @@ func getClusterNameWithFallback() (string, error) {
 		fmt.Printf("  State file not found or not readable: %v\n", err)
 	}
 
-	// Try eksctl as another fallback for EKS clusters
 	if verbose {
 		fmt.Println("  Trying eksctl to list clusters...")
 	}
@@ -723,7 +679,6 @@ func getClusterNameWithFallback() (string, error) {
 	if err == nil {
 		var clusters []map[string]interface{}
 		if err := json.Unmarshal(output, &clusters); err == nil && len(clusters) > 0 {
-			// Return the first cluster name (should ideally filter by region/config)
 			if name, ok := clusters[0]["Name"].(string); ok {
 				if verbose {
 					fmt.Printf("  ✓ Found cluster via eksctl: %s\n", name)
@@ -735,7 +690,6 @@ func getClusterNameWithFallback() (string, error) {
 		fmt.Printf("  eksctl command failed: %v\n", err)
 	}
 
-	// Try to load config as final fallback
 	if verbose {
 		fmt.Println("  Trying to load cluster name from config...")
 	}
@@ -750,8 +704,7 @@ func getClusterNameWithFallback() (string, error) {
 		}
 	}
 
-	// Use default cluster name as last resort
-	defaultClusterName := "rulebricks-cluster"
+	defaultClusterName := DefaultClusterName
 	if verbose {
 		fmt.Printf("  ℹ️  Using default cluster name: %s\n", defaultClusterName)
 	}

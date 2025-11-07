@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-// SharedSecrets holds secrets used across deployments
 type SharedSecrets struct {
 	LicenseKey         string
 	DBPassword         string
@@ -41,7 +40,6 @@ func (s *SharedSecrets) GetSecret(source string) string {
 	return source
 }
 
-// KafkaConfig holds Kafka configuration
 type KafkaConfig struct {
 	Partitions        int
 	ReplicationFactor int
@@ -49,7 +47,6 @@ type KafkaConfig struct {
 	StorageSize       string
 }
 
-// CloudProviderRegions contains region information for each cloud provider
 var CloudProviderRegions = map[string][]string{
 	"aws": {
 		"us-east-1",      // N. Virginia
@@ -100,7 +97,6 @@ var CloudProviderRegions = map[string][]string{
 	},
 }
 
-// SupabaseRegions contains Supabase-specific regions
 var SupabaseRegions = []struct {
 	Name   string
 	Region string
@@ -123,21 +119,18 @@ var SupabaseRegions = []struct {
 	{"South America (São Paulo)", "sa-east-1"},
 }
 
-// DefaultInstanceTypes contains default instance types for each cloud provider
 var DefaultInstanceTypes = map[string]string{
 	"aws":   "c8g.large",
 	"azure": "Standard_D4ps_v5",
 	"gcp":   "t2a-standard-4",
 }
 
-// KubernetesVersions contains supported Kubernetes versions
 var KubernetesVersions = map[string]string{
 	"aws":   "1.28",
 	"azure": "1.28",
 	"gcp":   "1.28",
 }
 
-// RequiredCommands lists required CLI commands for each operation
 var RequiredCommands = map[string][]string{
 	"base": {
 		"kubectl",
@@ -158,7 +151,6 @@ var RequiredCommands = map[string][]string{
 	},
 }
 
-// TerraformBackendConfigs contains example backend configurations
 var TerraformBackendConfigs = map[string]map[string]string{
 	"s3": {
 		"bucket":         "my-terraform-state",
@@ -179,7 +171,6 @@ var TerraformBackendConfigs = map[string]map[string]string{
 	},
 }
 
-// HelmChartPaths defines paths to Helm charts
 type HelmChartPaths struct {
 	Traefik     string
 	CertManager string
@@ -188,7 +179,6 @@ type HelmChartPaths struct {
 	Rulebricks  string
 }
 
-// GetDefaultHelmChartPaths returns default Helm chart paths
 func GetDefaultHelmChartPaths() HelmChartPaths {
 	return HelmChartPaths{
 		Traefik:     "traefik/traefik",
@@ -199,7 +189,6 @@ func GetDefaultHelmChartPaths() HelmChartPaths {
 	}
 }
 
-// EmailTemplateConfig holds email template configuration
 type EmailTemplateConfig struct {
 	SubjectInvite        string
 	SubjectConfirmation  string
@@ -211,7 +200,6 @@ type EmailTemplateConfig struct {
 	TemplateEmailChange  string
 }
 
-// GetDefaultEmailTemplates returns the default email template configuration
 func GetDefaultEmailTemplates() EmailTemplateConfig {
 	return EmailTemplateConfig{
 		SubjectInvite:        "You've been invited",
@@ -225,7 +213,6 @@ func GetDefaultEmailTemplates() EmailTemplateConfig {
 	}
 }
 
-// GetRequiredCommands returns all required commands based on configuration
 func GetRequiredCommands(config *Config) []string {
 	commands := RequiredCommands["base"]
 
@@ -242,7 +229,6 @@ func GetRequiredCommands(config *Config) []string {
 	return uniqueStringSlice(commands)
 }
 
-// ValidateCloudProviderConfig validates cloud-specific configuration
 func ValidateCloudProviderConfig(config *Config) error {
 	switch config.Cloud.Provider {
 	case "aws":
@@ -254,7 +240,7 @@ func ValidateCloudProviderConfig(config *Config) error {
 		}
 	case "azure":
 		if config.Cloud.Region == "" {
-			return fmt.Errorf("Azure region is required")
+			return fmt.Errorf("azure region is required")
 		}
 		if !stringSliceContains(CloudProviderRegions["azure"], config.Cloud.Region) {
 			return fmt.Errorf("invalid Azure region: %s", config.Cloud.Region)
@@ -276,7 +262,6 @@ func ValidateCloudProviderConfig(config *Config) error {
 	return nil
 }
 
-// GetSupabaseURL returns the Supabase URL based on deployment type
 func GetSupabaseURL(config *Config, projectRef string) string {
 	switch config.Database.Type {
 	case "managed":
@@ -307,32 +292,27 @@ func GetDatabaseURL(config *Config, password string, projectRef ...string) strin
 	}
 }
 
-// CommandExists checks if a command is available in PATH
 func CommandExists(cmd string) bool {
 	_, err := exec.LookPath(cmd)
 	return err == nil
 }
 
-// Environment variables
 const (
 	EnvPrefix     = "RULEBRICKS"
 	EnvLicenseKey = "RULEBRICKS_LICENSE_KEY"
 	EnvAPIKey     = "RULEBRICKS_API_KEY"
 	EnvDebug      = "RULEBRICKS_DEBUG"
-)
 
-// Docker registry constants
-const (
 	DefaultDockerRegistry = "docker.io"
 	DefaultDockerOrg      = "rulebricks"
 	DefaultAppImage       = "rulebricks/app"
 	DefaultHPSImage       = "rulebricks/hps"
-)
 
-// Chart versions
-const (
 	MinChartVersion     = "1.0.0"
 	DefaultChartVersion = "latest"
+
+	DefaultClusterName = "rulebricks-cluster"
+	DefaultProjectName = "rulebricks"
 )
 
 // Timeouts

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/mail"
 	"regexp"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -304,7 +303,6 @@ type ResourceSpec struct {
 	Memory string `yaml:"memory,omitempty"`
 }
 
-// Validate performs configuration validation
 func (c *Config) Validate() error {
 	// Validate required fields
 	if c.Project.Name == "" {
@@ -436,15 +434,11 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ApplyDefaults applies default values to the configuration
 func (c *Config) ApplyDefaults() {
-	// Version should already be set to CLI version by InitWizard
-	// Only set a default if somehow still empty
 	if c.Version == "" {
 		c.Version = "1.0"
 	}
 
-	// Apply cloud defaults
 	switch c.Cloud.Provider {
 	case "aws":
 		if c.Cloud.AWS == nil {
@@ -472,9 +466,8 @@ func (c *Config) ApplyDefaults() {
 		}
 	}
 
-	// Apply Kubernetes defaults
 	if c.Kubernetes.ClusterName == "" {
-		c.Kubernetes.ClusterName = "rulebricks-cluster"
+		c.Kubernetes.ClusterName = DefaultClusterName
 	}
 	if c.Kubernetes.NodeCount == 0 {
 		c.Kubernetes.NodeCount = 3
@@ -486,7 +479,6 @@ func (c *Config) ApplyDefaults() {
 		c.Kubernetes.MaxNodes = c.Kubernetes.NodeCount * 2
 	}
 
-	// Apply security defaults
 	if c.Security.TLS == nil {
 		c.Security.TLS = &TLSConfig{
 			Enabled:  true,
@@ -494,9 +486,7 @@ func (c *Config) ApplyDefaults() {
 		}
 	}
 
-	// Apply monitoring defaults
 	if c.Monitoring.Enabled {
-		// Default to local mode if not specified
 		if c.Monitoring.Mode == "" {
 			if c.Monitoring.Provider != "" {
 				// Migrate from old provider field
@@ -506,7 +496,6 @@ func (c *Config) ApplyDefaults() {
 			}
 		}
 
-		// Apply local monitoring defaults
 		if c.Monitoring.Mode == "local" {
 			if c.Monitoring.Local == nil {
 				c.Monitoring.Local = &LocalMonitoringConfig{
@@ -518,7 +507,6 @@ func (c *Config) ApplyDefaults() {
 			}
 		}
 
-		// Apply remote monitoring defaults
 		if c.Monitoring.Mode == "remote" {
 			if c.Monitoring.Remote != nil && c.Monitoring.Remote.Provider == "" {
 				c.Monitoring.Remote.Provider = "prometheus"
@@ -542,7 +530,6 @@ func (c *Config) ApplyDefaults() {
 		}
 	}
 
-	// Apply performance defaults
 	if c.Performance.VolumeLevel == "" {
 		c.Performance.VolumeLevel = "medium"
 	}
@@ -565,25 +552,20 @@ func (c *Config) ApplyDefaults() {
 	}
 }
 
-// MarshalYAML marshals the configuration to YAML
 func (c *Config) MarshalYAML() ([]byte, error) {
 	return yaml.Marshal(c)
 }
 
-// UnmarshalYAML unmarshals the configuration from YAML
 func (c *Config) UnmarshalYAML(data []byte) error {
 	return yaml.Unmarshal(data, c)
 }
 
-// GetNamespace returns the namespace for a given component
 func (c *Config) GetNamespace(component string) string {
 	if c.Project.Namespace != "" && component == "app" {
 		return c.Project.Namespace
 	}
 	return GetDefaultNamespace(c.Project.Name, component)
 }
-
-// Helper functions
 
 func isValidKubernetesName(name string) bool {
 	if len(name) == 0 || len(name) > 63 {
@@ -594,23 +576,8 @@ func isValidKubernetesName(name string) bool {
 	return regex.MatchString(name)
 }
 
-func sanitizeName(name string) string {
-	// Convert to lowercase and replace invalid characters
-	name = strings.ToLower(name)
-	name = regexp.MustCompile(`[^a-z0-9-]`).ReplaceAllString(name, "-")
-	name = regexp.MustCompile(`-+`).ReplaceAllString(name, "-")
-	name = strings.Trim(name, "-")
-
-	if len(name) > 63 {
-		name = name[:63]
-	}
-
-	return name
-}
-
-// GetDefaultNamespace returns the default namespace for a component
 func GetDefaultNamespace(projectName, component string) string {
-	prefix := sanitizeName(projectName)
+	prefix := sanitizeProjectName(projectName)
 
 	switch component {
 	case "traefik":

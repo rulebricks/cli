@@ -14,30 +14,23 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// DestroyerOptions contains options for the destroyer
 type DestroyerOptions struct {
 	DestroyCluster bool
 	Force          bool
 	Verbose        bool
 }
 
-// Destroyer handles the destruction process
 type Destroyer struct {
-	config   *Config
-	options  DestroyerOptions
-	progress *ProgressIndicator
-	state    *DeploymentState
-
-	// Operations
-	cloudOps *CloudOperations
-	k8sOps   *KubernetesOperations
-
-	// Discovered resources
+	config     *Config
+	options    DestroyerOptions
+	progress   *ProgressIndicator
+	state      *DeploymentState
+	cloudOps   *CloudOperations
+	k8sOps     *KubernetesOperations
 	namespaces []string
 	components []string
 }
 
-// NewDestroyer creates a new destroyer instance
 func NewDestroyer(config *Config, options DestroyerOptions) *Destroyer {
 	return &Destroyer{
 		config:   config,
@@ -46,57 +39,45 @@ func NewDestroyer(config *Config, options DestroyerOptions) *Destroyer {
 	}
 }
 
-// Execute runs the destruction process
 func (d *Destroyer) Execute() error {
 	startTime := time.Now()
 
 	d.progress.Section("Preparing Destruction")
 
-	// Load deployment state
 	if err := d.loadState(); err != nil {
 		d.progress.Warning("Could not load deployment state: %v", err)
 	}
 
-	// Initialize operations
 	if err := d.initializeOperations(); err != nil {
 		return fmt.Errorf("failed to initialize operations: %w", err)
 	}
 
-	// Discover deployed resources
 	if err := d.discoverResources(); err != nil {
 		d.progress.Warning("Could not discover all resources: %v", err)
 	}
 
-	// Display destruction plan
 	d.displayPlan()
-
-	// Confirmation already handled in main.go
 
 	d.progress.Section("Starting Destruction")
 
-	// Phase 1: Quick deletion of applications and services
 	if err := d.quickDeletion(); err != nil {
 		d.progress.Warning("Quick deletion encountered errors: %v", err)
 	}
 
-	// Phase 2: Clean up namespaces
 	if err := d.cleanupNamespaces(); err != nil {
 		d.progress.Warning("Namespace cleanup encountered errors: %v", err)
 	}
 
-	// Phase 3: Clean up project-specific cluster resources
 	if err := d.cleanupProjectResources(); err != nil {
 		d.progress.Warning("Project resource cleanup encountered errors: %v", err)
 	}
 
-	// Phase 4: Destroy infrastructure if requested
 	if d.options.DestroyCluster {
 		if err := d.destroyInfrastructure(); err != nil {
 			return fmt.Errorf("infrastructure destruction failed: %w", err)
 		}
 	}
 
-	// Clean up local state
 	if err := d.cleanupLocalState(); err != nil {
 		d.progress.Warning("Failed to clean up local state: %v", err)
 	}
@@ -107,7 +88,6 @@ func (d *Destroyer) Execute() error {
 	return nil
 }
 
-// loadState loads the deployment state
 func (d *Destroyer) loadState() error {
 	statePath := ".rulebricks-state.yaml"
 
@@ -129,7 +109,6 @@ func (d *Destroyer) loadState() error {
 	return nil
 }
 
-// initializeOperations initializes cloud and kubernetes operations
 func (d *Destroyer) initializeOperations() error {
 	// Initialize Kubernetes operations
 	k8sOps, err := NewKubernetesOperations(d.config, d.options.Verbose)
@@ -154,7 +133,6 @@ func (d *Destroyer) initializeOperations() error {
 	return nil
 }
 
-// discoverResources discovers deployed resources
 func (d *Destroyer) discoverResources() error {
 	if d.k8sOps == nil {
 		return fmt.Errorf("kubernetes not accessible")
@@ -200,7 +178,6 @@ func (d *Destroyer) discoverResources() error {
 	return nil
 }
 
-// isComponentDeployed checks if a component is deployed
 func (d *Destroyer) isComponentDeployed(component string) bool {
 	if d.k8sOps == nil {
 		return false
@@ -210,7 +187,6 @@ func (d *Destroyer) isComponentDeployed(component string) bool {
 	return contains(d.namespaces, namespace)
 }
 
-// displayPlan shows what will be destroyed
 func (d *Destroyer) displayPlan() {
 	color.New(color.Bold).Println("\n🗑️  Destruction Plan")
 	fmt.Println(strings.Repeat("─", 50))
@@ -245,7 +221,6 @@ func (d *Destroyer) displayPlan() {
 	fmt.Println(strings.Repeat("─", 50))
 }
 
-// quickDeletion performs fast deletion of major components
 func (d *Destroyer) quickDeletion() error {
 	if d.k8sOps == nil {
 		return nil
@@ -281,7 +256,6 @@ func (d *Destroyer) quickDeletion() error {
 	return nil
 }
 
-// cleanupNamespaces cleans up namespaces with retry logic
 func (d *Destroyer) cleanupNamespaces() error {
 	if d.k8sOps == nil || len(d.namespaces) == 0 {
 		return nil
@@ -346,7 +320,6 @@ func (d *Destroyer) cleanupNamespaces() error {
 	return nil
 }
 
-// forceDeleteNamespace forcefully removes a stuck namespace
 func (d *Destroyer) forceDeleteNamespace(namespace string) error {
 	ctx := context.Background()
 
@@ -377,7 +350,6 @@ func (d *Destroyer) forceDeleteNamespace(namespace string) error {
 	return nil
 }
 
-// cleanupProjectResources removes project-specific cluster resources (CRDs, PVs, etc.)
 func (d *Destroyer) cleanupProjectResources() error {
 	if d.k8sOps == nil {
 		return nil
@@ -406,7 +378,6 @@ func (d *Destroyer) cleanupProjectResources() error {
 	return nil
 }
 
-// destroyInfrastructure destroys the cloud infrastructure
 func (d *Destroyer) destroyInfrastructure() error {
 	if d.cloudOps == nil {
 		return fmt.Errorf("cloud operations not initialized")
@@ -426,7 +397,6 @@ func (d *Destroyer) destroyInfrastructure() error {
 	return nil
 }
 
-// cleanupLocalState removes local state files
 func (d *Destroyer) cleanupLocalState() error {
 	homeDir, _ := os.UserHomeDir()
 	workDir := filepath.Join(homeDir, ".rulebricks", "deploy", d.config.Project.Name)

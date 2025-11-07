@@ -102,12 +102,12 @@ func (w *InitWizard) configureProject() error {
 
 	// Project name
 	w.config.Project.Name = w.promptString("Project name", "rulebricks", func(s string) error {
-		if !isValidKubernetesName(sanitizeName(s)) {
+		if !isValidKubernetesName(sanitizeProjectName(s)) {
 			return fmt.Errorf("project name must be lowercase alphanumeric or '-'")
 		}
 		return nil
 	})
-	w.config.Project.Name = sanitizeName(w.config.Project.Name)
+	w.config.Project.Name = sanitizeProjectName(w.config.Project.Name)
 
 	// Domain
 	fmt.Printf("Your application will be accessible at: %s.<root-domain> (You'll need DNS access)\n", w.config.Project.Name)
@@ -242,7 +242,7 @@ func (w *InitWizard) configureGCP() error {
 
 func (w *InitWizard) configureKubernetes() {
 	w.config.Kubernetes.ClusterName = w.promptString("Kubernetes cluster name",
-		"rulebricks-cluster", nil)
+		DefaultClusterName, nil)
 
 	// Autoscaling is always enabled, node counts will be set based on performance tier
 	w.config.Kubernetes.EnableAutoscale = true

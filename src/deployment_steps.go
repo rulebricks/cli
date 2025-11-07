@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"net"
 	"net/http"
 	"os"
@@ -12,9 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
-// InfrastructureStep handles cloud infrastructure provisioning
 type InfrastructureStep struct{}
 
 func (s *InfrastructureStep) Name() string {
@@ -42,23 +42,26 @@ func (s *InfrastructureStep) Execute(ctx context.Context, d *Deployer) error {
 		return fmt.Errorf("cloud operations not initialized")
 	}
 
-	// Create infrastructure
+	// Ensure Terraform assets are available before creating infrastructure
+	if d.assetManager != nil {
+		if err := d.assetManager.EnsureTerraformAssets(d.terraformDir); err != nil {
+			return fmt.Errorf("failed to ensure terraform assets: %w", err)
+		}
+	}
+
 	if err := d.cloudOps.CreateInfrastructure(ctx); err != nil {
 		return fmt.Errorf("failed to create infrastructure: %w", err)
 	}
 
-	// Wait for cluster to be ready
 	if err := d.cloudOps.WaitForClusterReady(ctx); err != nil {
 		return fmt.Errorf("cluster not ready: %w", err)
 	}
 
-	// Get cluster endpoint
 	clusterEndpoint, err := d.cloudOps.GetClusterEndpoint()
 	if err != nil {
 		return fmt.Errorf("failed to get cluster endpoint: %w", err)
 	}
 
-	// Update deployment state
 	d.state.Infrastructure = InfrastructureState{
 		Provider:        d.config.Cloud.Provider,
 		Region:          d.config.Cloud.Region,
@@ -68,12 +71,10 @@ func (s *InfrastructureStep) Execute(ctx context.Context, d *Deployer) error {
 		CreatedAt:       time.Now(),
 	}
 
-	// Save state
 	if err := d.saveState(); err != nil {
 		d.progress.Warning("Failed to save infrastructure state: %v", err)
 	}
 
-	// Initialize Kubernetes operations with the new cluster
 	k8sOps, err := NewKubernetesOperations(d.config, d.options.Verbose)
 	if err != nil {
 		return fmt.Errorf("failed to initialize Kubernetes operations: %w", err)
@@ -87,10 +88,17 @@ func (s *InfrastructureStep) Rollback(ctx context.Context, d *Deployer) error {
 	if d.cloudOps == nil {
 		return nil
 	}
+
+	// Ensure Terraform assets are available before destroying infrastructure
+	if d.assetManager != nil {
+		if err := d.assetManager.EnsureTerraformAssets(d.terraformDir); err != nil {
+			return fmt.Errorf("failed to ensure terraform assets: %w", err)
+		}
+	}
+
 	return d.cloudOps.DestroyInfrastructure(ctx)
 }
 
-// CoreServicesStep installs core Kubernetes services
 type CoreServicesStep struct{}
 
 func (s *CoreServicesStep) Name() string {
@@ -115,7 +123,7 @@ func (s *CoreServicesStep) Estimate() time.Duration {
 
 func (s *CoreServicesStep) Execute(ctx context.Context, d *Deployer) error {
 	if d.k8sOps == nil {
-		return fmt.Errorf("Kubernetes operations not initialized")
+		return fmt.Errorf("kubernetes operations not initialized")
 	}
 
 	// Install Traefik
@@ -143,7 +151,6 @@ func (s *CoreServicesStep) Rollback(ctx context.Context, d *Deployer) error {
 	return nil
 }
 
-// DatabaseStep handles database deployment
 type DatabaseStep struct{}
 
 func (s *DatabaseStep) Name() string {
@@ -180,7 +187,7 @@ func (s *DatabaseStep) getType() string {
 
 func (s *DatabaseStep) Execute(ctx context.Context, d *Deployer) error {
 	if d.supabaseOps == nil {
-		return fmt.Errorf("Supabase operations not initialized")
+		return fmt.Errorf("supabase operations not initialized")
 	}
 
 	// Deploy database based on type
@@ -215,7 +222,6 @@ func (s *DatabaseStep) Rollback(ctx context.Context, d *Deployer) error {
 	return nil
 }
 
-// EmailConfigStep configures email services
 type EmailConfigStep struct{}
 
 func (s *EmailConfigStep) Name() string {
@@ -250,7 +256,6 @@ func (s *EmailConfigStep) Rollback(ctx context.Context, d *Deployer) error {
 	return nil
 }
 
-// MonitoringStep installs monitoring stack
 type MonitoringStep struct{}
 
 func (s *MonitoringStep) Name() string {
@@ -275,7 +280,7 @@ func (s *MonitoringStep) Estimate() time.Duration {
 
 func (s *MonitoringStep) Execute(ctx context.Context, d *Deployer) error {
 	if d.k8sOps == nil {
-		return fmt.Errorf("Kubernetes operations not initialized")
+		return fmt.Errorf("kubernetes operations not initialized")
 	}
 
 	// Check monitoring mode
@@ -333,7 +338,6 @@ func (s *MonitoringStep) Rollback(ctx context.Context, d *Deployer) error {
 	return d.k8sOps.UninstallPrometheus(ctx)
 }
 
-// prepareRemoteWriteConfig prepares Prometheus remote write configuration
 func (d *Deployer) prepareRemoteWriteConfig() map[string]interface{} {
 	if d.config.Monitoring.Remote == nil {
 		return nil
@@ -422,7 +426,6 @@ func (d *Deployer) prepareRemoteWriteConfig() map[string]interface{} {
 	return nil
 }
 
-// LoggingStep installs centralized logging
 type LoggingStep struct{}
 
 func (s *LoggingStep) Name() string {
@@ -447,7 +450,7 @@ func (s *LoggingStep) Estimate() time.Duration {
 
 func (s *LoggingStep) Execute(ctx context.Context, d *Deployer) error {
 	if d.k8sOps == nil {
-		return fmt.Errorf("Kubernetes operations not initialized")
+		return fmt.Errorf("kubernetes operations not initialized")
 	}
 
 	// Install Vector
@@ -470,7 +473,6 @@ func (s *LoggingStep) Rollback(ctx context.Context, d *Deployer) error {
 	return d.k8sOps.UninstallVector(ctx)
 }
 
-// KafkaStep installs Kafka for event streaming
 type KafkaStep struct{}
 
 func (s *KafkaStep) Name() string {
@@ -495,7 +497,7 @@ func (s *KafkaStep) Estimate() time.Duration {
 
 func (s *KafkaStep) Execute(ctx context.Context, d *Deployer) error {
 	if d.k8sOps == nil {
-		return fmt.Errorf("Kubernetes operations not initialized")
+		return fmt.Errorf("kubernetes operations not initialized")
 	}
 
 	// Install Kafka
@@ -506,7 +508,7 @@ func (s *KafkaStep) Execute(ctx context.Context, d *Deployer) error {
 		StorageSize:       d.config.Performance.KafkaStorageSize,
 	}
 
-	if err := d.k8sOps.InstallKafka(ctx, kafkaConfig); err != nil {
+	if err := d.k8sOps.InstallKafka(ctx, kafkaConfig, d); err != nil {
 		return fmt.Errorf("failed to install Kafka: %w", err)
 	}
 
@@ -550,7 +552,7 @@ func (s *ApplicationStep) Estimate() time.Duration {
 
 func (s *ApplicationStep) Execute(ctx context.Context, d *Deployer) error {
 	if d.k8sOps == nil {
-		return fmt.Errorf("Kubernetes operations not initialized")
+		return fmt.Errorf("kubernetes operations not initialized")
 	}
 
 	// Prepare application values
@@ -774,7 +776,6 @@ func (s *DNSVerificationStep) Rollback(ctx context.Context, d *Deployer) error {
 	return nil
 }
 
-// TLSConfigurationStep configures TLS certificates
 type TLSConfigurationStep struct{}
 
 func (s *TLSConfigurationStep) Name() string {
@@ -1500,31 +1501,6 @@ func (d *Deployer) prepareApplicationValues() map[string]interface{} {
 	return values
 }
 
-func (d *Deployer) prepareEmailConfig() map[string]interface{} {
-	emailConfig := map[string]interface{}{
-		"from":     d.config.Email.From,
-		"fromName": d.config.Email.FromName,
-	}
-
-	// All email providers use SMTP configuration
-	if d.config.Email.SMTP != nil {
-		emailConfig["smtp"] = map[string]interface{}{
-			"host":       d.config.Email.SMTP.Host,
-			"port":       d.config.Email.SMTP.Port,
-			"username":   d.config.Email.SMTP.Username,
-			"password":   d.secrets.SMTPPassword,
-			"encryption": d.config.Email.SMTP.Encryption,
-		}
-	}
-
-	return emailConfig
-}
-
-func (d *Deployer) getDatabaseURL() string {
-	// This would be implemented based on database type
-	return d.state.Database.URL
-}
-
 func (d *Deployer) getSupabaseURL() string {
 	switch d.config.Database.Type {
 	case "managed":
@@ -1539,12 +1515,6 @@ func (d *Deployer) getSupabaseURL() string {
 	default:
 		return ""
 	}
-}
-
-func (d *Deployer) confirmDNSConfigured() bool {
-	// This method is no longer needed as the new DNS verification
-	// shows all domains upfront and waits for Enter, not Y/N
-	return true
 }
 
 // Utility function

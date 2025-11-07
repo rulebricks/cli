@@ -10,7 +10,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// StatusChecker handles status checking operations
 type StatusChecker struct {
 	config   *Config
 	k8sOps   *KubernetesOperations
@@ -18,7 +17,6 @@ type StatusChecker struct {
 	state    *DeploymentState
 }
 
-// NewStatusChecker creates a new status checker
 func NewStatusChecker(config *Config, state *DeploymentState) *StatusChecker {
 	return &StatusChecker{
 		config:   config,
@@ -27,7 +25,6 @@ func NewStatusChecker(config *Config, state *DeploymentState) *StatusChecker {
 	}
 }
 
-// CheckAll performs a comprehensive status check
 func (checker *StatusChecker) CheckAll() (*DeploymentStatus, error) {
 	status := &DeploymentStatus{
 		Timestamp: time.Now(),

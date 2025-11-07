@@ -17,7 +17,6 @@ import (
 	"github.com/fatih/color"
 )
 
-// ChartManager handles downloading, caching, and managing Helm charts
 type ChartManager struct {
 	cacheDir   string
 	baseURL    string
@@ -25,7 +24,6 @@ type ChartManager struct {
 	verbose    bool
 }
 
-// ChartInfo contains information about a chart
 type ChartInfo struct {
 	Name       string
 	Version    string
@@ -35,9 +33,7 @@ type ChartInfo struct {
 	CachedPath string
 }
 
-// NewChartManager creates a new chart manager instance
 func NewChartManager(cacheDir string, verbose bool) (*ChartManager, error) {
-	// Default cache directory if not specified
 	if cacheDir == "" {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
@@ -46,7 +42,6 @@ func NewChartManager(cacheDir string, verbose bool) (*ChartManager, error) {
 		cacheDir = filepath.Join(homeDir, ".rulebricks", "charts")
 	}
 
-	// Create cache directory
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create cache directory: %w", err)
 	}
@@ -61,7 +56,6 @@ func NewChartManager(cacheDir string, verbose bool) (*ChartManager, error) {
 	}, nil
 }
 
-// PullChart downloads or retrieves a chart from cache
 func (cm *ChartManager) PullChart(version string) (*ChartInfo, error) {
 	if version == "" || version == "latest" {
 		var err error
@@ -77,7 +71,6 @@ func (cm *ChartManager) PullChart(version string) (*ChartInfo, error) {
 	return cm.getChart("rulebricks", version)
 }
 
-// PullSupabaseChart downloads or retrieves the Supabase chart from cache
 func (cm *ChartManager) PullSupabaseChart(version string) (*ChartInfo, error) {
 	if version == "" || version == "latest" {
 		var err error
@@ -90,12 +83,22 @@ func (cm *ChartManager) PullSupabaseChart(version string) (*ChartInfo, error) {
 	return cm.getChart("supabase", version)
 }
 
-// getChart is the generic method for downloading any chart type
+func (cm *ChartManager) PullKafkaChart(version string) (*ChartInfo, error) {
+	if version == "" || version == "latest" {
+		var err error
+		version, err = cm.GetLatestVersion()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get latest version: %w", err)
+		}
+	}
+
+	return cm.getChart("kafka", version)
+}
+
 func (cm *ChartManager) getChart(name, version string) (*ChartInfo, error) {
 	chartName := fmt.Sprintf("%s-%s.tgz", name, version)
 	chartPath := filepath.Join(cm.cacheDir, chartName)
 
-	// Check if already cached
 	if _, err := os.Stat(chartPath); err == nil {
 		if cm.verbose {
 			fmt.Printf("📦 Using cached %s chart: %s\n", name, chartPath)
@@ -108,7 +111,6 @@ func (cm *ChartManager) getChart(name, version string) (*ChartInfo, error) {
 		}, nil
 	}
 
-	// Download chart
 	if cm.verbose {
 		fmt.Printf("📥 Downloading %s chart version %s...\n", name, version)
 	}
@@ -116,18 +118,15 @@ func (cm *ChartManager) getChart(name, version string) (*ChartInfo, error) {
 	chartURL := fmt.Sprintf("%s/v%s/%s", cm.baseURL, version, chartName)
 	checksumURL := fmt.Sprintf("%s.sha256", chartURL)
 
-	// Download checksum first
 	checksum, err := cm.downloadChecksum(checksumURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download checksum: %w", err)
 	}
 
-	// Download chart
 	if err := cm.downloadFile(chartURL, chartPath); err != nil {
 		return nil, fmt.Errorf("failed to download chart: %w", err)
 	}
 
-	// Verify checksum
 	if err := cm.verifyChecksum(chartPath, checksum); err != nil {
 		os.Remove(chartPath)
 		return nil, fmt.Errorf("checksum verification failed: %w", err)
@@ -147,13 +146,11 @@ func (cm *ChartManager) getChart(name, version string) (*ChartInfo, error) {
 	}, nil
 }
 
-// ReleaseInfo contains version and release date information
 type ReleaseInfo struct {
 	Version     string
 	ReleaseDate string
 }
 
-// GetLatestVersion fetches the latest available version
 func (cm *ChartManager) GetLatestVersion() (string, error) {
 	info, err := cm.GetLatestReleaseInfo()
 	if err != nil {
@@ -162,9 +159,7 @@ func (cm *ChartManager) GetLatestVersion() (string, error) {
 	return info.Version, nil
 }
 
-// GetLatestReleaseInfo fetches the latest available version with release date
 func (cm *ChartManager) GetLatestReleaseInfo() (*ReleaseInfo, error) {
-	// Check GitHub API for latest release
 	resp, err := cm.httpClient.Get("https://api.github.com/repos/rulebricks/charts/releases/latest")
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch latest release: %w", err)
@@ -175,7 +170,6 @@ func (cm *ChartManager) GetLatestReleaseInfo() (*ReleaseInfo, error) {
 		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
 	}
 
-	// Parse JSON response to get tag_name and published_at
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
@@ -195,7 +189,6 @@ func (cm *ChartManager) GetLatestReleaseInfo() (*ReleaseInfo, error) {
 	}
 
 	if len(matchesDate) >= 2 {
-		// Parse and format the date
 		publishedAt, err := time.Parse(time.RFC3339, string(matchesDate[1]))
 		if err == nil {
 			info.ReleaseDate = publishedAt.Format("2006-01-02")
@@ -205,7 +198,6 @@ func (cm *ChartManager) GetLatestReleaseInfo() (*ReleaseInfo, error) {
 	return info, nil
 }
 
-// ExtractChart extracts a chart to a temporary directory
 func (cm *ChartManager) ExtractChart(chartPath string) (string, error) {
 	tempDir, err := os.MkdirTemp("", "rulebricks-chart-*")
 	if err != nil {
@@ -267,12 +259,10 @@ func (cm *ChartManager) ExtractChart(chartPath string) (string, error) {
 	return tempDir, nil
 }
 
-// ListCachedVersions returns all cached chart versions
 func (cm *ChartManager) ListCachedVersions() ([]string, error) {
 	return cm.listCachedVersionsByName("rulebricks")
 }
 
-// listCachedVersionsByName returns all cached chart versions for a specific chart
 func (cm *ChartManager) listCachedVersionsByName(name string) ([]string, error) {
 	entries, err := os.ReadDir(cm.cacheDir)
 	if err != nil {
@@ -296,7 +286,6 @@ func (cm *ChartManager) listCachedVersionsByName(name string) ([]string, error) 
 	return versions, nil
 }
 
-// CleanCache removes old cached charts
 func (cm *ChartManager) CleanCache(keepVersions int) error {
 	versions, err := cm.ListCachedVersions()
 	if err != nil {
@@ -307,8 +296,6 @@ func (cm *ChartManager) CleanCache(keepVersions int) error {
 		return nil
 	}
 
-	// Sort versions (simple string sort, assumes semantic versioning)
-	// In production, use proper semver sorting
 	for i := 0; i < len(versions)-keepVersions; i++ {
 		chartPath := filepath.Join(cm.cacheDir, fmt.Sprintf("rulebricks-%s.tgz", versions[i]))
 		if err := os.Remove(chartPath); err != nil {
@@ -321,7 +308,6 @@ func (cm *ChartManager) CleanCache(keepVersions int) error {
 	return nil
 }
 
-// downloadFile downloads a file from URL to destination
 func (cm *ChartManager) downloadFile(url, dest string) error {
 	resp, err := cm.httpClient.Get(url)
 	if err != nil {
@@ -339,7 +325,6 @@ func (cm *ChartManager) downloadFile(url, dest string) error {
 	}
 	defer out.Close()
 
-	// Copy with progress if verbose
 	if cm.verbose {
 		return cm.copyWithProgress(out, resp.Body, resp.ContentLength)
 	}
@@ -348,7 +333,6 @@ func (cm *ChartManager) downloadFile(url, dest string) error {
 	return err
 }
 
-// downloadChecksum downloads and parses checksum file
 func (cm *ChartManager) downloadChecksum(url string) (string, error) {
 	resp, err := cm.httpClient.Get(url)
 	if err != nil {
@@ -365,7 +349,6 @@ func (cm *ChartManager) downloadChecksum(url string) (string, error) {
 		return "", err
 	}
 
-	// Parse checksum file (format: "hash  filename")
 	parts := strings.Fields(string(body))
 	if len(parts) < 1 {
 		return "", fmt.Errorf("invalid checksum format")
@@ -374,7 +357,6 @@ func (cm *ChartManager) downloadChecksum(url string) (string, error) {
 	return parts[0], nil
 }
 
-// verifyChecksum verifies file checksum
 func (cm *ChartManager) verifyChecksum(filepath, expectedChecksum string) error {
 	file, err := os.Open(filepath)
 	if err != nil {
@@ -395,7 +377,6 @@ func (cm *ChartManager) verifyChecksum(filepath, expectedChecksum string) error 
 	return nil
 }
 
-// copyWithProgress copies data with progress indicator
 func (cm *ChartManager) copyWithProgress(dst io.Writer, src io.Reader, total int64) error {
 	buffer := make([]byte, 32*1024)
 	var written int64
@@ -414,7 +395,6 @@ func (cm *ChartManager) copyWithProgress(dst io.Writer, src io.Reader, total int
 				return io.ErrShortWrite
 			}
 
-			// Print progress
 			if total > 0 {
 				percent := float64(written) / float64(total) * 100
 				fmt.Printf("\r📊 Progress: %.1f%% (%s/%s)",
@@ -432,7 +412,7 @@ func (cm *ChartManager) copyWithProgress(dst io.Writer, src io.Reader, total int
 	}
 
 	if total > 0 {
-		fmt.Println() // New line after progress
+		fmt.Println()
 	}
 
 	return nil

@@ -20,7 +20,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// CloudOperations handles cloud infrastructure operations
 type CloudOperations struct {
 	config       *Config
 	terraformDir string
@@ -28,7 +27,6 @@ type CloudOperations struct {
 	progress     *ProgressIndicator
 }
 
-// NewCloudOperations creates a new cloud operations instance
 func NewCloudOperations(config *Config, terraformDir string, verbose bool) (*CloudOperations, error) {
 	return &CloudOperations{
 		config:       config,
@@ -38,27 +36,21 @@ func NewCloudOperations(config *Config, terraformDir string, verbose bool) (*Clo
 	}, nil
 }
 
-// CreateInfrastructure provisions cloud infrastructure using Terraform
 func (co *CloudOperations) CreateInfrastructure(ctx context.Context) error {
-	// Refresh GCP authentication if needed
 	if err := co.refreshGCPAuth(); err != nil {
 		return fmt.Errorf("failed to refresh GCP authentication: %w", err)
 	}
 
-	// Set provider-specific terraform directory
 	co.terraformDir = filepath.Join("terraform", co.config.Cloud.Provider)
 
-	// Ensure terraform directory exists
 	if _, err := os.Stat("terraform"); os.IsNotExist(err) {
 		return fmt.Errorf("terraform directory not found. Expected terraform files in ./terraform/%s", co.config.Cloud.Provider)
 	}
 
-	// Check if the specific provider directory exists
 	if _, err := os.Stat(co.terraformDir); os.IsNotExist(err) {
 		return fmt.Errorf("terraform configuration not found for %s provider at %s", co.config.Cloud.Provider, co.terraformDir)
 	}
 
-	// Verify terraform files exist in provider directory
 	entries, err := os.ReadDir(co.terraformDir)
 	if err != nil {
 		return fmt.Errorf("failed to read terraform directory: %w", err)
@@ -76,22 +68,18 @@ func (co *CloudOperations) CreateInfrastructure(ctx context.Context) error {
 		return fmt.Errorf("no Terraform configuration files found in %s", co.terraformDir)
 	}
 
-	// Configure terraform backend if specified
 	if err := co.ConfigureTerraformBackend(); err != nil {
 		return fmt.Errorf("failed to configure terraform backend: %w", err)
 	}
 
-	// Initialize Terraform
 	if err := co.terraformInit(ctx); err != nil {
 		return fmt.Errorf("terraform init failed: %w", err)
 	}
 
-	// Plan deployment
 	if err := co.terraformPlan(ctx); err != nil {
 		return fmt.Errorf("terraform plan failed: %w", err)
 	}
 
-	// Apply configuration
 	if err := co.terraformApply(ctx); err != nil {
 		return fmt.Errorf("terraform apply failed: %w", err)
 	}
@@ -99,17 +87,13 @@ func (co *CloudOperations) CreateInfrastructure(ctx context.Context) error {
 	return nil
 }
 
-// DestroyInfrastructure destroys the cloud infrastructure
 func (co *CloudOperations) DestroyInfrastructure(ctx context.Context) error {
-	// Refresh GCP authentication if needed
 	if err := co.refreshGCPAuth(); err != nil {
 		return fmt.Errorf("failed to refresh GCP authentication: %w", err)
 	}
 
-	// Set provider-specific terraform directory (same as CreateInfrastructure)
 	co.terraformDir = filepath.Join("terraform", co.config.Cloud.Provider)
 
-	// Ensure terraform directory exists
 	if _, err := os.Stat(co.terraformDir); os.IsNotExist(err) {
 		return fmt.Errorf("terraform configuration not found for %s provider at %s", co.config.Cloud.Provider, co.terraformDir)
 	}
@@ -117,15 +101,13 @@ func (co *CloudOperations) DestroyInfrastructure(ctx context.Context) error {
 	return co.terraformDestroy(ctx)
 }
 
-// ConfigureTerraformBackend configures remote state backend
 func (co *CloudOperations) ConfigureTerraformBackend() error {
 	if co.config.Advanced.Terraform == nil || co.config.Advanced.Terraform.Backend == "" || co.config.Advanced.Terraform.Backend == "local" {
-		return nil // Local backend, no configuration needed
+		return nil
 	}
 
 	co.progress.Info("Configuring Terraform %s backend...", co.config.Advanced.Terraform.Backend)
 
-	// Create backend configuration file
 	backendConfig := "terraform {\n  backend \"" + co.config.Advanced.Terraform.Backend + "\" {\n"
 
 	for k, v := range co.config.Advanced.Terraform.BackendConfig {
@@ -134,7 +116,6 @@ func (co *CloudOperations) ConfigureTerraformBackend() error {
 
 	backendConfig += "  }\n}\n"
 
-	// Write to backend.tf in terraform directory
 	backendPath := filepath.Join(co.terraformDir, "backend.tf")
 	if err := os.WriteFile(backendPath, []byte(backendConfig), 0644); err != nil {
 		return fmt.Errorf("failed to write backend config: %w", err)
@@ -143,9 +124,7 @@ func (co *CloudOperations) ConfigureTerraformBackend() error {
 	return nil
 }
 
-// WaitForClusterReady waits for the Kubernetes cluster to be ready
 func (co *CloudOperations) WaitForClusterReady(ctx context.Context) error {
-	// Get kubeconfig
 	if err := co.updateKubeconfig(ctx); err != nil {
 		return err
 	}
@@ -167,7 +146,6 @@ func (co *CloudOperations) WaitForClusterReady(ctx context.Context) error {
 	return fmt.Errorf("cluster did not become ready in time")
 }
 
-// GetInfrastructureState returns the current infrastructure state
 func (co *CloudOperations) GetInfrastructureState() InfrastructureState {
 	state := InfrastructureState{
 		Provider:  co.config.Cloud.Provider,
@@ -250,7 +228,6 @@ func (co *CloudOperations) terraformDestroy(ctx context.Context) error {
 	return cmd.Run()
 }
 
-// handleGCPDeletionProtection removes cluster from terraform state and deletes it manually
 func (co *CloudOperations) handleGCPDeletionProtection(ctx context.Context) error {
 	if co.verbose {
 		co.progress.Debug("Handling GCP deletion protection by removing cluster from terraform state")
@@ -448,7 +425,6 @@ func (co *CloudOperations) runCommand(cmd *exec.Cmd, description string) error {
 	return nil
 }
 
-// getTerraformOutputs retrieves terraform outputs
 func (co *CloudOperations) getTerraformOutputs() (map[string]string, error) {
 	cmd := exec.Command("terraform", "output", "-json")
 	cmd.Dir = co.terraformDir
@@ -477,7 +453,6 @@ func (co *CloudOperations) getTerraformOutputs() (map[string]string, error) {
 	return outputs, nil
 }
 
-// getTerraformVariables generates terraform variable arguments from config
 func (co *CloudOperations) getTerraformVariables() []string {
 	var args []string
 
@@ -571,7 +546,6 @@ func (co *CloudOperations) getTerraformVariables() []string {
 	return args
 }
 
-// setAzureEnv sets Azure environment variables for Terraform
 func (co *CloudOperations) setAzureEnv(cmd *exec.Cmd) error {
 	// Get subscription ID from Azure CLI
 	subCmd := exec.Command("az", "account", "show", "--query", "id", "-o", "tsv")
@@ -603,7 +577,6 @@ func (co *CloudOperations) setAzureEnv(cmd *exec.Cmd) error {
 	return nil
 }
 
-// refreshGCPAuth refreshes GCP authentication to prevent token expiry issues
 func (co *CloudOperations) refreshGCPAuth() error {
 	if co.config.Cloud.Provider != "gcp" {
 		return nil
@@ -642,7 +615,6 @@ func (co *CloudOperations) refreshGCPAuth() error {
 	return nil
 }
 
-// KubernetesOperations handles Kubernetes cluster operations
 type KubernetesOperations struct {
 	config        *Config
 	client        kubernetes.Interface
@@ -651,7 +623,6 @@ type KubernetesOperations struct {
 	cloudProvider string
 }
 
-// NewKubernetesOperations creates a new Kubernetes operations instance
 func NewKubernetesOperations(config *Config, verbose bool) (*KubernetesOperations, error) {
 	kubeconfig := clientcmd.NewDefaultClientConfigLoadingRules().GetDefaultFilename()
 
@@ -973,7 +944,6 @@ func (ko *KubernetesOperations) InstallPrometheus(ctx context.Context, grafanaPa
 	return ko.InstallPrometheusWithRemoteWrite(ctx, grafanaPassword, remoteWriteConfig, true)
 }
 
-// InstallPrometheusWithRemoteWrite installs Prometheus with optional Grafana and remote write configuration
 func (ko *KubernetesOperations) InstallPrometheusWithRemoteWrite(ctx context.Context, grafanaPassword string, remoteWriteConfig map[string]interface{}, includeGrafana bool) error {
 	namespace := ko.config.GetNamespace("monitoring")
 	if err := ko.ensureNamespace(ctx, namespace); err != nil {
@@ -1199,22 +1169,39 @@ func (ko *KubernetesOperations) UninstallVector(ctx context.Context) error {
 
 // Kafka installation
 
-func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaConfig) error {
+func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaConfig, d *Deployer) error {
 	namespace := ko.config.GetNamespace("execution")
 	if err := ko.ensureNamespace(ctx, namespace); err != nil {
 		return err
 	}
 
-	// Add Bitnami Helm repository
-	cmd := exec.CommandContext(ctx, "helm", "repo", "add", "bitnami", "https://charts.bitnami.com/bitnami")
-	if err := cmd.Run(); err != nil {
-		// Ignore error if repo already exists
+	// Download and extract Kafka chart using ChartManager
+	if d.chartManager == nil {
+		return fmt.Errorf("ChartManager is required for Kafka deployment")
 	}
 
-	cmd = exec.CommandContext(ctx, "helm", "repo", "update")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to update Helm repositories: %w", err)
+	// Use the chart version or default to latest
+	chartVersion := d.options.ChartVersion
+	if chartVersion == "" {
+		chartVersion = d.config.Project.Version
 	}
+
+	// Pull the Kafka chart using ChartManager
+	chartInfo, err := d.chartManager.PullKafkaChart(chartVersion)
+	if err != nil {
+		return fmt.Errorf("failed to get Kafka chart: %w", err)
+	}
+
+	// Extract the chart
+	extractedPath, err := d.chartManager.ExtractChart(chartInfo.CachedPath)
+	if err != nil {
+		return fmt.Errorf("failed to extract Kafka chart: %w", err)
+	}
+	defer os.RemoveAll(extractedPath)
+
+	// The chart should be extracted as "supabase" directory
+	kafkaChartPath := filepath.Join(extractedPath, "kafka")
+
 
 	// Set default values if not configured
 	retentionHours := config.RetentionHours
@@ -1246,104 +1233,138 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
         storageClass = "default"
     }
 
+	volumeLevel := d.config.Performance.VolumeLevel
+	kafkaHeapOpts := "-Xmx1000m -Xms1000m -XX:+UseZGC -XX:+AlwaysPreTouch -Xlog:os+container=info,gc+start=info,gc+init=info,gc+heap=info:file=/opt/bitnami/kafka/logs/gc.log:time,uptime,level,tags"
+	kafkaJvmPerformanceOpts := "-XX:MaxDirectMemorySize=1G -Djdk.nio.maxCachedBufferSize=262144"
+	controller := map[string]interface{}{
+		"resources": map[string]interface{}{
+			"requests": map[string]interface{}{
+				"cpu":    "500m",
+				"memory": "2Gi",
+			},
+			"limits": map[string]interface{}{
+				"cpu":    "2000m",
+				"memory": "3Gi",
+			},
+		},
+		"podManagementPolicy": "Parallel",
+	}
+	switch volumeLevel {
+		case "medium":
+			kafkaHeapOpts = "-Xmx2g -Xms2g -XX:+UseZGC -XX:+AlwaysPreTouch"
+			kafkaJvmPerformanceOpts = "-XX:MaxDirectMemorySize=2G -Djdk.nio.maxCachedBufferSize=262144"
+			controller["resources"] = map[string]interface{}{
+				"requests": map[string]interface{}{
+					"cpu":    "1000m",
+					"memory": "2Gi",
+				},
+				"limits": map[string]interface{}{
+					"cpu":    "2000m",
+					"memory": "3Gi",
+				},
+			}
+		case "large":
+			kafkaHeapOpts = "-Xmx3g -Xms3g -XX:+UseZGC -XX:+AlwaysPreTouch"
+			kafkaJvmPerformanceOpts = "-XX:MaxDirectMemorySize=2560m -Djdk.nio.maxCachedBufferSize=262144"
+			controller["resources"] = map[string]interface{}{
+				"requests": map[string]interface{}{
+					"cpu":    "2000m",
+					"memory": "2Gi",
+				},
+				"limits": map[string]interface{}{
+					"cpu":    "4000m",
+					"memory": "3Gi",
+				},
+			}
+	}
+
     values := map[string]interface{}{
-        // Global settings
-        "replicaCount": replicationFactor,  // This sets the total number of nodes
-        "persistence": map[string]interface{}{
-            "enabled": true,
-            "size":    storageSize,
-            "storageClass": storageClass,
-        },
-
-        // Global env vars (applies to all nodes)
-        "extraEnvVars": []map[string]interface{}{
-            {
-                "name": "KAFKA_HEAP_OPTS",
-                "value": "-Xmx2g -Xms2g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:G1HeapRegionSize=16M -XX:MaxDirectMemorySize=1G -XX:+AlwaysPreTouch",
-            },
-            {
-                "name": "KAFKA_JVM_PERFORMANCE_OPTS",
-                "value": "-XX:MaxDirectMemorySize=2G -Djdk.nio.maxCachedBufferSize=262144",
-            },
-            // Add all server.properties as environment variables (Bitnami way)
-            {
-                "name": "KAFKA_CFG_QUEUED_MAX_REQUESTS",
-                "value": "10000",
-            },
-            {
-                "name": "KAFKA_CFG_NUM_NETWORK_THREADS",
-                "value": "8",
-            },
-            {
-                "name": "KAFKA_CFG_NUM_IO_THREADS",
-                "value": "8",
-            },
-            {
-                "name": "KAFKA_CFG_SOCKET_SEND_BUFFER_BYTES",
-                "value": "1048576",
-            },
-            {
-                "name": "KAFKA_CFG_SOCKET_RECEIVE_BUFFER_BYTES",
-                "value": "1048576",
-            },
-            {
-                "name": "KAFKA_CFG_SOCKET_REQUEST_MAX_BYTES",
-                "value": "209715200",
-            },
-            {
-                "name": "KAFKA_CFG_LOG_RETENTION_BYTES",
-                "value": "4294967296",
-            },
-            {
-                "name": "KAFKA_CFG_LOG_SEGMENT_BYTES",
-                "value": "1073741824",
-            },
-            {
-                "name": "KAFKA_CFG_NUM_REPLICA_FETCHERS",
-                "value": "4",
-            },
-            {
-                "name": "KAFKA_CFG_REPLICA_SOCKET_RECEIVE_BUFFER_BYTES",
-                "value": "1048576",
-            },
-            {
-                "name": "KAFKA_CFG_LOG_CLEANER_DEDUPE_BUFFER_SIZE",
-                "value": "268435456",
-            },
-            {
-                "name": "KAFKA_CFG_LOG_CLEANER_IO_BUFFER_SIZE",
-                "value": "1048576",
-            },
-            {
-                "name": "KAFKA_CFG_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION",
-                "value": "10",
-            },
-        },
-
-        // Controller-specific settings
-        "controller": map[string]interface{}{
-            "resources": map[string]interface{}{
-                "requests": map[string]interface{}{
-                    "cpu":    "500m",
-                    "memory": "2Gi",
-                },
-                "limits": map[string]interface{}{
-                    "cpu":    "2000m",
-                    "memory": "3Gi",
-                },
-            },
-            // Init container resources (fix for OOM during topic creation)
-            "initContainerResources": map[string]interface{}{
-                "requests": map[string]interface{}{
-                    "cpu":    "250m",
-                    "memory": "512Mi",
-                },
-                "limits": map[string]interface{}{
-                    "cpu":    "500m",
-                    "memory": "1Gi",
-                },
-            },
-        },
+		// Global settings
+		"replicaCount": replicationFactor,
+		"persistence": map[string]interface{}{
+			"enabled":      true,
+			"size":         storageSize,
+			"storageClass": storageClass,
+		},
+		"extraEnvVars": []map[string]interface{}{
+			{
+				"name": "KAFKA_HEAP_OPTS",
+				"value": kafkaHeapOpts,
+			},
+			{
+				"name": "KAFKA_JVM_PERFORMANCE_OPTS",
+				"value": kafkaJvmPerformanceOpts,
+			},
+			{
+				"name":  "KAFKA_CFG_QUEUED_MAX_REQUESTS",
+				"value": "10000",
+			},
+			{
+				"name":  "KAFKA_CFG_NUM_NETWORK_THREADS",
+				"value": "8",
+			},
+			{
+				"name":  "KAFKA_CFG_NUM_IO_THREADS",
+				"value": "8",
+			},
+			{
+				"name":  "KAFKA_CFG_SOCKET_SEND_BUFFER_BYTES",
+				"value": "1048576",
+			},
+			{
+				"name":  "KAFKA_CFG_SOCKET_RECEIVE_BUFFER_BYTES",
+				"value": "1048576",
+			},
+			{
+				"name":  "KAFKA_CFG_SOCKET_REQUEST_MAX_BYTES",
+				"value": "209715200",
+			},
+			{
+				"name":  "KAFKA_CFG_LOG_RETENTION_BYTES",
+				"value": "4294967296",
+			},
+			{
+				"name":  "KAFKA_CFG_LOG_SEGMENT_BYTES",
+				"value": "1073741824",
+			},
+			{
+				"name":  "KAFKA_CFG_NUM_REPLICA_FETCHERS",
+				"value": "4",
+			},
+			{
+				"name":  "KAFKA_CFG_REPLICA_SOCKET_RECEIVE_BUFFER_BYTES",
+				"value": "1048576",
+			},
+			{
+				"name":  "KAFKA_CFG_LOG_CLEANER_DEDUPE_BUFFER_SIZE",
+				"value": "268435456",
+			},
+			{
+				"name":  "KAFKA_CFG_LOG_CLEANER_IO_BUFFER_SIZE",
+				"value": "1048576",
+			},
+			{
+				"name":  "KAFKA_CFG_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION",
+				"value": "10",
+			},
+		},
+	
+		"controller": controller,
+		
+		"defaultInitContainers": map[string]interface{}{
+			"prepareConfig": map[string]interface{}{
+				"resources": map[string]interface{}{
+					"requests": map[string]interface{}{
+						"cpu":    "100m",
+						"memory": "128Mi",
+					},
+					"limits": map[string]interface{}{
+						"cpu":    "150m",
+						"memory": "192Mi",
+					},
+				},
+			},
+		},
 
         // Kafka configuration
         "logRetentionHours":             retentionHours,
@@ -1432,8 +1453,34 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 		}
 	}
 
-	if err := ko.installHelmChart(ctx, "kafka", "bitnami/kafka", namespace, values); err != nil {
-		return err
+	// Create temporary values file
+	valuesYAML, err := yaml.Marshal(values)
+	if err != nil {
+		return fmt.Errorf("failed to marshal values: %w", err)
+	}
+
+	valuesFile, err := createTempFile("kafka-values-", ".yaml", valuesYAML)
+	if err != nil {
+		return fmt.Errorf("failed to create values file: %w", err)
+	}
+	defer os.Remove(valuesFile)
+
+	// Deploy with Helm
+	cmd := exec.CommandContext(ctx, "helm", "upgrade", "--install", "kafka",
+		kafkaChartPath,
+		"--namespace", namespace,
+		"--reset-values",
+		"--values", valuesFile,
+		"--wait",
+		"--timeout", "15m")
+
+	if d.options.Verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("helm deployment failed: %w", err)
 	}
 
 	// Create topics with correct partition count
@@ -1630,7 +1677,6 @@ func (ko *KubernetesOperations) RemoveTLSConfiguration(ctx context.Context) erro
 
 // Utility methods
 
-// GetClusterEndpoint returns the cluster endpoint
 func (co *CloudOperations) GetClusterEndpoint() (string, error) {
 	ctx := context.Background()
 
@@ -2140,7 +2186,6 @@ func (ko *KubernetesOperations) generateVectorConfigMap(config *VectorConfig, ka
 	return vectorConfig
 }
 
-// SupabaseOperations handles Supabase deployment operations
 type SupabaseOperations struct {
 	config        *Config
 	options       SupabaseOptions
@@ -2153,7 +2198,6 @@ type SupabaseOperations struct {
 	dashboardPass string
 }
 
-// SupabaseOptions contains options for Supabase operations
 type SupabaseOptions struct {
 	Verbose      bool
 	WorkDir      string
@@ -2163,7 +2207,6 @@ type SupabaseOptions struct {
 	Secrets      *SharedSecrets
 }
 
-// NewSupabaseOperations creates a new Supabase operations instance
 func NewSupabaseOperations(config *Config, options SupabaseOptions, progress *ProgressIndicator) *SupabaseOperations {
 	return &SupabaseOperations{
 		config:   config,
@@ -2626,27 +2669,22 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 	return nil
 }
 
-// GetDBPassword returns the database password
 func (so *SupabaseOperations) GetDBPassword() string {
 	return so.dbPassword
 }
 
-// GetAnonKey returns the anonymous key
 func (so *SupabaseOperations) GetAnonKey() string {
 	return so.anonKey
 }
 
-// GetServiceKey returns the service role key
 func (so *SupabaseOperations) GetServiceKey() string {
 	return so.serviceKey
 }
 
-// GetJWTSecret returns the JWT secret
 func (so *SupabaseOperations) GetJWTSecret() string {
 	return so.jwtSecret
 }
 
-// GetDatabaseState returns the current database state
 func (so *SupabaseOperations) GetDatabaseState() DatabaseState {
 	state := DatabaseState{
 		Type:       so.config.Database.Type,
@@ -2687,7 +2725,6 @@ func (so *SupabaseOperations) GetDatabaseState() DatabaseState {
 	return state
 }
 
-// RunMigrations runs database migrations
 func (so *SupabaseOperations) RunMigrations(ctx context.Context) error {
 	switch so.config.Database.Type {
 	case "managed":
@@ -2725,7 +2762,6 @@ func (so *SupabaseOperations) RunMigrations(ctx context.Context) error {
 	return nil
 }
 
-// runSelfHostedMigrations runs migrations on the self-hosted Supabase database
 func (so *SupabaseOperations) runSelfHostedMigrations(ctx context.Context) error {
 	so.progress.Info("Running migrations on self-hosted database...")
 
@@ -2844,7 +2880,6 @@ func (so *SupabaseOperations) runSelfHostedMigrations(ctx context.Context) error
 	return nil
 }
 
-// checkSupabaseCLI checks if Supabase CLI is installed
 func (so *SupabaseOperations) checkSupabaseCLI() error {
 	_, err := exec.LookPath("supabase")
 	if err != nil {
@@ -2853,7 +2888,6 @@ func (so *SupabaseOperations) checkSupabaseCLI() error {
 	return nil
 }
 
-// ensureAuthenticated ensures the user is authenticated with Supabase
 func (so *SupabaseOperations) ensureAuthenticated() error {
 	// Check if already authenticated
 	cmd := exec.Command("supabase", "projects", "list")
@@ -2870,7 +2904,6 @@ func (so *SupabaseOperations) ensureAuthenticated() error {
 	return nil
 }
 
-// getOrganizationID retrieves the first organization ID
 func (so *SupabaseOperations) getOrganizationID() (string, error) {
 	cmd := exec.Command("supabase", "orgs", "list")
 	output, err := cmd.Output()
@@ -2889,7 +2922,6 @@ func (so *SupabaseOperations) getOrganizationID() (string, error) {
 	return matches[0], nil
 }
 
-// checkProjectExists checks if a project with the configured name exists
 func (so *SupabaseOperations) checkProjectExists() (bool, error) {
 	cmd := exec.Command("supabase", "projects", "list")
 	output, err := cmd.Output()
@@ -2900,7 +2932,6 @@ func (so *SupabaseOperations) checkProjectExists() (bool, error) {
 	return strings.Contains(string(output), so.config.Database.Supabase.ProjectName), nil
 }
 
-// getProjectRef retrieves the project reference ID
 func (so *SupabaseOperations) getProjectRef() (string, error) {
 	cmd := exec.Command("supabase", "projects", "list")
 	output, err := cmd.Output()
@@ -2942,7 +2973,6 @@ func (so *SupabaseOperations) getProjectRef() (string, error) {
 	return ref, nil
 }
 
-// createProject creates a new Supabase project
 func (so *SupabaseOperations) createProject(orgID string) error {
 	fmt.Printf("🚀 Creating new Supabase project: %s\n", so.config.Database.Supabase.ProjectName)
 
@@ -2981,7 +3011,6 @@ func (so *SupabaseOperations) createProject(orgID string) error {
 	return nil
 }
 
-// linkProject links the local project to the remote Supabase project
 func (so *SupabaseOperations) linkProject() error {
 	// Change to supabase directory
 	supabaseDir := filepath.Join(so.options.WorkDir, "supabase")
@@ -2996,7 +3025,6 @@ func (so *SupabaseOperations) linkProject() error {
 	return nil
 }
 
-// createAuthEnvironment creates auth service environment variables
 func (so *SupabaseOperations) createAuthEnvironment() map[string]interface{} {
 	emailTemplates := GetDefaultEmailTemplates()
 
@@ -3289,7 +3317,6 @@ func (so *SupabaseOperations) getAPIKeys() error {
 	return nil
 }
 
-// EnsureSupabaseAssets ensures Supabase assets are available
 func (so *SupabaseOperations) EnsureSupabaseAssets() error {
 	supabaseDir := filepath.Join(so.options.WorkDir, "supabase")
 
@@ -3319,7 +3346,6 @@ func (so *SupabaseOperations) EnsureSupabaseAssets() error {
 
 // Helper functions
 
-// extractProjectRef extracts project reference from supabase output
 func extractProjectRef(output string) string {
 	// Extract project ref from output like "Project created: abcdefghijklmnop"
 	re := regexp.MustCompile(`Project created: ([a-z0-9]+)`)
@@ -3330,16 +3356,3 @@ func extractProjectRef(output string) string {
 	return ""
 }
 
-// extractKey extracts API key from supabase output
-func extractKey(output, keyType string) string {
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		if strings.Contains(line, keyType) {
-			fields := strings.Fields(line)
-			if len(fields) > 0 {
-				return fields[len(fields)-1]
-			}
-		}
-	}
-	return ""
-}
