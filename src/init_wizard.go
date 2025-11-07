@@ -654,21 +654,21 @@ func (w *InitWizard) configurePerformance() {
 
 	fmt.Printf("│ ")
 	color.New(color.FgGreen, color.Bold).Printf("%-10s", "Small")
-	fmt.Printf(" │ %-25s │ %-35s │\n", "Development/Testing", "6-8 CPUs, 11-15GB RAM, 3-4 nodes")
+	fmt.Printf(" │ %-25s │ %-35s │\n", "Development", "8 CPUs, 16GB RAM, 4 nodes")
 	fmt.Printf("│            │ %-25s │ %-35s │\n", "", "<1000 rules/sec")
 
 	color.New(color.FgCyan).Println("├──────────────────────────────────────────────────────────────────────────────┤")
 
 	fmt.Printf("│ ")
 	color.New(color.FgYellow, color.Bold).Printf("%-10s", "Medium")
-	fmt.Printf(" │ %-25s │ %-35s │\n", "Production", "6-16 CPUs, 11-30GB RAM, 3-8 nodes")
+	fmt.Printf(" │ %-25s │ %-35s │\n", "Production", "8-16 CPUs, 16-32GB RAM, 4-8 nodes")
 	fmt.Printf("│            │ %-25s │ %-35s │\n", "", "1,000-10,000 rules/sec")
 
 	color.New(color.FgCyan).Println("├──────────────────────────────────────────────────────────────────────────────┤")
 
 	fmt.Printf("│ ")
 	color.New(color.FgRed, color.Bold).Printf("%-10s", "Large")
-	fmt.Printf(" │ %-25s │ %-35s │\n", "High Performance", "10-32 CPUs, 19-61GB RAM, 5-16 nodes")
+	fmt.Printf(" │ %-25s │ %-35s │\n", "High Performance", "10-32 CPUs, 18-64GB RAM, 5-16 nodes")
 	fmt.Printf("│            │ %-25s │ %-35s │\n", "", ">10,000 rules/sec")
 
 	color.New(color.FgCyan).Println("└──────────────────────────────────────────────────────────────────────────────┘")
@@ -683,8 +683,8 @@ func (w *InitWizard) configurePerformance() {
 		w.config.Performance.VolumeLevel = "small"
 		// Node configuration: c8g.large (2 vCPUs, 3.8 GB RAM per node)
 		// Total resources: 6-8 vCPUs, 11.4-15.2 GB RAM
-		w.config.Kubernetes.NodeCount = 3
-		w.config.Kubernetes.MinNodes = 3
+		w.config.Kubernetes.NodeCount = 4
+		w.config.Kubernetes.MinNodes = 4
 		w.config.Kubernetes.MaxNodes = 4
 		// HPS - fixed at 2 replicas (limit per replica: 2 vCPU, 2 GB RAM)
 		w.config.Performance.HPSReplicas = 2
@@ -704,8 +704,8 @@ func (w *InitWizard) configurePerformance() {
 		w.config.Performance.VolumeLevel = "medium"
 		// Node configuration: c8g.large (2 vCPUs, 3.8 GB RAM per node)
 		// Total resources: 6-16 vCPUs, 11.4-30.4 GB RAM
-		w.config.Kubernetes.NodeCount = 3
-		w.config.Kubernetes.MinNodes = 3
+		w.config.Kubernetes.NodeCount = 4
+		w.config.Kubernetes.MinNodes = 4
 		w.config.Kubernetes.MaxNodes = 8
 		// HPS - fixed at 2 replicas (limit per replica: 2 vCPU, 2 GB RAM)
 		w.config.Performance.HPSReplicas = 2
@@ -754,8 +754,8 @@ func (w *InitWizard) configurePerformance() {
 	fmt.Println()
 	fmt.Println("Configuration summary:")
 	fmt.Printf("  • Cluster nodes: %d-%d (autoscaling enabled)\n", w.config.Kubernetes.MinNodes, w.config.Kubernetes.MaxNodes)
-	fmt.Printf("  • HPS replicas: %d (fixed)\n", w.config.Performance.HPSReplicas)
-	fmt.Printf("  • Worker replicas: %d-%d\n", w.config.Performance.HPSWorkerReplicas, w.config.Performance.HPSWorkerMaxReplicas)
+	fmt.Printf("  • HPS replicas (solver request handling): %d (fixed)\n", w.config.Performance.HPSReplicas)
+	fmt.Printf("  • Worker replicas (solver execution): %d-%d\n", w.config.Performance.HPSWorkerReplicas, w.config.Performance.HPSWorkerMaxReplicas)
 	fmt.Printf("  • Kafka partitions: %d\n", w.config.Performance.KafkaPartitions)
 	fmt.Printf("  • Storage size: %s\n", w.config.Performance.VolumeLevel)
 }
