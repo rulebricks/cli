@@ -26,11 +26,13 @@
 
 ---
 
-## Overview
+The Rulebricks CLI is a powerful deployment and management tool that automates the rapid creation and maintenance of production-ready Rulebricks rule engine clusters. It handles the complete infrastructure lifecycle across multiple cloud providers, from initial setup to ongoing operations. 
 
-The Rulebricks CLI is a powerful deployment and management tool that automates the creation and maintenance of production-ready Rulebricks rule engine clusters. It handles the complete infrastructure lifecycle across multiple cloud providers, from initial setup to ongoing operations.
+Under the hood, this is a deployment orchestrator that sequences Helm installs with computed cross-service dependencies. Rather than vendor everything into an umbrella chart or require manual coordination, the CLI calculates configs (Kafka partition counts, service URLs, resource limits) and feeds them between installations. Stateful tracking enables idempotent deploys and supports both fresh infrastructure provisioning and app-only upgrades.
 
 This CLI can deploy Rulebricks via Terraform across AWS, Azure, and Google Cloud, and requires a valid Rulebricks license key to use.
+
+Explore the latest documentation for the CLI here: https://rulebricks.com/docs/private-deployment/quick-start
 
 ### Key Features
 
