@@ -18,6 +18,7 @@
   <p>
     <a href="#installation">Installation</a> •
     <a href="https://rulebricks.com/docs/private-deployment/quick-start">Full Documentation</a> •
+    <a href="https://github.com/rulebricks/terraform">Terraform</a> •
     <a href="https://github.com/rulebricks/charts">App/Vendored Charts</a> •
     <a href="#support">Support</a>
   </p>
@@ -105,12 +106,17 @@ Retry deployment:
 rulebricks destroy
 rulebricks deploy --verbose
 ```
+> Running `rulebricks init` locks the version to the latest as of executing the command. Make sure to run `rulebricks upgrade list` and point to the latest version in your `rulebricks.yaml` when redeploying after a while.
+
+> If TLS was successfully configured on a prior failed deployment, you likely need to edit your `rulebricks.yaml` config to point to a different domain before redeploying– you may encounter certificate errors in Traefik.
 
 Check component health:
 ```bash
 kubectl get pods --all-namespaces
 kubectl describe pod <pod-name> -n <namespace>
 ```
+> Check out `rulebricks status` & `rulebricks logs --help` for a convenient shortcut to explore logs in Rulebricks related namespaces. 
+
 
 ## License
 
