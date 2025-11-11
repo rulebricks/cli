@@ -18,6 +18,7 @@
   <p>
     <a href="#installation">Installation</a> •
     <a href="https://rulebricks.com/docs/private-deployment/quick-start">Full Documentation</a> •
+    <a href="https://github.com/rulebricks/charts">App/Vendored Charts</a> •
     <a href="#support">Support</a>
   </p>
 </div>
