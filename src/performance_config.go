@@ -122,14 +122,14 @@ func GetPerformanceDefaults() *PerformanceDefaults {
 				"default": "default",
 			},
 			JVMHeapOpts: map[string]string{
-				"small":  "-Xmx768m -Xmx768m -XX:+UseZGC -XX:+AlwaysPreTouch -Xlog:os+container=info,gc+start=info,gc+init=info,gc+heap=info:file=/opt/bitnami/kafka/logs/gc.log:time,uptime,level,tags",
+				"small":  "-Xmx1g -Xms1g -XX:+UseZGC -XX:+AlwaysPreTouch",
 				"medium": "-Xmx1g -Xms1g -XX:+UseZGC -XX:+AlwaysPreTouch",
 				"large":  "-Xmx3g -Xms3g -XX:+UseZGC -XX:+AlwaysPreTouch",
 			},
 			JVMPerfOpts: map[string]string{
 				"small":  "-XX:MaxDirectMemorySize=256M -Djdk.nio.maxCachedBufferSize=262144",
 				"medium": "-XX:MaxDirectMemorySize=256M -Djdk.nio.maxCachedBufferSize=262144",
-				"large":  "-XX:MaxDirectMemorySize=512M -Djdk.nio.maxCachedBufferSize=262144",
+				"large":  "-XX:MaxDirectMemorySize=1024M -Djdk.nio.maxCachedBufferSize=262144",
 			},
 			ControllerResources: map[string]ControllerResources{
 				"small": {
@@ -174,12 +174,12 @@ func GetPerformanceDefaults() *PerformanceDefaults {
 			},
 			TopicConfigs: TopicConfigs{
 				SolutionTopic: TopicConfig{
-					RetentionMS:  "30000",
+					RetentionMS:  "60000",
 					SegmentMS:    "10000",
 					SegmentBytes: "16777216",
 				},
 				SolutionResponseTopic: TopicConfig{
-					RetentionMS:  "30000",
+					RetentionMS:  "60000",
 					SegmentMS:    "10000",
 					SegmentBytes: "16777216",
 				},
