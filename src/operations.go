@@ -1234,8 +1234,8 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
     }
 
 	volumeLevel := d.config.Performance.VolumeLevel
-	kafkaHeapOpts := "-Xmx1000m -Xms1000m -XX:+UseZGC -XX:+AlwaysPreTouch -Xlog:os+container=info,gc+start=info,gc+init=info,gc+heap=info:file=/opt/bitnami/kafka/logs/gc.log:time,uptime,level,tags"
-	kafkaJvmPerformanceOpts := "-XX:MaxDirectMemorySize=1G -Djdk.nio.maxCachedBufferSize=262144"
+	kafkaHeapOpts := "-Xmx768m -Xmx768m -XX:+UseZGC -XX:+AlwaysPreTouch -Xlog:os+container=info,gc+start=info,gc+init=info,gc+heap=info:file=/opt/bitnami/kafka/logs/gc.log:time,uptime,level,tags"
+	kafkaJvmPerformanceOpts := "-XX:MaxDirectMemorySize=256M -Djdk.nio.maxCachedBufferSize=262144"
 	controller := map[string]interface{}{
 		"resources": map[string]interface{}{
 			"requests": map[string]interface{}{
@@ -1251,8 +1251,8 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 	}
 	switch volumeLevel {
 		case "medium":
-			kafkaHeapOpts = "-Xmx2g -Xms2g -XX:+UseZGC -XX:+AlwaysPreTouch"
-			kafkaJvmPerformanceOpts = "-XX:MaxDirectMemorySize=2G -Djdk.nio.maxCachedBufferSize=262144"
+			kafkaHeapOpts = "-Xmx1g -Xms1g -XX:+UseZGC -XX:+AlwaysPreTouch"
+			kafkaJvmPerformanceOpts = "-XX:MaxDirectMemorySize=256M -Djdk.nio.maxCachedBufferSize=262144"
 			controller["resources"] = map[string]interface{}{
 				"requests": map[string]interface{}{
 					"cpu":    "1000m",
@@ -1265,7 +1265,7 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 			}
 		case "large":
 			kafkaHeapOpts = "-Xmx3g -Xms3g -XX:+UseZGC -XX:+AlwaysPreTouch"
-			kafkaJvmPerformanceOpts = "-XX:MaxDirectMemorySize=2560m -Djdk.nio.maxCachedBufferSize=262144"
+			kafkaJvmPerformanceOpts = "-XX:MaxDirectMemorySize=512M -Djdk.nio.maxCachedBufferSize=262144"
 			controller["resources"] = map[string]interface{}{
 				"requests": map[string]interface{}{
 					"cpu":    "2000m",
