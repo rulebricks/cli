@@ -414,12 +414,13 @@ func (w *InitWizard) configureOptionalFeatures() error {
 
 		switch modeChoice {
 		case "local - Use built-in Prometheus and Grafana":
+			perfDefaults := GetPerformanceDefaults()
 			w.config.Monitoring.Mode = "local"
 			w.config.Monitoring.Local = &LocalMonitoringConfig{
 				PrometheusEnabled: true,
 				GrafanaEnabled:    true,
-				Retention:         "30d",
-				StorageSize:       "50Gi",
+				Retention:         perfDefaults.Prometheus.LocalRetention,
+				StorageSize:       perfDefaults.Prometheus.LocalStorageSize,
 			}
 		case "remote - Use external monitoring (Grafana Cloud, New Relic, etc.)":
 			w.config.Monitoring.Mode = "remote"
@@ -677,77 +678,34 @@ func (w *InitWizard) configurePerformance() {
 	tierChoice := w.promptChoice("Select performance tier",
 		[]string{"small", "medium", "large"}, "small")
 
-	// Set all performance parameters based on tier selection
-	switch tierChoice {
-	case "small":
-		w.config.Performance.VolumeLevel = "small"
-		// Node configuration: c8g.large (2 vCPUs, 3.8 GB RAM per node)
-		// Total resources: 6-8 vCPUs, 11.4-15.2 GB RAM
-		w.config.Kubernetes.NodeCount = 4
-		w.config.Kubernetes.MinNodes = 4
-		w.config.Kubernetes.MaxNodes = 4
-		// HPS - fixed at 2 replicas (limit per replica: 2 vCPU, 2 GB RAM)
-		w.config.Performance.HPSReplicas = 2
-		// Workers - up to 4 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
-		w.config.Performance.HPSWorkerReplicas = 4
-		w.config.Performance.HPSWorkerMaxReplicas = 8
-		w.config.Performance.KafkaRetentionHours = 24
-		w.config.Performance.KafkaReplicationFactor = 1
-		w.config.Performance.KafkaStorageSize = "10Gi"
-		// Traefik - up to 4 vCPU consumption (limit per replica: 2 vCPU, 4 GB RAM)
-		w.config.Performance.TraefikMinReplicas = 1
-		w.config.Performance.TraefikMaxReplicas = 2
-		// Total resource consumption: 4.5-10 vCPUs (HPS: 1-2, Workers: 1.5-4, Traefik: 2-4)
-		// Available resources: 6-8 vCPUs - may need to scale to 4 nodes under peak load
-
-	case "medium":
-		w.config.Performance.VolumeLevel = "medium"
-		// Node configuration: c8g.large (2 vCPUs, 3.8 GB RAM per node)
-		// Total resources: 6-16 vCPUs, 11.4-30.4 GB RAM
-		w.config.Kubernetes.NodeCount = 4
-		w.config.Kubernetes.MinNodes = 4
-		w.config.Kubernetes.MaxNodes = 8
-		// HPS - fixed at 2 replicas (limit per replica: 2 vCPU, 2 GB RAM)
-		w.config.Performance.HPSReplicas = 2
-		// Workers - up to 18 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
-		w.config.Performance.HPSWorkerReplicas = 10
-		w.config.Performance.HPSWorkerMaxReplicas = 24
-		w.config.Performance.KafkaRetentionHours = 72
-		w.config.Performance.KafkaReplicationFactor = 2
-		w.config.Performance.KafkaStorageSize = "50Gi"
-		// Traefik - up to 8 vCPU consumption (limit per replica: 2 vCPU, 4 GB RAM)
-		w.config.Performance.TraefikMinReplicas = 2
-		w.config.Performance.TraefikMaxReplicas = 4
-		// Total resource consumption: 8.5-24 vCPUs (HPS: 2-6, Workers: 2.5-10, Traefik: 4-8)
-		// Available resources: 6-16 vCPUs - will auto-scale nodes based on demand
-
-	case "large":
-		w.config.Performance.VolumeLevel = "large"
-		// Node configuration: c8g.large (2 vCPUs, 3.8 GB RAM per node)
-		// Total resources: 10-32 vCPUs, 19-60.8 GB RAM
-		w.config.Kubernetes.NodeCount = 5
-		w.config.Kubernetes.MinNodes = 5
-		w.config.Kubernetes.MaxNodes = 16
-		// HPS - fixed at 4 replicas (limit per replica: 2 vCPU, 2 GB RAM)
-		w.config.Performance.HPSReplicas = 4
-		// Workers - up to 30 vCPU consumption (limit per worker: 0.5 vCPU, 0.5 GB RAM)
-		w.config.Performance.HPSWorkerReplicas = 10
-		w.config.Performance.HPSWorkerMaxReplicas = 48
-		w.config.Performance.KafkaRetentionHours = 168
-		w.config.Performance.KafkaReplicationFactor = 3
-		w.config.Performance.KafkaStorageSize = "100Gi"
-		// Traefik - up to 12 vCPU consumption (limit per replica: 2 vCPU, 4 GB RAM)
-		w.config.Performance.TraefikMinReplicas = 2
-		w.config.Performance.TraefikMaxReplicas = 6
-		// Total resource consumption: 12-40 vCPUs (HPS: 3-8, Workers: 5-20, Traefik: 4-12)
-		// Available resources: 10-32 vCPUs - designed for high throughput with headroom
+	// Get tier configuration from performance defaults
+	tierConfig := GetTierConfig(tierChoice)
+	if tierConfig == nil {
+		color.Red("Invalid tier: %s, using 'small' as default", tierChoice)
+		tierConfig = GetTierConfig("small")
+		if tierConfig == nil {
+			// This should never happen, but handle it gracefully
+			return
+		}
 	}
 
-	// Set common performance parameters
-	w.config.Performance.ScaleUpStabilization = 30
-	w.config.Performance.ScaleDownStabilization = 300
-	w.config.Performance.KedaPollingInterval = 10
-	w.config.Performance.KafkaLagThreshold = 8
+	// Set all performance parameters based on tier selection
+	w.config.Performance.VolumeLevel = tierConfig.VolumeLevel
+	w.config.Kubernetes.NodeCount = tierConfig.NodeCount
+	w.config.Kubernetes.MinNodes = tierConfig.MinNodes
+	w.config.Kubernetes.MaxNodes = tierConfig.MaxNodes
+	w.config.Performance.HPSReplicas = tierConfig.HPSReplicas
+	w.config.Performance.HPSWorkerReplicas = tierConfig.HPSWorkerReplicas
+	w.config.Performance.HPSWorkerMaxReplicas = tierConfig.HPSWorkerMaxReplicas
+	w.config.Performance.KafkaRetentionHours = tierConfig.KafkaRetentionHours
+	w.config.Performance.KafkaReplicationFactor = tierConfig.KafkaReplicationFactor
+	w.config.Performance.KafkaStorageSize = tierConfig.KafkaStorageSize
+	w.config.Performance.TraefikMinReplicas = tierConfig.TraefikMinReplicas
+	w.config.Performance.TraefikMaxReplicas = tierConfig.TraefikMaxReplicas
+	w.config.Performance.ScaleUpStabilization = tierConfig.ScaleUpStabilization
+	w.config.Performance.ScaleDownStabilization = tierConfig.ScaleDownStabilization
+	w.config.Performance.KedaPollingInterval = tierConfig.KedaPollingInterval
+	w.config.Performance.KafkaLagThreshold = tierConfig.KafkaLagThreshold
 
 	fmt.Println()
 	color.New(color.FgGreen).Printf("✓ Performance tier '%s' selected\n", tierChoice)

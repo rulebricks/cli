@@ -700,15 +700,18 @@ func (ko *KubernetesOperations) InstallTraefik(ctx context.Context, chartPath st
 	// Create minimal overrides for HPA and storage class
 	overrideValues := map[string]interface{}{}
 
+	// Get performance defaults
+	perfDefaults := GetPerformanceDefaults()
+
 	// Configure autoscaling based on performance settings
 	minReplicas := ko.config.Performance.TraefikMinReplicas
 	maxReplicas := ko.config.Performance.TraefikMaxReplicas
-		if minReplicas == 0 {
-			minReplicas = 1
-		}
-		if maxReplicas == 0 {
-			maxReplicas = 2
-		}
+	if minReplicas == 0 {
+		minReplicas = perfDefaults.Traefik.DefaultMinReplicas
+	}
+	if maxReplicas == 0 {
+		maxReplicas = perfDefaults.Traefik.DefaultMaxReplicas
+	}
 
 	overrideValues["autoscaling"] = map[string]interface{}{
 		"minReplicas": minReplicas,
@@ -716,13 +719,7 @@ func (ko *KubernetesOperations) InstallTraefik(ctx context.Context, chartPath st
 	}
 
 	// Set storage class based on cloud provider
-	storageClass := "gp2" // AWS default
-	switch ko.config.Cloud.Provider {
-	case "azure":
-		storageClass = "default"
-	case "gcp":
-		storageClass = "standard"
-	}
+	storageClass := GetTraefikStorageClass(ko.config.Cloud.Provider)
 	overrideValues["persistence"] = map[string]interface{}{
 		"storageClass": storageClass,
 	}
@@ -751,7 +748,7 @@ func (ko *KubernetesOperations) InstallTraefik(ctx context.Context, chartPath st
 		args = append(args, "-f", gcpValuesPath)
 	}
 
-	args = append(args, "--wait", "--timeout", "10m")
+	args = append(args, "--wait", "--timeout", perfDefaults.Timeouts.HelmInstall)
 
 	cmd = exec.CommandContext(ctx, "helm", args...)
 	if ko.verbose {
@@ -791,7 +788,7 @@ func (ko *KubernetesOperations) InstallTraefik(ctx context.Context, chartPath st
 	// Then wait for it to be ready
 	waitCmd := exec.CommandContext(ctx, "kubectl", "wait", "--for=condition=available", "deployment/traefik",
 		"-n", namespace,
-		"--timeout=300s")
+		"--timeout="+perfDefaults.Timeouts.TraefikWait)
 
 	if err := waitCmd.Run(); err != nil {
 		// Get more info about what's wrong
@@ -956,14 +953,17 @@ func (ko *KubernetesOperations) InstallPrometheusWithRemoteWrite(ctx context.Con
 		},
 	}
 
+	// Get performance defaults
+	perfDefaults := GetPerformanceDefaults()
+
 	// Configure Prometheus storage based on monitoring mode
-	retention := "30d"
-	storageSize := "50Gi"
+	retention := perfDefaults.Prometheus.LocalRetention
+	storageSize := perfDefaults.Prometheus.LocalStorageSize
 
 	if ko.config.Monitoring.Mode == "remote" {
 		// Shorter retention for remote mode
-		retention = "7d"
-		storageSize = "10Gi"
+		retention = perfDefaults.Prometheus.RemoteRetention
+		storageSize = perfDefaults.Prometheus.RemoteStorageSize
 	}
 
 	// Set retention and storage
@@ -1111,9 +1111,10 @@ func (ko *KubernetesOperations) InstallVector(ctx context.Context, vectorConfig 
 		}
 	}
 
+	perfDefaults := GetPerformanceDefaults()
 	values := map[string]interface{}{
 		"role":             "Stateless-Aggregator", // Use Deployment instead of DaemonSet
-		"replicas":         2,                      // Start with 2 replicas
+		"replicas":         perfDefaults.Vector.Replicas,
 		"customConfig":     configMap,
 		"fullnameOverride": releaseName, // Make all resources project-specific
 		"rbac": map[string]interface{}{
@@ -1133,12 +1134,12 @@ func (ko *KubernetesOperations) InstallVector(ctx context.Context, vectorConfig 
 		},
 		"resources": map[string]interface{}{
 			"requests": map[string]interface{}{
-				"cpu":    "50m", // Reduced since it's just consuming from Kafka
-				"memory": "128Mi",
+				"cpu":    perfDefaults.Vector.RequestsCPU,
+				"memory": perfDefaults.Vector.RequestsMemory,
 			},
 			"limits": map[string]interface{}{
-				"cpu":    "200m",
-				"memory": "256Mi",
+				"cpu":    perfDefaults.Vector.LimitsCPU,
+				"memory": perfDefaults.Vector.LimitsMemory,
 			},
 		},
 	}
@@ -1203,79 +1204,80 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 	kafkaChartPath := filepath.Join(extractedPath, "kafka")
 
 
+	// Get performance defaults
+	perfDefaults := GetPerformanceDefaults()
+
 	// Set default values if not configured
 	retentionHours := config.RetentionHours
 	if retentionHours == 0 {
-		retentionHours = 24
+		retentionHours = perfDefaults.Kafka.DefaultRetentionHours
 	}
 	partitionCount := config.Partitions
 	if partitionCount == 0 {
-		partitionCount = 3
+		partitionCount = perfDefaults.Kafka.DefaultPartitions
 	}
 	replicationFactor := config.ReplicationFactor
 	if replicationFactor == 0 {
-		replicationFactor = 2
+		replicationFactor = perfDefaults.Kafka.DefaultReplicationFactor
 	}
 	storageSize := config.StorageSize
 	if storageSize == "" {
-		storageSize = "50Gi"
+		storageSize = perfDefaults.Kafka.DefaultStorageSize
 	}
 
-	var storageClass = "default"
-	switch ko.cloudProvider {
-    case "aws":
-    	storageClass =  "gp3" // Up to 16,000 IOPS, 1,000 MB/s throughput, cost-effective
-    case "azure":
-    	storageClass = "managed-csi-premium" // Premium SSD v2, better price/performance
-    case "gcp":
-    	storageClass = "pd-ssd" // Up to 100,000 IOPS, more cost-effective
-    default:
-        storageClass = "default"
-    }
+	storageClass := GetKafkaStorageClass(ko.cloudProvider)
 
 	volumeLevel := d.config.Performance.VolumeLevel
-	kafkaHeapOpts := "-Xmx768m -Xmx768m -XX:+UseZGC -XX:+AlwaysPreTouch -Xlog:os+container=info,gc+start=info,gc+init=info,gc+heap=info:file=/opt/bitnami/kafka/logs/gc.log:time,uptime,level,tags"
-	kafkaJvmPerformanceOpts := "-XX:MaxDirectMemorySize=256M -Djdk.nio.maxCachedBufferSize=262144"
+	if volumeLevel == "" {
+		volumeLevel = "small"
+	}
+
+	// Get JVM options and controller resources based on volume level
+	kafkaHeapOpts := perfDefaults.Kafka.JVMHeapOpts[volumeLevel]
+	if kafkaHeapOpts == "" {
+		kafkaHeapOpts = perfDefaults.Kafka.JVMHeapOpts["small"]
+	}
+	kafkaJvmPerformanceOpts := perfDefaults.Kafka.JVMPerfOpts[volumeLevel]
+	if kafkaJvmPerformanceOpts == "" {
+		kafkaJvmPerformanceOpts = perfDefaults.Kafka.JVMPerfOpts["small"]
+	}
+
+	ctrlRes := perfDefaults.Kafka.ControllerResources[volumeLevel]
+	if ctrlRes.RequestsCPU == "" {
+		ctrlRes = perfDefaults.Kafka.ControllerResources["small"]
+	}
+
 	controller := map[string]interface{}{
 		"resources": map[string]interface{}{
 			"requests": map[string]interface{}{
-				"cpu":    "500m",
-				"memory": "2Gi",
+				"cpu":    ctrlRes.RequestsCPU,
+				"memory": ctrlRes.RequestsMemory,
 			},
 			"limits": map[string]interface{}{
-				"cpu":    "2000m",
-				"memory": "3Gi",
+				"cpu":    ctrlRes.LimitsCPU,
+				"memory": ctrlRes.LimitsMemory,
 			},
 		},
 		"podManagementPolicy": "Parallel",
 	}
-	switch volumeLevel {
-		case "medium":
-			kafkaHeapOpts = "-Xmx1g -Xms1g -XX:+UseZGC -XX:+AlwaysPreTouch"
-			kafkaJvmPerformanceOpts = "-XX:MaxDirectMemorySize=256M -Djdk.nio.maxCachedBufferSize=262144"
-			controller["resources"] = map[string]interface{}{
-				"requests": map[string]interface{}{
-					"cpu":    "1000m",
-					"memory": "2Gi",
-				},
-				"limits": map[string]interface{}{
-					"cpu":    "2000m",
-					"memory": "3Gi",
-				},
-			}
-		case "large":
-			kafkaHeapOpts = "-Xmx3g -Xms3g -XX:+UseZGC -XX:+AlwaysPreTouch"
-			kafkaJvmPerformanceOpts = "-XX:MaxDirectMemorySize=512M -Djdk.nio.maxCachedBufferSize=262144"
-			controller["resources"] = map[string]interface{}{
-				"requests": map[string]interface{}{
-					"cpu":    "2000m",
-					"memory": "2Gi",
-				},
-				"limits": map[string]interface{}{
-					"cpu":    "4000m",
-					"memory": "3Gi",
-				},
-			}
+
+	// Build environment variables from performance config
+	envVars := []map[string]interface{}{
+		{
+			"name":  "KAFKA_HEAP_OPTS",
+			"value": kafkaHeapOpts,
+		},
+		{
+			"name":  "KAFKA_JVM_PERFORMANCE_OPTS",
+			"value": kafkaJvmPerformanceOpts,
+		},
+	}
+	// Add all Kafka configuration environment variables from performance config
+	for name, value := range perfDefaults.Kafka.EnvVars {
+		envVars = append(envVars, map[string]interface{}{
+			"name":  name,
+			"value": value,
+		})
 	}
 
     values := map[string]interface{}{
@@ -1286,81 +1288,19 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 			"size":         storageSize,
 			"storageClass": storageClass,
 		},
-		"extraEnvVars": []map[string]interface{}{
-			{
-				"name": "KAFKA_HEAP_OPTS",
-				"value": kafkaHeapOpts,
-			},
-			{
-				"name": "KAFKA_JVM_PERFORMANCE_OPTS",
-				"value": kafkaJvmPerformanceOpts,
-			},
-			{
-				"name":  "KAFKA_CFG_QUEUED_MAX_REQUESTS",
-				"value": "10000",
-			},
-			{
-				"name":  "KAFKA_CFG_NUM_NETWORK_THREADS",
-				"value": "8",
-			},
-			{
-				"name":  "KAFKA_CFG_NUM_IO_THREADS",
-				"value": "8",
-			},
-			{
-				"name":  "KAFKA_CFG_SOCKET_SEND_BUFFER_BYTES",
-				"value": "1048576",
-			},
-			{
-				"name":  "KAFKA_CFG_SOCKET_RECEIVE_BUFFER_BYTES",
-				"value": "1048576",
-			},
-			{
-				"name":  "KAFKA_CFG_SOCKET_REQUEST_MAX_BYTES",
-				"value": "209715200",
-			},
-			{
-				"name":  "KAFKA_CFG_LOG_RETENTION_BYTES",
-				"value": "4294967296",
-			},
-			{
-				"name":  "KAFKA_CFG_LOG_SEGMENT_BYTES",
-				"value": "1073741824",
-			},
-			{
-				"name":  "KAFKA_CFG_NUM_REPLICA_FETCHERS",
-				"value": "4",
-			},
-			{
-				"name":  "KAFKA_CFG_REPLICA_SOCKET_RECEIVE_BUFFER_BYTES",
-				"value": "1048576",
-			},
-			{
-				"name":  "KAFKA_CFG_LOG_CLEANER_DEDUPE_BUFFER_SIZE",
-				"value": "268435456",
-			},
-			{
-				"name":  "KAFKA_CFG_LOG_CLEANER_IO_BUFFER_SIZE",
-				"value": "1048576",
-			},
-			{
-				"name":  "KAFKA_CFG_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION",
-				"value": "10",
-			},
-		},
-	
+		"extraEnvVars": envVars,
 		"controller": controller,
 		
 		"defaultInitContainers": map[string]interface{}{
 			"prepareConfig": map[string]interface{}{
 				"resources": map[string]interface{}{
 					"requests": map[string]interface{}{
-						"cpu":    "100m",
-						"memory": "128Mi",
+						"cpu":    perfDefaults.Kafka.InitContainerResources.RequestsCPU,
+						"memory": perfDefaults.Kafka.InitContainerResources.RequestsMemory,
 					},
 					"limits": map[string]interface{}{
-						"cpu":    "150m",
-						"memory": "192Mi",
+						"cpu":    perfDefaults.Kafka.InitContainerResources.LimitsCPU,
+						"memory": perfDefaults.Kafka.InitContainerResources.LimitsMemory,
 					},
 				},
 			},
@@ -1466,13 +1406,14 @@ func (ko *KubernetesOperations) InstallKafka(ctx context.Context, config KafkaCo
 	defer os.Remove(valuesFile)
 
 	// Deploy with Helm
+	perfDefaultsKafkaWait := GetPerformanceDefaults()
 	cmd := exec.CommandContext(ctx, "helm", "upgrade", "--install", "kafka",
 		kafkaChartPath,
 		"--namespace", namespace,
 		"--reset-values",
 		"--values", valuesFile,
 		"--wait",
-		"--timeout", "15m")
+		"--timeout", perfDefaultsKafkaWait.Timeouts.KafkaWait)
 
 	if d.options.Verbose {
 		cmd.Stdout = os.Stdout
@@ -1507,6 +1448,10 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 		replicationFactor = 1
 	}
 
+	// Get performance defaults for topic configs
+	perfDefaults := GetPerformanceDefaults()
+	solutionTopicConfig := perfDefaults.Kafka.TopicConfigs.SolutionTopic
+
 	// Create solution topic
 	ko.progress.Info("Creating Kafka topic 'solution' with %d partitions...", partitionsPerTopic)
 
@@ -1518,9 +1463,9 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 		"--topic", "solution",
 		"--partitions", fmt.Sprintf("%d", partitionsPerTopic),
 		"--replication-factor", fmt.Sprintf("%d", replicationFactor),
-		"--config", "retention.ms=30000",
-		"--config", "segment.ms=10000",
-		"--config", "segment.bytes=16777216",
+		"--config", fmt.Sprintf("retention.ms=%s", solutionTopicConfig.RetentionMS),
+		"--config", fmt.Sprintf("segment.ms=%s", solutionTopicConfig.SegmentMS),
+		"--config", fmt.Sprintf("segment.bytes=%s", solutionTopicConfig.SegmentBytes),
 	)
 
 	output, err := cmd.CombinedOutput()
@@ -1534,6 +1479,7 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 	}
 
 	// Create solution-response topic
+	solutionResponseTopicConfig := perfDefaults.Kafka.TopicConfigs.SolutionResponseTopic
 	ko.progress.Info("Creating Kafka response topic 'solution-response' with %d partitions...", partitionsPerTopic)
 
 	cmd = exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, "kafka-controller-0", "--",
@@ -1544,9 +1490,9 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 		"--topic", "solution-response",
 		"--partitions", fmt.Sprintf("%d", partitionsPerTopic),
 		"--replication-factor", fmt.Sprintf("%d", replicationFactor),
-		"--config", "retention.ms=30000",
-		"--config", "segment.ms=10000",
-		"--config", "segment.bytes=16777216",
+		"--config", fmt.Sprintf("retention.ms=%s", solutionResponseTopicConfig.RetentionMS),
+		"--config", fmt.Sprintf("segment.ms=%s", solutionResponseTopicConfig.SegmentMS),
+		"--config", fmt.Sprintf("segment.bytes=%s", solutionResponseTopicConfig.SegmentBytes),
 	)
 
 	output, err = cmd.CombinedOutput()
@@ -1560,6 +1506,7 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 	}
 
 	// Create logs topic
+	logsTopicConfig := perfDefaults.Kafka.TopicConfigs.LogsTopic
 	ko.progress.Info("Creating Kafka topic 'logs' with %d partitions...", partitionsPerTopic)
 
 	cmd = exec.CommandContext(ctx, "kubectl", "exec", "-n", namespace, "kafka-controller-0", "--",
@@ -1570,9 +1517,9 @@ func (ko *KubernetesOperations) createKafkaTopics(ctx context.Context, config Ka
 		"--topic", "logs",
 		"--partitions", fmt.Sprintf("%d", partitionsPerTopic),
 		"--replication-factor", fmt.Sprintf("%d", replicationFactor),
-		"--config", "retention.bytes=4294967296",
-		"--config", "segment.bytes=1073741824",
-		"--config", "compression.type=gzip",
+		"--config", fmt.Sprintf("retention.bytes=%s", logsTopicConfig.RetentionBytes),
+		"--config", fmt.Sprintf("segment.bytes=%s", logsTopicConfig.SegmentBytes),
+		"--config", fmt.Sprintf("compression.type=%s", logsTopicConfig.Compression),
 	)
 
 	output, err = cmd.CombinedOutput()
@@ -1897,12 +1844,15 @@ func (ko *KubernetesOperations) ensureNamespace(ctx context.Context, namespace s
 }
 
 func (ko *KubernetesOperations) installHelmChart(ctx context.Context, release, chart, namespace string, values map[string]interface{}) error {
+	// Get performance defaults
+	perfDefaults := GetPerformanceDefaults()
+
 	// Create values file if needed
 	args := []string{"upgrade", "--install", release, chart,
 		"--namespace", namespace,
 		"--create-namespace",
 		"--wait",
-		"--timeout", "10m"}
+		"--timeout", perfDefaults.Timeouts.HelmInstall}
 
 	if values != nil {
 		valuesYAML, err := yaml.Marshal(values)
@@ -2352,6 +2302,9 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 		smtpPassword = so.options.Secrets.SMTPPassword
 	}
 
+	// Get performance defaults
+	perfDefaults := GetPerformanceDefaults()
+
 	// Create comprehensive values configuration
 	values := map[string]interface{}{
 		"secret": map[string]interface{}{
@@ -2394,7 +2347,7 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 			},
 			"persistence": map[string]interface{}{
 				"enabled": true,
-				"size":    "10Gi",
+				"size":    perfDefaults.Supabase.StorageSize,
 			},
 			"auth": map[string]interface{}{
 				"username": "postgres",
@@ -2472,7 +2425,7 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 			},
 			"persistence": map[string]interface{}{
 				"enabled": true,
-				"size":    "10Gi",
+				"size":    perfDefaults.Supabase.StorageSize,
 			},
 			"environment": map[string]interface{}{
 				"FILE_SIZE_LIMIT":           "52428800",
@@ -2644,13 +2597,14 @@ func (so *SupabaseOperations) deploySelfHosted(ctx context.Context) error {
 	cmd.Run() // Ignore error if namespace exists
 
 	// Deploy with Helm
+	perfDefaultsSupabaseWait := GetPerformanceDefaults()
 	cmd = exec.CommandContext(ctx, "helm", "upgrade", "--install", "supabase",
 		supabaseChartPath,
 		"--namespace", namespace,
 		"--reset-values",
 		"--values", valuesFile,
 		"--wait",
-		"--timeout", "15m")
+		"--timeout", perfDefaultsSupabaseWait.Timeouts.SupabaseWait)
 
 	if so.options.Verbose {
 		cmd.Stdout = os.Stdout

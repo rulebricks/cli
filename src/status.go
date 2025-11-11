@@ -524,15 +524,12 @@ const (
 
 // Display method for DeploymentStatus
 func (status *DeploymentStatus) Display() {
-	// Header
 	fmt.Println()
 	fmt.Print("\033[H\033[2J") // ANSI escape code to clear the console
 
-	// Overall Health
 	healthIcon := getHealthIcon(status.OverallHealth)
 	healthColor := getHealthColor(status.OverallHealth)
 
-	// Print the welcome message with ASCII art
 	color.New(color.Bold, getDirectHealthColor(status.OverallHealth)).Printf(`
 
 
@@ -632,8 +629,6 @@ func (status *DeploymentStatus) Display() {
 
 	fmt.Println(strings.Repeat("─", 60))
 }
-
-// Helper display functions
 
 func getHealthIcon(health HealthState) string {
 	switch health {

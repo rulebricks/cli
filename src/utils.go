@@ -12,7 +12,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// generateRandomString creates a cryptographically secure random string
+// generateRandomString creates a cryptographically secure random strin
 func generateRandomString(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, length)
@@ -28,51 +28,42 @@ func generateRandomString(length int) string {
 	return string(b)
 }
 
-// generateDatabasePassword creates a strong database password
+
 func generateDatabasePassword() string {
-	// Use only alphanumeric characters to avoid URL encoding issues
 	const (
 		upperChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 		lowerChars = "abcdefghijklmnopqrstuvwxyz"
 		digitChars = "0123456789"
 	)
 
-	// Ensure at least one character from each set
 	password := ""
 	password += getRandomChar(upperChars)
 	password += getRandomChar(lowerChars)
 	password += getRandomChar(digitChars)
 
-	// Fill the rest randomly from all sets
 	allChars := upperChars + lowerChars + digitChars
-	remaining := 13 // Total length of 16
+	remaining := 13
 	for i := 0; i < remaining; i++ {
 		password += getRandomChar(allChars)
 	}
 
-	// Shuffle the password
 	return shuffleString(password)
 }
 
-// generateJWT creates a JWT token for Supabase with the specified role
 func generateJWT(role, secret string) string {
-	// Supabase JWT claims structure
 	claims := jwt.MapClaims{
 		"role": role,
 		"iss":  "supabase",
 		"iat":  time.Now().Unix(),
-		"exp":  time.Now().Add(10 * 365 * 24 * time.Hour).Unix(), // 10 years
+		"exp":  time.Now().Add(10 * 365 * 24 * time.Hour).Unix(),
 	}
 
-	// For anon role, add additional claims
 	if role == "anon" {
 		claims["aud"] = "authenticated"
 	}
 
-	// Create token with HS256 algorithm
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
-	// Sign with the secret
 	tokenString, err := token.SignedString([]byte(secret))
 	if err != nil {
 		panic(fmt.Errorf("failed to generate JWT: %w", err))
@@ -81,7 +72,6 @@ func generateJWT(role, secret string) string {
 	return tokenString
 }
 
-// getRandomChar returns a random character from the given string
 func getRandomChar(chars string) string {
 	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
 	if err != nil {
@@ -90,7 +80,6 @@ func getRandomChar(chars string) string {
 	return string(chars[n.Int64()])
 }
 
-// shuffleString randomly shuffles the characters in a string
 func shuffleString(s string) string {
 	runes := []rune(s)
 	n := len(runes)
@@ -107,13 +96,11 @@ func shuffleString(s string) string {
 	return string(runes)
 }
 
-// validateEmail performs basic email validation
 func validateEmail(email string) error {
 	if email == "" {
 		return fmt.Errorf("email address cannot be empty")
 	}
 
-	// Basic regex pattern for email validation
 	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
 	if !emailRegex.MatchString(email) {
 		return fmt.Errorf("invalid email format")
@@ -192,7 +179,6 @@ func uniqueStringSlice(slice []string) []string {
 	return result
 }
 
-// resolveSecretValue resolves a secret from various sources
 func resolveSecretValue(source string) (string, error) {
 	if strings.HasPrefix(source, "env:") {
 		envVar := strings.TrimPrefix(source, "env:")
@@ -208,15 +194,12 @@ func resolveSecretValue(source string) (string, error) {
 		}
 		return strings.TrimSpace(string(content)), nil
 	} else if strings.HasPrefix(source, "plain:") {
-		// Temporary for wizard, should be migrated to proper secret storage
 		return strings.TrimPrefix(source, "plain:"), nil
 	}
 
-	// Assume it's a plain value
 	return source, nil
 }
 
-// createTempFile creates a temporary file with the given content
 func createTempFile(prefix, suffix string, content []byte) (string, error) {
 	tmpfile, err := os.CreateTemp("", prefix+"*"+suffix)
 	if err != nil {
@@ -237,19 +220,14 @@ func createTempFile(prefix, suffix string, content []byte) (string, error) {
 	return tmpfile.Name(), nil
 }
 
-// sanitizeJWT removes ANSI sequences and validates JWT format
 func sanitizeJWT(jwt string) string {
-	// Remove ANSI escape sequences
 	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	cleanJWT := ansiRegex.ReplaceAllString(jwt, "")
 
-	// Trim whitespace
 	cleanJWT = strings.TrimSpace(cleanJWT)
 
-	// Verify it looks like a JWT (three dot-separated base64url segments)
 	jwtRegex := regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
 	if !jwtRegex.MatchString(cleanJWT) {
-		// Log warning but return cleaned string anyway
 		fmt.Fprintf(os.Stderr, "Warning: JWT may be corrupted after sanitization\n")
 	}
 

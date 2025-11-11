@@ -498,11 +498,12 @@ func (c *Config) ApplyDefaults() {
 
 		if c.Monitoring.Mode == "local" {
 			if c.Monitoring.Local == nil {
+				perfDefaults := GetPerformanceDefaults()
 				c.Monitoring.Local = &LocalMonitoringConfig{
 					PrometheusEnabled: true,
 					GrafanaEnabled:    true,
-					Retention:         "30d",
-					StorageSize:       "50Gi",
+					Retention:         perfDefaults.Prometheus.LocalRetention,
+					StorageSize:       perfDefaults.Prometheus.LocalStorageSize,
 				}
 			}
 		}
@@ -518,15 +519,17 @@ func (c *Config) ApplyDefaults() {
 	}
 
 	if c.Monitoring.Metrics == nil {
+		perfDefaults := GetPerformanceDefaults()
 		c.Monitoring.Metrics = &MetricsConfig{
-			Retention: "30d",
+			Retention: perfDefaults.Prometheus.LocalRetention,
 			Interval:  "30s",
 		}
 	}
 	if c.Monitoring.Logs == nil {
+		perfDefaults := GetPerformanceDefaults()
 		c.Monitoring.Logs = &LogsConfig{
 			Level:     "info",
-			Retention: "7d",
+			Retention: perfDefaults.Prometheus.RemoteRetention,
 		}
 	}
 
@@ -538,17 +541,18 @@ func (c *Config) ApplyDefaults() {
 	}
 
 
+	perfDefaults := GetPerformanceDefaults()
 	if c.Performance.KafkaRetentionHours == 0 {
-		c.Performance.KafkaRetentionHours = 24
+		c.Performance.KafkaRetentionHours = perfDefaults.Kafka.DefaultRetentionHours
 	}
 	if c.Performance.KafkaReplicationFactor == 0 {
-		c.Performance.KafkaReplicationFactor = 1
+		c.Performance.KafkaReplicationFactor = perfDefaults.Kafka.DefaultReplicationFactor
 	}
 	if c.Performance.TraefikMinReplicas == 0 {
-		c.Performance.TraefikMinReplicas = 1
+		c.Performance.TraefikMinReplicas = perfDefaults.Traefik.DefaultMinReplicas
 	}
 	if c.Performance.TraefikMaxReplicas == 0 {
-		c.Performance.TraefikMaxReplicas = 2
+		c.Performance.TraefikMaxReplicas = perfDefaults.Traefik.DefaultMaxReplicas
 	}
 }
 

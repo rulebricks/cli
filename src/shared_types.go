@@ -325,7 +325,7 @@ const (
 	CertificateTimeout = 10 * time.Minute
 )
 
-// Resource defaults
+// Resource defaults (deprecated - use GetPerformanceDefaults() instead)
 const (
 	DefaultHPSReplicas            = 1
 	DefaultHPSMaxReplicas         = 5
@@ -343,14 +343,5 @@ const (
 	VolumeLevelLarge  = "large"
 )
 
-// GetVolumeSize returns the volume size based on level
-func GetVolumeSize(level string) string {
-	switch level {
-	case VolumeLevelSmall:
-		return "10Gi"
-	case VolumeLevelLarge:
-		return "100Gi"
-	default:
-		return "50Gi"
-	}
-}
+// GetVolumeSize is now defined in performance_config.go
+// This function is kept for backward compatibility but delegates to performance config

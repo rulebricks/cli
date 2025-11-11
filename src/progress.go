@@ -11,14 +11,12 @@ import (
 	"github.com/fatih/color"
 )
 
-// ProgressIndicator handles various types of progress indication
 type ProgressIndicator struct {
 	writer     io.Writer
 	verbose    bool
 	isTerminal bool
 }
 
-// NewProgressIndicator creates a new progress indicator
 func NewProgressIndicator(verbose bool) *ProgressIndicator {
 	return &ProgressIndicator{
 		writer:     os.Stdout,
@@ -27,7 +25,6 @@ func NewProgressIndicator(verbose bool) *ProgressIndicator {
 	}
 }
 
-// Spinner represents an animated spinner
 type Spinner struct {
 	pi       *ProgressIndicator
 	message  string
@@ -38,7 +35,6 @@ type Spinner struct {
 	mu       sync.Mutex
 }
 
-// StartSpinner creates and starts a new spinner
 func (pi *ProgressIndicator) StartSpinner(message string) *Spinner {
 	spinner := &Spinner{
 		pi:       pi,
@@ -51,14 +47,12 @@ func (pi *ProgressIndicator) StartSpinner(message string) *Spinner {
 	if pi.isTerminal && !pi.verbose {
 		go spinner.run()
 	} else {
-		// For non-terminal or verbose mode, just print the message
 		fmt.Fprintf(pi.writer, "%s...\n", message)
 	}
 
 	return spinner
 }
 
-// run animates the spinner
 func (s *Spinner) run() {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
@@ -77,7 +71,6 @@ func (s *Spinner) run() {
 	}
 }
 
-// Success stops the spinner with a success message
 func (s *Spinner) Success(message ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -94,14 +87,13 @@ func (s *Spinner) Success(message ...string) {
 
 	if s.pi.isTerminal && !s.pi.verbose {
 		close(s.stop)
-		time.Sleep(50 * time.Millisecond) // Give spinner time to clear
+		time.Sleep(50 * time.Millisecond)
 		fmt.Fprintf(s.pi.writer, "\r%s %s\n", color.GreenString("✓"), msg)
 	} else if s.pi.verbose {
 		fmt.Fprintf(s.pi.writer, "%s %s\n", color.GreenString("✓"), msg)
 	}
 }
 
-// Fail stops the spinner with a failure message
 func (s *Spinner) Fail(message ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -118,21 +110,19 @@ func (s *Spinner) Fail(message ...string) {
 
 	if s.pi.isTerminal && !s.pi.verbose {
 		close(s.stop)
-		time.Sleep(50 * time.Millisecond) // Give spinner time to clear
+		time.Sleep(50 * time.Millisecond)
 		fmt.Fprintf(s.pi.writer, "\r%s %s\n", color.RedString("✗"), msg)
 	} else if s.pi.verbose {
 		fmt.Fprintf(s.pi.writer, "%s %s\n", color.RedString("✗"), msg)
 	}
 }
 
-// Update changes the spinner message
 func (s *Spinner) Update(message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.message = message
 }
 
-// Stop stops the spinner without a message
 func (s *Spinner) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,13 +139,11 @@ func (s *Spinner) Stop() {
 	}
 }
 
-// clear clears the current line
 func (s *Spinner) clear() {
 	if s.pi.isTerminal {
 		fmt.Fprintf(s.pi.writer, "\r%s\r", strings.Repeat(" ", len(s.message)+5))
 	}
 }
-
 // ProgressBar represents a progress bar
 type ProgressBar struct {
 	pi        *ProgressIndicator
@@ -167,7 +155,6 @@ type ProgressBar struct {
 	mu        sync.Mutex
 }
 
-// StartProgress creates and displays a progress bar
 func (pi *ProgressIndicator) StartProgress(message string, total int) *ProgressBar {
 	pb := &ProgressBar{
 		pi:        pi,
@@ -187,12 +174,10 @@ func (pi *ProgressIndicator) StartProgress(message string, total int) *ProgressB
 	return pb
 }
 
-// Increment increases the progress by 1
 func (pb *ProgressBar) Increment() {
 	pb.Update(pb.current + 1)
 }
 
-// Update sets the current progress
 func (pb *ProgressBar) Update(current int) {
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
@@ -209,7 +194,6 @@ func (pb *ProgressBar) Update(current int) {
 	}
 }
 
-// render draws the progress bar
 func (pb *ProgressBar) render() {
 	percent := float64(pb.current) / float64(pb.total)
 	filled := int(percent * float64(pb.width))
@@ -232,7 +216,6 @@ func (pb *ProgressBar) render() {
 	}
 }
 
-// Complete marks the progress as complete
 func (pb *ProgressBar) Complete(message ...string) {
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
@@ -253,7 +236,6 @@ func (pb *ProgressBar) Complete(message ...string) {
 	}
 }
 
-// TaskList represents a list of tasks with status
 type TaskList struct {
 	pi        *ProgressIndicator
 	tasks     []Task
@@ -262,7 +244,6 @@ type TaskList struct {
 	mu        sync.Mutex
 }
 
-// Task represents a single task in the list
 type Task struct {
 	Name      string
 	Status    TaskStatus
@@ -271,7 +252,6 @@ type Task struct {
 	Error     error
 }
 
-// TaskStatus represents the status of a task
 type TaskStatus int
 
 const (
@@ -282,7 +262,6 @@ const (
 	TaskSkipped
 )
 
-// StartTaskList creates a new task list
 func (pi *ProgressIndicator) StartTaskList(taskNames []string) *TaskList {
 	tasks := make([]Task, len(taskNames))
 	for i, name := range taskNames {
@@ -302,7 +281,6 @@ func (pi *ProgressIndicator) StartTaskList(taskNames []string) *TaskList {
 	return tl
 }
 
-// StartTask begins execution of the next task
 func (tl *TaskList) StartTask() *TaskHandle {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
@@ -325,13 +303,11 @@ func (tl *TaskList) StartTask() *TaskHandle {
 	}
 }
 
-// TaskHandle represents a handle to a running task
 type TaskHandle struct {
 	taskList *TaskList
 	index    int
 }
 
-// Success marks the task as successful
 func (th *TaskHandle) Success() {
 	th.taskList.mu.Lock()
 	defer th.taskList.mu.Unlock()
@@ -348,7 +324,6 @@ func (th *TaskHandle) Success() {
 	}
 }
 
-// Fail marks the task as failed
 func (th *TaskHandle) Fail(err error) {
 	th.taskList.mu.Lock()
 	defer th.taskList.mu.Unlock()
@@ -365,7 +340,6 @@ func (th *TaskHandle) Fail(err error) {
 	}
 }
 
-// Skip marks the task as skipped
 func (th *TaskHandle) Skip() {
 	th.taskList.mu.Lock()
 	defer th.taskList.mu.Unlock()
@@ -380,16 +354,14 @@ func (th *TaskHandle) Skip() {
 	}
 }
 
-// Complete finishes the task list
 func (tl *TaskList) Complete() {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 
 	if tl.pi.isTerminal && !tl.pi.verbose {
-		fmt.Fprintln(tl.pi.writer) // New line after progress
+		fmt.Fprintln(tl.pi.writer)
 	}
 
-	// Summary
 	completed := 0
 	failed := 0
 	skipped := 0
@@ -419,8 +391,6 @@ func (tl *TaskList) Complete() {
 	fmt.Fprintln(tl.pi.writer)
 }
 
-// Helper functions
-
 func isTerminal(w io.Writer) bool {
 	if f, ok := w.(*os.File); ok {
 		fi, _ := f.Stat()
@@ -446,38 +416,33 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh%dm", hour, min)
 }
 
-// Section prints a section header
+
 func (pi *ProgressIndicator) Section(title string) {
 	fmt.Fprintf(pi.writer, "\n%s\n%s\n",
 		color.New(color.Bold).Sprint(title),
 		strings.Repeat("─", len(title)))
 }
 
-// Info prints an info message
 func (pi *ProgressIndicator) Info(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	fmt.Fprintf(pi.writer, "%s %s\n", color.BlueString("ℹ"), msg)
 }
 
-// Success prints a success message
 func (pi *ProgressIndicator) Success(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	fmt.Fprintf(pi.writer, "%s %s\n", color.GreenString("✓"), msg)
 }
 
-// Warning prints a warning message
 func (pi *ProgressIndicator) Warning(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	fmt.Fprintf(pi.writer, "%s %s\n", color.YellowString("⚠"), msg)
 }
 
-// Error prints an error message
 func (pi *ProgressIndicator) Error(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	fmt.Fprintf(pi.writer, "%s %s\n", color.RedString("✗"), msg)
 }
 
-// Debug prints a debug message (only in verbose mode)
 func (pi *ProgressIndicator) Debug(format string, args ...interface{}) {
 	if pi.verbose {
 		msg := fmt.Sprintf(format, args...)
