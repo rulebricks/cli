@@ -17,6 +17,7 @@ import (
 
 type UpgradeManager struct {
 	config       *Config
+	configPath   string
 	verbose      bool
 	progress     *ProgressIndicator
 	chartManager *ChartManager
@@ -35,10 +36,19 @@ type ChartRelease struct {
 }
 
 func NewUpgradeManager(config *Config, verbose bool) *UpgradeManager {
+	return NewUpgradeManagerWithConfigPath(config, "", verbose)
+}
+
+func NewUpgradeManagerWithConfigPath(config *Config, configPath string, verbose bool) *UpgradeManager {
 	chartManager, _ := NewChartManager("", verbose)
+
+	if configPath == "" {
+		configPath = "rulebricks.yaml"
+	}
 
 	return &UpgradeManager{
 		config:       config,
+		configPath:   configPath,
 		verbose:      verbose,
 		progress:     NewProgressIndicator(verbose),
 		chartManager: chartManager,
@@ -426,6 +436,22 @@ func (um *UpgradeManager) performUpgrade(version string) error {
 
 	um.updateDeploymentState(version)
 
+	spinner = um.progress.StartSpinner("Restarting HPS pods")
+	if err := um.restartHPSPods(); err != nil {
+		spinner.Fail()
+		um.progress.Warning("Failed to restart HPS pods: %v", err)
+	} else {
+		spinner.Success()
+	}
+
+	spinner = um.progress.StartSpinner("Updating project configuration")
+	if err := um.updateProjectVersion(version); err != nil {
+		spinner.Fail()
+		um.progress.Warning("Failed to update project configuration: %v", err)
+	} else {
+		spinner.Success()
+	}
+
 	duration := time.Since(startTime)
 	color.Green("\n✅ Upgrade completed successfully in %s", formatDuration(duration))
 	fmt.Printf("\nApplication upgraded to version: %s\n", color.CyanString(version))
@@ -697,4 +723,38 @@ func (um *UpgradeManager) runDatabaseMigrations(ctx context.Context, extractedCh
 	}
 
 	return len(newMigrations), nil
+}
+
+func (um *UpgradeManager) restartHPSPods() error {
+	namespace := um.config.GetNamespace("app")
+
+	// Restart rulebricks-hps statefulset
+	cmd := exec.Command("kubectl", "rollout", "restart", "statefulset/rulebricks-hps", "-n", namespace)
+	if um.verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to restart rulebricks-hps statefulset: %w", err)
+	}
+
+	// Restart rulebricks-hps-worker statefulset
+	cmd = exec.Command("kubectl", "rollout", "restart", "statefulset/rulebricks-hps-worker", "-n", namespace)
+	if um.verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to restart rulebricks-hps-worker statefulset: %w", err)
+	}
+
+	return nil
+}
+
+func (um *UpgradeManager) updateProjectVersion(version string) error {
+	// Update the config version
+	um.config.Project.Version = version
+
+	// Save the updated config
+	return SaveConfig(um.config, um.configPath)
 }

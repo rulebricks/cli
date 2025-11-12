@@ -379,7 +379,11 @@ func createUpgradeSubcommands() []*cobra.Command {
 
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 
-			manager := NewUpgradeManager(config, verbose)
+			configPath := cfgFile
+			if configPath == "" {
+				configPath = "rulebricks.yaml"
+			}
+			manager := NewUpgradeManagerWithConfigPath(config, configPath, verbose)
 			return manager.Upgrade(version, dryRun)
 		},
 	}
