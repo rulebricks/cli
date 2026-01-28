@@ -1,0 +1,4088 @@
+{
+  "id": "640f1f09-d691-4c70-9eec-9fca68dc4767",
+  "owner": "f1a24367-a38e-495a-b837-5c61203543e6",
+  "name": "Test Flow",
+  "createdAt": "2025-12-09T21:02:29.747+00:00",
+  "updatedAt": "2025-12-10T01:38:10.402+00:00",
+  "slug": "ds_f3LwY7c",
+  "description": "",
+  "sampleResponse": {
+    "keyB": "valueB"
+  },
+  "origin": "4fa8a705-983f-49d0-b3ba-cc4a3029ef79",
+  "graph": {
+    "edges": [
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_alpha-hyoPiX-JSjVadcLw0KBna924384f1-435d-4e95-b3a9-bc7efdb11593_request-alpha",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "hyoPiX-JSjVadcLw0KBna",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_alpha",
+        "targetHandle": "924384f1-435d-4e95-b3a9-bc7efdb11593_request-alpha"
+      },
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_beta-k7sfhRfOYZQVLOw04ZygNeff9a229-eeea-45d0-b7d1-948e47faa960_request-beta",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "k7sfhRfOYZQVLOw04ZygN",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_beta",
+        "targetHandle": "eff9a229-eeea-45d0-b7d1-948e47faa960_request-beta"
+      },
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_charlie-I0C19IQUqA3dpYDK2AmXub75da5ea-39c7-44bb-afc1-1e806b80e3cc_request-charlie",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "I0C19IQUqA3dpYDK2AmXu",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_charlie",
+        "targetHandle": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc_request-charlie"
+      },
+      {
+        "id": "reactflow__edge-hyoPiX-JSjVadcLw0KBna924384f1-435d-4e95-b3a9-bc7efdb11593_response-status-q9HFK22f1e2DKuStxFmx_q9HFK22f1e2DKuStxFmx__result",
+        "type": "default",
+        "source": "hyoPiX-JSjVadcLw0KBna",
+        "target": "q9HFK22f1e2DKuStxFmx_",
+        "sourceHandle": "924384f1-435d-4e95-b3a9-bc7efdb11593_response-status",
+        "targetHandle": "q9HFK22f1e2DKuStxFmx__result"
+      },
+      {
+        "id": "reactflow__edge-hyoPiX-JSjVadcLw0KBna924384f1-435d-4e95-b3a9-bc7efdb11593_response-error-q9HFK22f1e2DKuStxFmx_q9HFK22f1e2DKuStxFmx__result",
+        "type": "default",
+        "source": "hyoPiX-JSjVadcLw0KBna",
+        "target": "q9HFK22f1e2DKuStxFmx_",
+        "sourceHandle": "924384f1-435d-4e95-b3a9-bc7efdb11593_response-error",
+        "targetHandle": "q9HFK22f1e2DKuStxFmx__result"
+      },
+      {
+        "id": "reactflow__edge-k7sfhRfOYZQVLOw04ZygNeff9a229-eeea-45d0-b7d1-948e47faa960_response-status-NUiiS7cPJXo5jz8AC-ZETNUiiS7cPJXo5jz8AC-ZET_result",
+        "type": "default",
+        "source": "k7sfhRfOYZQVLOw04ZygN",
+        "target": "NUiiS7cPJXo5jz8AC-ZET",
+        "sourceHandle": "eff9a229-eeea-45d0-b7d1-948e47faa960_response-status",
+        "targetHandle": "NUiiS7cPJXo5jz8AC-ZET_result"
+      },
+      {
+        "id": "reactflow__edge-k7sfhRfOYZQVLOw04ZygNeff9a229-eeea-45d0-b7d1-948e47faa960_response-error-NUiiS7cPJXo5jz8AC-ZETNUiiS7cPJXo5jz8AC-ZET_result",
+        "type": "default",
+        "source": "k7sfhRfOYZQVLOw04ZygN",
+        "target": "NUiiS7cPJXo5jz8AC-ZET",
+        "sourceHandle": "eff9a229-eeea-45d0-b7d1-948e47faa960_response-error",
+        "targetHandle": "NUiiS7cPJXo5jz8AC-ZET_result"
+      },
+      {
+        "id": "reactflow__edge-I0C19IQUqA3dpYDK2AmXub75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-status-mtQ_wtgT4l0nkZELLbRBCmtQ_wtgT4l0nkZELLbRBC_result",
+        "type": "default",
+        "source": "I0C19IQUqA3dpYDK2AmXu",
+        "target": "mtQ_wtgT4l0nkZELLbRBC",
+        "sourceHandle": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-status",
+        "targetHandle": "mtQ_wtgT4l0nkZELLbRBC_result"
+      },
+      {
+        "id": "reactflow__edge-I0C19IQUqA3dpYDK2AmXub75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-error-mtQ_wtgT4l0nkZELLbRBCmtQ_wtgT4l0nkZELLbRBC_result",
+        "type": "default",
+        "source": "I0C19IQUqA3dpYDK2AmXu",
+        "target": "mtQ_wtgT4l0nkZELLbRBC",
+        "sourceHandle": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-error",
+        "targetHandle": "mtQ_wtgT4l0nkZELLbRBC_result"
+      },
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id-q9HFK22f1e2DKuStxFmx_q9HFK22f1e2DKuStxFmx__result",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "q9HFK22f1e2DKuStxFmx_",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id",
+        "targetHandle": "q9HFK22f1e2DKuStxFmx__result"
+      },
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id-NUiiS7cPJXo5jz8AC-ZETNUiiS7cPJXo5jz8AC-ZET_result",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "NUiiS7cPJXo5jz8AC-ZET",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id",
+        "targetHandle": "NUiiS7cPJXo5jz8AC-ZET_result"
+      },
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id-mtQ_wtgT4l0nkZELLbRBCmtQ_wtgT4l0nkZELLbRBC_result",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "mtQ_wtgT4l0nkZELLbRBC",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id",
+        "targetHandle": "mtQ_wtgT4l0nkZELLbRBC_result"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "CLVIGLKZSs",
+        "data": {
+          "id": "b1e5c2bf-296b-472b-8204-a52c361b3fb9",
+          "tag": null,
+          "form": null,
+          "name": "Blank Rule",
+          "slug": "NXK-X9hXot",
+          "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+          "groups": {},
+          "history": [
+            {
+              "id": "Hra9RXa8jQ",
+              "diff": {
+                "published_conditions": [
+                  null,
+                  [
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "success"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "published_requestSchema": [
+                  null,
+                  [
+                    {
+                      "key": "req_id",
+                      "name": "Req Id",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "alpha",
+                      "name": "Alpha",
+                      "show": true,
+                      "type": "number",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": 0,
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "beta",
+                      "name": "Beta",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "a",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "charlie",
+                      "name": "Charlie",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": true,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ],
+                "published_responseSchema": [
+                  null,
+                  [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ]
+              },
+              "email": "support@rulebricks.com",
+              "score": null,
+              "action": "publish",
+              "timestamp": "2025-07-15T00:28:39.623Z"
+            }
+          ],
+          "version": "1",
+          "releases": {},
+          "runCount": 0,
+          "settings": {},
+          "createdAt": "2025-07-15T00:28:23.029+00:00",
+          "flowError": false,
+          "flowState": {
+            "beta": "a",
+            "alpha": 0,
+            "req_id": "",
+            "charlie": true
+          },
+          "published": true,
+          "testSuite": [],
+          "updatedAt": "2025-07-15T00:28:35.941+00:00",
+          "updatedBy": "support@rulebricks.com",
+          "conditions": [
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "success"
+                }
+              }
+            }
+          ],
+          "flowResult": {
+            "error": false,
+            "status": "success",
+            "request_beta": "a",
+            "request_alpha": 0,
+            "request_req_id": "",
+            "request_charlie": true
+          },
+          "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+          "publishedAt": "2025-07-15T00:28:39.623+00:00",
+          "testRequest": {},
+          "accessGroups": [],
+          "requestCount": 0,
+          "no_conditions": 1,
+          "requestSchema": [
+            {
+              "key": "req_id",
+              "name": "Req Id",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "alpha",
+              "name": "Alpha",
+              "show": true,
+              "type": "number",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": 0,
+              "valuesPrefix": ""
+            },
+            {
+              "key": "beta",
+              "name": "Beta",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "a",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "charlie",
+              "name": "Charlie",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": true,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleRequest": {
+            "beta": "a",
+            "alpha": 0,
+            "req_id": "",
+            "charlie": true
+          },
+          "responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleResponse": {
+            "error": false,
+            "status": "success"
+          },
+          "published_groups": {},
+          "published_conditions": [
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "success"
+                }
+              }
+            }
+          ],
+          "published_requestSchema": [
+            {
+              "key": "req_id",
+              "name": "Req Id",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "alpha",
+              "name": "Alpha",
+              "show": true,
+              "type": "number",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": 0,
+              "valuesPrefix": ""
+            },
+            {
+              "key": "beta",
+              "name": "Beta",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "a",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "charlie",
+              "name": "Charlie",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": true,
+              "valuesPrefix": ""
+            }
+          ],
+          "published_responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ]
+        },
+        "type": "origin",
+        "width": 404,
+        "height": 491,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "deletable": false,
+        "positionAbsolute": {
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": "hyoPiX-JSjVadcLw0KBna",
+        "data": {
+          "id": "924384f1-435d-4e95-b3a9-bc7efdb11593",
+          "tag": null,
+          "form": null,
+          "name": "A Rule",
+          "slug": "YC6pwTCobc",
+          "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+          "groups": {},
+          "history": [
+            {
+              "id": "XOu8dPlXTj",
+              "diff": {
+                "published_conditions": [
+                  null,
+                  [
+                    {
+                      "request": {
+                        "alpha": {
+                          "op": "greater than",
+                          "args": [
+                            10
+                          ]
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "alpha is greater than 10"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ]
+                ],
+                "published_requestSchema": [
+                  null,
+                  [
+                    {
+                      "key": "alpha",
+                      "name": "Alpha",
+                      "show": true,
+                      "type": "number",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": 0,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ],
+                "published_responseSchema": [
+                  null,
+                  [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ]
+              },
+              "email": "support@rulebricks.com",
+              "score": null,
+              "action": "publish",
+              "timestamp": "2025-07-15T00:29:35.029Z"
+            }
+          ],
+          "version": "1",
+          "releases": {},
+          "runCount": 0,
+          "settings": {},
+          "createdAt": "2025-07-15T00:28:58.297+00:00",
+          "flowError": false,
+          "flowState": {
+            "alpha": 0
+          },
+          "published": true,
+          "testSuite": [],
+          "updatedAt": "2025-07-15T00:29:40.115+00:00",
+          "updatedBy": "support@rulebricks.com",
+          "conditions": [
+            {
+              "request": {
+                "alpha": {
+                  "op": "greater than",
+                  "args": [
+                    10
+                  ]
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "alpha is greater than 10"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "flowResult": {
+            "error": true,
+            "status": "failure"
+          },
+          "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+          "publishedAt": "2025-07-15T00:29:35.029+00:00",
+          "testRequest": {},
+          "accessGroups": [],
+          "requestCount": 0,
+          "no_conditions": 1,
+          "requestSchema": [
+            {
+              "key": "alpha",
+              "name": "Alpha",
+              "show": true,
+              "type": "number",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": 0,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleRequest": {
+            "alpha": 0
+          },
+          "responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleResponse": {
+            "error": false,
+            "status": "success"
+          },
+          "published_groups": {},
+          "published_conditions": [
+            {
+              "request": {
+                "alpha": {
+                  "op": "greater than",
+                  "args": [
+                    10
+                  ]
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "alpha is greater than 10"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "published_requestSchema": [
+            {
+              "key": "alpha",
+              "name": "Alpha",
+              "show": true,
+              "type": "number",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": 0,
+              "valuesPrefix": ""
+            }
+          ],
+          "published_responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ]
+        },
+        "type": "rule",
+        "width": 404,
+        "height": 201,
+        "dragging": false,
+        "position": {
+          "x": 500,
+          "y": -150
+        },
+        "selected": false,
+        "positionAbsolute": {
+          "x": 500,
+          "y": -150
+        }
+      },
+      {
+        "id": "k7sfhRfOYZQVLOw04ZygN",
+        "data": {
+          "id": "eff9a229-eeea-45d0-b7d1-948e47faa960",
+          "tag": null,
+          "form": null,
+          "name": "B Rule",
+          "slug": "W1dhlDLxg9",
+          "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+          "groups": {},
+          "history": [
+            {
+              "id": "IRvdksm5Mb",
+              "diff": {
+                "published_groups": [
+                  null,
+                  {}
+                ],
+                "published_conditions": [
+                  null,
+                  [
+                    {
+                      "request": {
+                        "beta": {
+                          "op": "is not empty",
+                          "args": []
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "beta isnt empty"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ]
+                ],
+                "published_requestSchema": [
+                  null,
+                  [
+                    {
+                      "key": "beta",
+                      "name": "Beta",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "",
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ],
+                "published_responseSchema": [
+                  null,
+                  [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ]
+              },
+              "email": "support@rulebricks.com",
+              "score": null,
+              "action": "publish",
+              "timestamp": "2025-07-15T00:30:23.611Z"
+            }
+          ],
+          "version": "1",
+          "releases": {},
+          "runCount": 0,
+          "settings": {},
+          "createdAt": "2025-07-15T00:29:45.344+00:00",
+          "flowError": false,
+          "flowState": {
+            "beta": "a"
+          },
+          "published": true,
+          "testSuite": [],
+          "updatedAt": "2025-07-15T00:30:20.325+00:00",
+          "updatedBy": "support@rulebricks.com",
+          "conditions": [
+            {
+              "request": {
+                "beta": {
+                  "op": "is not empty",
+                  "args": []
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "beta isnt empty"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "flowResult": {
+            "error": false,
+            "status": "beta isnt empty"
+          },
+          "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+          "publishedAt": "2025-07-15T00:30:23.611+00:00",
+          "testRequest": {},
+          "accessGroups": [],
+          "requestCount": 0,
+          "no_conditions": 1,
+          "requestSchema": [
+            {
+              "key": "beta",
+              "name": "Beta",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "",
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleRequest": {
+            "beta": ""
+          },
+          "responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleResponse": {
+            "error": false,
+            "status": "success"
+          },
+          "published_groups": {},
+          "published_conditions": [
+            {
+              "request": {
+                "beta": {
+                  "op": "is not empty",
+                  "args": []
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "beta isnt empty"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "published_requestSchema": [
+            {
+              "key": "beta",
+              "name": "Beta",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "",
+              "valuesPrefix": ""
+            }
+          ],
+          "published_responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ]
+        },
+        "type": "rule",
+        "width": 404,
+        "height": 201,
+        "dragging": false,
+        "position": {
+          "x": 500,
+          "y": 100
+        },
+        "selected": false,
+        "positionAbsolute": {
+          "x": 500,
+          "y": 100
+        }
+      },
+      {
+        "id": "I0C19IQUqA3dpYDK2AmXu",
+        "data": {
+          "id": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc",
+          "tag": null,
+          "form": null,
+          "name": "C Rule",
+          "slug": "H3ez3qrXV7",
+          "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+          "groups": {},
+          "history": [
+            {
+              "id": "hNqyoSAtE8",
+              "diff": {
+                "published_groups": [
+                  null,
+                  {}
+                ],
+                "published_conditions": [
+                  null,
+                  [
+                    {
+                      "request": {
+                        "charlie": {
+                          "op": "is true",
+                          "args": []
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "charlie is true"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ]
+                ],
+                "published_requestSchema": [
+                  null,
+                  [
+                    {
+                      "key": "charlie",
+                      "name": "Charlie",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ],
+                "published_responseSchema": [
+                  null,
+                  [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ]
+              },
+              "email": "support@rulebricks.com",
+              "score": null,
+              "action": "publish",
+              "timestamp": "2025-07-15T00:31:07.358Z"
+            }
+          ],
+          "version": "1",
+          "releases": {},
+          "runCount": 0,
+          "settings": {},
+          "createdAt": "2025-07-15T00:29:47.065+00:00",
+          "flowError": false,
+          "flowState": {
+            "charlie": true
+          },
+          "published": true,
+          "testSuite": [],
+          "updatedAt": "2025-07-15T00:31:01.004+00:00",
+          "updatedBy": "support@rulebricks.com",
+          "conditions": [
+            {
+              "request": {
+                "charlie": {
+                  "op": "is true",
+                  "args": []
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "charlie is true"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "flowResult": {
+            "error": false,
+            "status": "charlie is true"
+          },
+          "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+          "publishedAt": "2025-07-15T00:31:07.358+00:00",
+          "testRequest": {},
+          "accessGroups": [],
+          "requestCount": 0,
+          "no_conditions": 1,
+          "requestSchema": [
+            {
+              "key": "charlie",
+              "name": "Charlie",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleRequest": {
+            "charlie": false
+          },
+          "responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleResponse": {
+            "error": false,
+            "status": "success"
+          },
+          "published_groups": {},
+          "published_conditions": [
+            {
+              "request": {
+                "charlie": {
+                  "op": "is true",
+                  "args": []
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "charlie is true"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "published_requestSchema": [
+            {
+              "key": "charlie",
+              "name": "Charlie",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "published_responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ]
+        },
+        "type": "rule",
+        "width": 400,
+        "height": 201,
+        "dragging": false,
+        "position": {
+          "x": 500,
+          "y": 350
+        },
+        "selected": false,
+        "positionAbsolute": {
+          "x": 500,
+          "y": 350
+        }
+      },
+      {
+        "id": "NUiiS7cPJXo5jz8AC-ZET",
+        "data": {
+          "key": "beta_result",
+          "flowState": {
+            "error": false,
+            "status": "beta isnt empty",
+            "request_req_id": ""
+          }
+        },
+        "type": "result",
+        "width": 400,
+        "height": 402,
+        "position": {
+          "x": 950,
+          "y": -50
+        },
+        "positionAbsolute": {
+          "x": 950,
+          "y": -50
+        }
+      },
+      {
+        "id": "mtQ_wtgT4l0nkZELLbRBC",
+        "data": {
+          "key": "charlie_result",
+          "flowState": {
+            "error": false,
+            "status": "charlie is true",
+            "request_req_id": ""
+          }
+        },
+        "type": "result",
+        "width": 400,
+        "height": 402,
+        "dragging": false,
+        "position": {
+          "x": 950,
+          "y": 400
+        },
+        "selected": false,
+        "positionAbsolute": {
+          "x": 950,
+          "y": 400
+        }
+      },
+      {
+        "id": "q9HFK22f1e2DKuStxFmx_",
+        "data": {
+          "key": "alpha_result",
+          "flowState": {
+            "error": true,
+            "status": "failure",
+            "request_req_id": ""
+          }
+        },
+        "type": "result",
+        "width": 400,
+        "height": 402,
+        "dragging": false,
+        "position": {
+          "x": 950,
+          "y": -500
+        },
+        "selected": false,
+        "positionAbsolute": {
+          "x": 950,
+          "y": -500
+        }
+      }
+    ]
+  },
+  "updatedBy": "support@rulebricks.com",
+  "published": true,
+  "publishedAt": "2025-12-10T01:35:50.325+00:00",
+  "published_graph": {
+    "edges": [
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_alpha-hyoPiX-JSjVadcLw0KBna924384f1-435d-4e95-b3a9-bc7efdb11593_request-alpha",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "hyoPiX-JSjVadcLw0KBna",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_alpha",
+        "targetHandle": "924384f1-435d-4e95-b3a9-bc7efdb11593_request-alpha"
+      },
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_beta-k7sfhRfOYZQVLOw04ZygNeff9a229-eeea-45d0-b7d1-948e47faa960_request-beta",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "k7sfhRfOYZQVLOw04ZygN",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_beta",
+        "targetHandle": "eff9a229-eeea-45d0-b7d1-948e47faa960_request-beta"
+      },
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_charlie-I0C19IQUqA3dpYDK2AmXub75da5ea-39c7-44bb-afc1-1e806b80e3cc_request-charlie",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "I0C19IQUqA3dpYDK2AmXu",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_charlie",
+        "targetHandle": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc_request-charlie"
+      },
+      {
+        "id": "reactflow__edge-hyoPiX-JSjVadcLw0KBna924384f1-435d-4e95-b3a9-bc7efdb11593_response-status-q9HFK22f1e2DKuStxFmx_q9HFK22f1e2DKuStxFmx__result",
+        "type": "default",
+        "source": "hyoPiX-JSjVadcLw0KBna",
+        "target": "q9HFK22f1e2DKuStxFmx_",
+        "sourceHandle": "924384f1-435d-4e95-b3a9-bc7efdb11593_response-status",
+        "targetHandle": "q9HFK22f1e2DKuStxFmx__result"
+      },
+      {
+        "id": "reactflow__edge-hyoPiX-JSjVadcLw0KBna924384f1-435d-4e95-b3a9-bc7efdb11593_response-error-q9HFK22f1e2DKuStxFmx_q9HFK22f1e2DKuStxFmx__result",
+        "type": "default",
+        "source": "hyoPiX-JSjVadcLw0KBna",
+        "target": "q9HFK22f1e2DKuStxFmx_",
+        "sourceHandle": "924384f1-435d-4e95-b3a9-bc7efdb11593_response-error",
+        "targetHandle": "q9HFK22f1e2DKuStxFmx__result"
+      },
+      {
+        "id": "reactflow__edge-k7sfhRfOYZQVLOw04ZygNeff9a229-eeea-45d0-b7d1-948e47faa960_response-status-NUiiS7cPJXo5jz8AC-ZETNUiiS7cPJXo5jz8AC-ZET_result",
+        "type": "default",
+        "source": "k7sfhRfOYZQVLOw04ZygN",
+        "target": "NUiiS7cPJXo5jz8AC-ZET",
+        "sourceHandle": "eff9a229-eeea-45d0-b7d1-948e47faa960_response-status",
+        "targetHandle": "NUiiS7cPJXo5jz8AC-ZET_result"
+      },
+      {
+        "id": "reactflow__edge-k7sfhRfOYZQVLOw04ZygNeff9a229-eeea-45d0-b7d1-948e47faa960_response-error-NUiiS7cPJXo5jz8AC-ZETNUiiS7cPJXo5jz8AC-ZET_result",
+        "type": "default",
+        "source": "k7sfhRfOYZQVLOw04ZygN",
+        "target": "NUiiS7cPJXo5jz8AC-ZET",
+        "sourceHandle": "eff9a229-eeea-45d0-b7d1-948e47faa960_response-error",
+        "targetHandle": "NUiiS7cPJXo5jz8AC-ZET_result"
+      },
+      {
+        "id": "reactflow__edge-I0C19IQUqA3dpYDK2AmXub75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-status-mtQ_wtgT4l0nkZELLbRBCmtQ_wtgT4l0nkZELLbRBC_result",
+        "type": "default",
+        "source": "I0C19IQUqA3dpYDK2AmXu",
+        "target": "mtQ_wtgT4l0nkZELLbRBC",
+        "sourceHandle": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-status",
+        "targetHandle": "mtQ_wtgT4l0nkZELLbRBC_result"
+      },
+      {
+        "id": "reactflow__edge-I0C19IQUqA3dpYDK2AmXub75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-error-mtQ_wtgT4l0nkZELLbRBCmtQ_wtgT4l0nkZELLbRBC_result",
+        "type": "default",
+        "source": "I0C19IQUqA3dpYDK2AmXu",
+        "target": "mtQ_wtgT4l0nkZELLbRBC",
+        "sourceHandle": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-error",
+        "targetHandle": "mtQ_wtgT4l0nkZELLbRBC_result"
+      },
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id-q9HFK22f1e2DKuStxFmx_q9HFK22f1e2DKuStxFmx__result",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "q9HFK22f1e2DKuStxFmx_",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id",
+        "targetHandle": "q9HFK22f1e2DKuStxFmx__result"
+      },
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id-NUiiS7cPJXo5jz8AC-ZETNUiiS7cPJXo5jz8AC-ZET_result",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "NUiiS7cPJXo5jz8AC-ZET",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id",
+        "targetHandle": "NUiiS7cPJXo5jz8AC-ZET_result"
+      },
+      {
+        "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id-mtQ_wtgT4l0nkZELLbRBCmtQ_wtgT4l0nkZELLbRBC_result",
+        "type": "default",
+        "source": "CLVIGLKZSs",
+        "target": "mtQ_wtgT4l0nkZELLbRBC",
+        "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id",
+        "targetHandle": "mtQ_wtgT4l0nkZELLbRBC_result"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "CLVIGLKZSs",
+        "data": {
+          "id": "b1e5c2bf-296b-472b-8204-a52c361b3fb9",
+          "tag": null,
+          "form": null,
+          "name": "Blank Rule",
+          "slug": "NXK-X9hXot",
+          "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+          "groups": {},
+          "history": [
+            {
+              "id": "Hra9RXa8jQ",
+              "diff": {
+                "published_conditions": [
+                  null,
+                  [
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "success"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "published_requestSchema": [
+                  null,
+                  [
+                    {
+                      "key": "req_id",
+                      "name": "Req Id",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "alpha",
+                      "name": "Alpha",
+                      "show": true,
+                      "type": "number",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": 0,
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "beta",
+                      "name": "Beta",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "a",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "charlie",
+                      "name": "Charlie",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": true,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ],
+                "published_responseSchema": [
+                  null,
+                  [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ]
+              },
+              "email": "support@rulebricks.com",
+              "score": null,
+              "action": "publish",
+              "timestamp": "2025-07-15T00:28:39.623Z"
+            }
+          ],
+          "version": "1",
+          "releases": {},
+          "runCount": 0,
+          "settings": {},
+          "createdAt": "2025-07-15T00:28:23.029+00:00",
+          "flowError": false,
+          "flowState": {
+            "beta": "a",
+            "alpha": 0,
+            "req_id": "",
+            "charlie": true
+          },
+          "published": true,
+          "testSuite": [],
+          "updatedAt": "2025-07-15T00:28:35.941+00:00",
+          "updatedBy": "support@rulebricks.com",
+          "conditions": [
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "success"
+                }
+              }
+            }
+          ],
+          "flowResult": {
+            "error": false,
+            "status": "success",
+            "request_beta": "a",
+            "request_alpha": 0,
+            "request_req_id": "",
+            "request_charlie": true
+          },
+          "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+          "publishedAt": "2025-07-15T00:28:39.623+00:00",
+          "testRequest": {},
+          "accessGroups": [],
+          "requestCount": 0,
+          "no_conditions": 1,
+          "requestSchema": [
+            {
+              "key": "req_id",
+              "name": "Req Id",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "alpha",
+              "name": "Alpha",
+              "show": true,
+              "type": "number",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": 0,
+              "valuesPrefix": ""
+            },
+            {
+              "key": "beta",
+              "name": "Beta",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "a",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "charlie",
+              "name": "Charlie",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": true,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleRequest": {
+            "beta": "a",
+            "alpha": 0,
+            "req_id": "",
+            "charlie": true
+          },
+          "responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleResponse": {
+            "error": false,
+            "status": "success"
+          },
+          "published_groups": {},
+          "published_conditions": [
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "success"
+                }
+              }
+            }
+          ],
+          "published_requestSchema": [
+            {
+              "key": "req_id",
+              "name": "Req Id",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "alpha",
+              "name": "Alpha",
+              "show": true,
+              "type": "number",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": 0,
+              "valuesPrefix": ""
+            },
+            {
+              "key": "beta",
+              "name": "Beta",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "a",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "charlie",
+              "name": "Charlie",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": true,
+              "valuesPrefix": ""
+            }
+          ],
+          "published_responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ]
+        },
+        "type": "origin",
+        "width": 404,
+        "height": 491,
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "deletable": false,
+        "positionAbsolute": {
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": "hyoPiX-JSjVadcLw0KBna",
+        "data": {
+          "id": "924384f1-435d-4e95-b3a9-bc7efdb11593",
+          "tag": null,
+          "form": null,
+          "name": "A Rule",
+          "slug": "YC6pwTCobc",
+          "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+          "groups": {},
+          "history": [
+            {
+              "id": "XOu8dPlXTj",
+              "diff": {
+                "published_conditions": [
+                  null,
+                  [
+                    {
+                      "request": {
+                        "alpha": {
+                          "op": "greater than",
+                          "args": [
+                            10
+                          ]
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "alpha is greater than 10"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ]
+                ],
+                "published_requestSchema": [
+                  null,
+                  [
+                    {
+                      "key": "alpha",
+                      "name": "Alpha",
+                      "show": true,
+                      "type": "number",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": 0,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ],
+                "published_responseSchema": [
+                  null,
+                  [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ]
+              },
+              "email": "support@rulebricks.com",
+              "score": null,
+              "action": "publish",
+              "timestamp": "2025-07-15T00:29:35.029Z"
+            }
+          ],
+          "version": "1",
+          "releases": {},
+          "runCount": 0,
+          "settings": {},
+          "createdAt": "2025-07-15T00:28:58.297+00:00",
+          "flowError": false,
+          "flowState": {
+            "alpha": 0
+          },
+          "published": true,
+          "testSuite": [],
+          "updatedAt": "2025-07-15T00:29:40.115+00:00",
+          "updatedBy": "support@rulebricks.com",
+          "conditions": [
+            {
+              "request": {
+                "alpha": {
+                  "op": "greater than",
+                  "args": [
+                    10
+                  ]
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "alpha is greater than 10"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "flowResult": {
+            "error": true,
+            "status": "failure"
+          },
+          "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+          "publishedAt": "2025-07-15T00:29:35.029+00:00",
+          "testRequest": {},
+          "accessGroups": [],
+          "requestCount": 0,
+          "no_conditions": 1,
+          "requestSchema": [
+            {
+              "key": "alpha",
+              "name": "Alpha",
+              "show": true,
+              "type": "number",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": 0,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleRequest": {
+            "alpha": 0
+          },
+          "responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleResponse": {
+            "error": false,
+            "status": "success"
+          },
+          "published_groups": {},
+          "published_conditions": [
+            {
+              "request": {
+                "alpha": {
+                  "op": "greater than",
+                  "args": [
+                    10
+                  ]
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "alpha is greater than 10"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "published_requestSchema": [
+            {
+              "key": "alpha",
+              "name": "Alpha",
+              "show": true,
+              "type": "number",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": 0,
+              "valuesPrefix": ""
+            }
+          ],
+          "published_responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ]
+        },
+        "type": "rule",
+        "width": 404,
+        "height": 201,
+        "dragging": false,
+        "position": {
+          "x": 500,
+          "y": -150
+        },
+        "selected": false,
+        "positionAbsolute": {
+          "x": 500,
+          "y": -150
+        }
+      },
+      {
+        "id": "k7sfhRfOYZQVLOw04ZygN",
+        "data": {
+          "id": "eff9a229-eeea-45d0-b7d1-948e47faa960",
+          "tag": null,
+          "form": null,
+          "name": "B Rule",
+          "slug": "W1dhlDLxg9",
+          "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+          "groups": {},
+          "history": [
+            {
+              "id": "IRvdksm5Mb",
+              "diff": {
+                "published_groups": [
+                  null,
+                  {}
+                ],
+                "published_conditions": [
+                  null,
+                  [
+                    {
+                      "request": {
+                        "beta": {
+                          "op": "is not empty",
+                          "args": []
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "beta isnt empty"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ]
+                ],
+                "published_requestSchema": [
+                  null,
+                  [
+                    {
+                      "key": "beta",
+                      "name": "Beta",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "",
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ],
+                "published_responseSchema": [
+                  null,
+                  [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ]
+              },
+              "email": "support@rulebricks.com",
+              "score": null,
+              "action": "publish",
+              "timestamp": "2025-07-15T00:30:23.611Z"
+            }
+          ],
+          "version": "1",
+          "releases": {},
+          "runCount": 0,
+          "settings": {},
+          "createdAt": "2025-07-15T00:29:45.344+00:00",
+          "flowError": false,
+          "flowState": {
+            "beta": "a"
+          },
+          "published": true,
+          "testSuite": [],
+          "updatedAt": "2025-07-15T00:30:20.325+00:00",
+          "updatedBy": "support@rulebricks.com",
+          "conditions": [
+            {
+              "request": {
+                "beta": {
+                  "op": "is not empty",
+                  "args": []
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "beta isnt empty"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "flowResult": {
+            "error": false,
+            "status": "beta isnt empty"
+          },
+          "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+          "publishedAt": "2025-07-15T00:30:23.611+00:00",
+          "testRequest": {},
+          "accessGroups": [],
+          "requestCount": 0,
+          "no_conditions": 1,
+          "requestSchema": [
+            {
+              "key": "beta",
+              "name": "Beta",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "",
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleRequest": {
+            "beta": ""
+          },
+          "responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleResponse": {
+            "error": false,
+            "status": "success"
+          },
+          "published_groups": {},
+          "published_conditions": [
+            {
+              "request": {
+                "beta": {
+                  "op": "is not empty",
+                  "args": []
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "beta isnt empty"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "published_requestSchema": [
+            {
+              "key": "beta",
+              "name": "Beta",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "",
+              "valuesPrefix": ""
+            }
+          ],
+          "published_responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ]
+        },
+        "type": "rule",
+        "width": 404,
+        "height": 201,
+        "dragging": false,
+        "position": {
+          "x": 500,
+          "y": 100
+        },
+        "selected": false,
+        "positionAbsolute": {
+          "x": 500,
+          "y": 100
+        }
+      },
+      {
+        "id": "I0C19IQUqA3dpYDK2AmXu",
+        "data": {
+          "id": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc",
+          "tag": null,
+          "form": null,
+          "name": "C Rule",
+          "slug": "H3ez3qrXV7",
+          "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+          "groups": {},
+          "history": [
+            {
+              "id": "hNqyoSAtE8",
+              "diff": {
+                "published_groups": [
+                  null,
+                  {}
+                ],
+                "published_conditions": [
+                  null,
+                  [
+                    {
+                      "request": {
+                        "charlie": {
+                          "op": "is true",
+                          "args": []
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "charlie is true"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ]
+                ],
+                "published_requestSchema": [
+                  null,
+                  [
+                    {
+                      "key": "charlie",
+                      "name": "Charlie",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ],
+                "published_responseSchema": [
+                  null,
+                  [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                ]
+              },
+              "email": "support@rulebricks.com",
+              "score": null,
+              "action": "publish",
+              "timestamp": "2025-07-15T00:31:07.358Z"
+            }
+          ],
+          "version": "1",
+          "releases": {},
+          "runCount": 0,
+          "settings": {},
+          "createdAt": "2025-07-15T00:29:47.065+00:00",
+          "flowError": false,
+          "flowState": {
+            "charlie": true
+          },
+          "published": true,
+          "testSuite": [],
+          "updatedAt": "2025-07-15T00:31:01.004+00:00",
+          "updatedBy": "support@rulebricks.com",
+          "conditions": [
+            {
+              "request": {
+                "charlie": {
+                  "op": "is true",
+                  "args": []
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "charlie is true"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "flowResult": {
+            "error": false,
+            "status": "charlie is true"
+          },
+          "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+          "publishedAt": "2025-07-15T00:31:07.358+00:00",
+          "testRequest": {},
+          "accessGroups": [],
+          "requestCount": 0,
+          "no_conditions": 1,
+          "requestSchema": [
+            {
+              "key": "charlie",
+              "name": "Charlie",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleRequest": {
+            "charlie": false
+          },
+          "responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "sampleResponse": {
+            "error": false,
+            "status": "success"
+          },
+          "published_groups": {},
+          "published_conditions": [
+            {
+              "request": {
+                "charlie": {
+                  "op": "is true",
+                  "args": []
+                }
+              },
+              "response": {
+                "error": {
+                  "value": false
+                },
+                "status": {
+                  "value": "charlie is true"
+                }
+              }
+            },
+            {
+              "request": {},
+              "response": {
+                "error": {
+                  "value": true
+                },
+                "status": {
+                  "value": "failure"
+                }
+              },
+              "settings": {
+                "enabled": true,
+                "groupId": null,
+                "priority": 0,
+                "schedule": []
+              }
+            }
+          ],
+          "published_requestSchema": [
+            {
+              "key": "charlie",
+              "name": "Charlie",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ],
+          "published_responseSchema": [
+            {
+              "key": "status",
+              "name": "Status",
+              "show": true,
+              "type": "string",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": "success",
+              "valuesPrefix": ""
+            },
+            {
+              "key": "error",
+              "name": "Error",
+              "show": true,
+              "type": "boolean",
+              "valuesOnly": false,
+              "description": "",
+              "defaultValue": false,
+              "valuesPrefix": ""
+            }
+          ]
+        },
+        "type": "rule",
+        "width": 400,
+        "height": 201,
+        "dragging": false,
+        "position": {
+          "x": 500,
+          "y": 350
+        },
+        "selected": false,
+        "positionAbsolute": {
+          "x": 500,
+          "y": 350
+        }
+      },
+      {
+        "id": "NUiiS7cPJXo5jz8AC-ZET",
+        "data": {
+          "key": "beta_result",
+          "flowState": {
+            "error": false,
+            "status": "beta isnt empty",
+            "request_req_id": ""
+          }
+        },
+        "type": "result",
+        "width": 400,
+        "height": 402,
+        "position": {
+          "x": 950,
+          "y": -50
+        },
+        "positionAbsolute": {
+          "x": 950,
+          "y": -50
+        }
+      },
+      {
+        "id": "mtQ_wtgT4l0nkZELLbRBC",
+        "data": {
+          "key": "charlie_result",
+          "flowState": {
+            "error": false,
+            "status": "charlie is true",
+            "request_req_id": ""
+          }
+        },
+        "type": "result",
+        "width": 400,
+        "height": 402,
+        "dragging": false,
+        "position": {
+          "x": 950,
+          "y": 400
+        },
+        "selected": false,
+        "positionAbsolute": {
+          "x": 950,
+          "y": 400
+        }
+      },
+      {
+        "id": "q9HFK22f1e2DKuStxFmx_",
+        "data": {
+          "key": "alpha_result",
+          "flowState": {
+            "error": true,
+            "status": "failure",
+            "request_req_id": ""
+          }
+        },
+        "type": "result",
+        "width": 400,
+        "height": 402,
+        "dragging": false,
+        "position": {
+          "x": 950,
+          "y": -500
+        },
+        "selected": false,
+        "positionAbsolute": {
+          "x": 950,
+          "y": -500
+        }
+      }
+    ]
+  },
+  "history": [
+    {
+      "id": "jMLxayUYD_",
+      "diff": {
+        "published_graph": [
+          null,
+          {
+            "edges": [
+              {
+                "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_alpha-hyoPiX-JSjVadcLw0KBna924384f1-435d-4e95-b3a9-bc7efdb11593_request-alpha",
+                "type": "default",
+                "source": "CLVIGLKZSs",
+                "target": "hyoPiX-JSjVadcLw0KBna",
+                "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_alpha",
+                "targetHandle": "924384f1-435d-4e95-b3a9-bc7efdb11593_request-alpha"
+              },
+              {
+                "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_beta-k7sfhRfOYZQVLOw04ZygNeff9a229-eeea-45d0-b7d1-948e47faa960_request-beta",
+                "type": "default",
+                "source": "CLVIGLKZSs",
+                "target": "k7sfhRfOYZQVLOw04ZygN",
+                "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_beta",
+                "targetHandle": "eff9a229-eeea-45d0-b7d1-948e47faa960_request-beta"
+              },
+              {
+                "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_charlie-I0C19IQUqA3dpYDK2AmXub75da5ea-39c7-44bb-afc1-1e806b80e3cc_request-charlie",
+                "type": "default",
+                "source": "CLVIGLKZSs",
+                "target": "I0C19IQUqA3dpYDK2AmXu",
+                "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_charlie",
+                "targetHandle": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc_request-charlie"
+              },
+              {
+                "id": "reactflow__edge-hyoPiX-JSjVadcLw0KBna924384f1-435d-4e95-b3a9-bc7efdb11593_response-status-q9HFK22f1e2DKuStxFmx_q9HFK22f1e2DKuStxFmx__result",
+                "type": "default",
+                "source": "hyoPiX-JSjVadcLw0KBna",
+                "target": "q9HFK22f1e2DKuStxFmx_",
+                "sourceHandle": "924384f1-435d-4e95-b3a9-bc7efdb11593_response-status",
+                "targetHandle": "q9HFK22f1e2DKuStxFmx__result"
+              },
+              {
+                "id": "reactflow__edge-hyoPiX-JSjVadcLw0KBna924384f1-435d-4e95-b3a9-bc7efdb11593_response-error-q9HFK22f1e2DKuStxFmx_q9HFK22f1e2DKuStxFmx__result",
+                "type": "default",
+                "source": "hyoPiX-JSjVadcLw0KBna",
+                "target": "q9HFK22f1e2DKuStxFmx_",
+                "sourceHandle": "924384f1-435d-4e95-b3a9-bc7efdb11593_response-error",
+                "targetHandle": "q9HFK22f1e2DKuStxFmx__result"
+              },
+              {
+                "id": "reactflow__edge-k7sfhRfOYZQVLOw04ZygNeff9a229-eeea-45d0-b7d1-948e47faa960_response-status-NUiiS7cPJXo5jz8AC-ZETNUiiS7cPJXo5jz8AC-ZET_result",
+                "type": "default",
+                "source": "k7sfhRfOYZQVLOw04ZygN",
+                "target": "NUiiS7cPJXo5jz8AC-ZET",
+                "sourceHandle": "eff9a229-eeea-45d0-b7d1-948e47faa960_response-status",
+                "targetHandle": "NUiiS7cPJXo5jz8AC-ZET_result"
+              },
+              {
+                "id": "reactflow__edge-k7sfhRfOYZQVLOw04ZygNeff9a229-eeea-45d0-b7d1-948e47faa960_response-error-NUiiS7cPJXo5jz8AC-ZETNUiiS7cPJXo5jz8AC-ZET_result",
+                "type": "default",
+                "source": "k7sfhRfOYZQVLOw04ZygN",
+                "target": "NUiiS7cPJXo5jz8AC-ZET",
+                "sourceHandle": "eff9a229-eeea-45d0-b7d1-948e47faa960_response-error",
+                "targetHandle": "NUiiS7cPJXo5jz8AC-ZET_result"
+              },
+              {
+                "id": "reactflow__edge-I0C19IQUqA3dpYDK2AmXub75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-status-mtQ_wtgT4l0nkZELLbRBCmtQ_wtgT4l0nkZELLbRBC_result",
+                "type": "default",
+                "source": "I0C19IQUqA3dpYDK2AmXu",
+                "target": "mtQ_wtgT4l0nkZELLbRBC",
+                "sourceHandle": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-status",
+                "targetHandle": "mtQ_wtgT4l0nkZELLbRBC_result"
+              },
+              {
+                "id": "reactflow__edge-I0C19IQUqA3dpYDK2AmXub75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-error-mtQ_wtgT4l0nkZELLbRBCmtQ_wtgT4l0nkZELLbRBC_result",
+                "type": "default",
+                "source": "I0C19IQUqA3dpYDK2AmXu",
+                "target": "mtQ_wtgT4l0nkZELLbRBC",
+                "sourceHandle": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc_response-error",
+                "targetHandle": "mtQ_wtgT4l0nkZELLbRBC_result"
+              },
+              {
+                "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id-q9HFK22f1e2DKuStxFmx_q9HFK22f1e2DKuStxFmx__result",
+                "type": "default",
+                "source": "CLVIGLKZSs",
+                "target": "q9HFK22f1e2DKuStxFmx_",
+                "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id",
+                "targetHandle": "q9HFK22f1e2DKuStxFmx__result"
+              },
+              {
+                "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id-NUiiS7cPJXo5jz8AC-ZETNUiiS7cPJXo5jz8AC-ZET_result",
+                "type": "default",
+                "source": "CLVIGLKZSs",
+                "target": "NUiiS7cPJXo5jz8AC-ZET",
+                "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id",
+                "targetHandle": "NUiiS7cPJXo5jz8AC-ZET_result"
+              },
+              {
+                "id": "reactflow__edge-CLVIGLKZSsb1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id-mtQ_wtgT4l0nkZELLbRBCmtQ_wtgT4l0nkZELLbRBC_result",
+                "type": "default",
+                "source": "CLVIGLKZSs",
+                "target": "mtQ_wtgT4l0nkZELLbRBC",
+                "sourceHandle": "b1e5c2bf-296b-472b-8204-a52c361b3fb9_response-request_req_id",
+                "targetHandle": "mtQ_wtgT4l0nkZELLbRBC_result"
+              }
+            ],
+            "nodes": [
+              {
+                "id": "CLVIGLKZSs",
+                "data": {
+                  "id": "b1e5c2bf-296b-472b-8204-a52c361b3fb9",
+                  "tag": null,
+                  "form": null,
+                  "name": "Blank Rule",
+                  "slug": "NXK-X9hXot",
+                  "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+                  "groups": {},
+                  "history": [
+                    {
+                      "id": "Hra9RXa8jQ",
+                      "diff": {
+                        "published_conditions": [
+                          null,
+                          [
+                            {
+                              "request": {},
+                              "response": {
+                                "error": {
+                                  "value": false
+                                },
+                                "status": {
+                                  "value": "success"
+                                }
+                              }
+                            }
+                          ]
+                        ],
+                        "published_requestSchema": [
+                          null,
+                          [
+                            {
+                              "key": "req_id",
+                              "name": "Req Id",
+                              "show": true,
+                              "type": "string",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": "",
+                              "valuesPrefix": ""
+                            },
+                            {
+                              "key": "alpha",
+                              "name": "Alpha",
+                              "show": true,
+                              "type": "number",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": 0,
+                              "valuesPrefix": ""
+                            },
+                            {
+                              "key": "beta",
+                              "name": "Beta",
+                              "show": true,
+                              "type": "string",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": "a",
+                              "valuesPrefix": ""
+                            },
+                            {
+                              "key": "charlie",
+                              "name": "Charlie",
+                              "show": true,
+                              "type": "boolean",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": true,
+                              "valuesPrefix": ""
+                            }
+                          ]
+                        ],
+                        "published_responseSchema": [
+                          null,
+                          [
+                            {
+                              "key": "status",
+                              "name": "Status",
+                              "show": true,
+                              "type": "string",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": "success",
+                              "valuesPrefix": ""
+                            },
+                            {
+                              "key": "error",
+                              "name": "Error",
+                              "show": true,
+                              "type": "boolean",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": false,
+                              "valuesPrefix": ""
+                            }
+                          ]
+                        ]
+                      },
+                      "email": "support@rulebricks.com",
+                      "score": null,
+                      "action": "publish",
+                      "timestamp": "2025-07-15T00:28:39.623Z"
+                    }
+                  ],
+                  "version": "1",
+                  "releases": {},
+                  "runCount": 0,
+                  "settings": {},
+                  "createdAt": "2025-07-15T00:28:23.029+00:00",
+                  "flowError": false,
+                  "flowState": {
+                    "beta": "a",
+                    "alpha": 0,
+                    "req_id": "",
+                    "charlie": true
+                  },
+                  "published": true,
+                  "testSuite": [],
+                  "updatedAt": "2025-07-15T00:28:35.941+00:00",
+                  "updatedBy": "support@rulebricks.com",
+                  "conditions": [
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "success"
+                        }
+                      }
+                    }
+                  ],
+                  "flowResult": {
+                    "error": false,
+                    "status": "success",
+                    "request_beta": "a",
+                    "request_alpha": 0,
+                    "request_req_id": "",
+                    "request_charlie": true
+                  },
+                  "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+                  "publishedAt": "2025-07-15T00:28:39.623+00:00",
+                  "testRequest": {},
+                  "accessGroups": [],
+                  "requestCount": 0,
+                  "no_conditions": 1,
+                  "requestSchema": [
+                    {
+                      "key": "req_id",
+                      "name": "Req Id",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "alpha",
+                      "name": "Alpha",
+                      "show": true,
+                      "type": "number",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": 0,
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "beta",
+                      "name": "Beta",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "a",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "charlie",
+                      "name": "Charlie",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": true,
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "sampleRequest": {
+                    "beta": "a",
+                    "alpha": 0,
+                    "req_id": "",
+                    "charlie": true
+                  },
+                  "responseSchema": [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "sampleResponse": {
+                    "error": false,
+                    "status": "success"
+                  },
+                  "published_groups": {},
+                  "published_conditions": [
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "success"
+                        }
+                      }
+                    }
+                  ],
+                  "published_requestSchema": [
+                    {
+                      "key": "req_id",
+                      "name": "Req Id",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "alpha",
+                      "name": "Alpha",
+                      "show": true,
+                      "type": "number",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": 0,
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "beta",
+                      "name": "Beta",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "a",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "charlie",
+                      "name": "Charlie",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": true,
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "published_responseSchema": [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                },
+                "type": "origin",
+                "width": 404,
+                "height": 491,
+                "position": {
+                  "x": 0,
+                  "y": 0
+                },
+                "deletable": false,
+                "positionAbsolute": {
+                  "x": 0,
+                  "y": 0
+                }
+              },
+              {
+                "id": "hyoPiX-JSjVadcLw0KBna",
+                "data": {
+                  "id": "924384f1-435d-4e95-b3a9-bc7efdb11593",
+                  "tag": null,
+                  "form": null,
+                  "name": "A Rule",
+                  "slug": "YC6pwTCobc",
+                  "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+                  "groups": {},
+                  "history": [
+                    {
+                      "id": "XOu8dPlXTj",
+                      "diff": {
+                        "published_conditions": [
+                          null,
+                          [
+                            {
+                              "request": {
+                                "alpha": {
+                                  "op": "greater than",
+                                  "args": [
+                                    10
+                                  ]
+                                }
+                              },
+                              "response": {
+                                "error": {
+                                  "value": false
+                                },
+                                "status": {
+                                  "value": "alpha is greater than 10"
+                                }
+                              }
+                            },
+                            {
+                              "request": {},
+                              "response": {
+                                "error": {
+                                  "value": true
+                                },
+                                "status": {
+                                  "value": "failure"
+                                }
+                              },
+                              "settings": {
+                                "enabled": true,
+                                "groupId": null,
+                                "priority": 0,
+                                "schedule": []
+                              }
+                            }
+                          ]
+                        ],
+                        "published_requestSchema": [
+                          null,
+                          [
+                            {
+                              "key": "alpha",
+                              "name": "Alpha",
+                              "show": true,
+                              "type": "number",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": 0,
+                              "valuesPrefix": ""
+                            }
+                          ]
+                        ],
+                        "published_responseSchema": [
+                          null,
+                          [
+                            {
+                              "key": "status",
+                              "name": "Status",
+                              "show": true,
+                              "type": "string",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": "success",
+                              "valuesPrefix": ""
+                            },
+                            {
+                              "key": "error",
+                              "name": "Error",
+                              "show": true,
+                              "type": "boolean",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": false,
+                              "valuesPrefix": ""
+                            }
+                          ]
+                        ]
+                      },
+                      "email": "support@rulebricks.com",
+                      "score": null,
+                      "action": "publish",
+                      "timestamp": "2025-07-15T00:29:35.029Z"
+                    }
+                  ],
+                  "version": "1",
+                  "releases": {},
+                  "runCount": 0,
+                  "settings": {},
+                  "createdAt": "2025-07-15T00:28:58.297+00:00",
+                  "flowError": false,
+                  "flowState": {
+                    "alpha": 0
+                  },
+                  "published": true,
+                  "testSuite": [],
+                  "updatedAt": "2025-07-15T00:29:40.115+00:00",
+                  "updatedBy": "support@rulebricks.com",
+                  "conditions": [
+                    {
+                      "request": {
+                        "alpha": {
+                          "op": "greater than",
+                          "args": [
+                            10
+                          ]
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "alpha is greater than 10"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ],
+                  "flowResult": {
+                    "error": true,
+                    "status": "failure"
+                  },
+                  "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+                  "publishedAt": "2025-07-15T00:29:35.029+00:00",
+                  "testRequest": {},
+                  "accessGroups": [],
+                  "requestCount": 0,
+                  "no_conditions": 1,
+                  "requestSchema": [
+                    {
+                      "key": "alpha",
+                      "name": "Alpha",
+                      "show": true,
+                      "type": "number",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": 0,
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "sampleRequest": {
+                    "alpha": 0
+                  },
+                  "responseSchema": [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "sampleResponse": {
+                    "error": false,
+                    "status": "success"
+                  },
+                  "published_groups": {},
+                  "published_conditions": [
+                    {
+                      "request": {
+                        "alpha": {
+                          "op": "greater than",
+                          "args": [
+                            10
+                          ]
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "alpha is greater than 10"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ],
+                  "published_requestSchema": [
+                    {
+                      "key": "alpha",
+                      "name": "Alpha",
+                      "show": true,
+                      "type": "number",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": 0,
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "published_responseSchema": [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                },
+                "type": "rule",
+                "width": 404,
+                "height": 201,
+                "dragging": false,
+                "position": {
+                  "x": 500,
+                  "y": -150
+                },
+                "selected": false,
+                "positionAbsolute": {
+                  "x": 500,
+                  "y": -150
+                }
+              },
+              {
+                "id": "k7sfhRfOYZQVLOw04ZygN",
+                "data": {
+                  "id": "eff9a229-eeea-45d0-b7d1-948e47faa960",
+                  "tag": null,
+                  "form": null,
+                  "name": "B Rule",
+                  "slug": "W1dhlDLxg9",
+                  "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+                  "groups": {},
+                  "history": [
+                    {
+                      "id": "IRvdksm5Mb",
+                      "diff": {
+                        "published_groups": [
+                          null,
+                          {}
+                        ],
+                        "published_conditions": [
+                          null,
+                          [
+                            {
+                              "request": {
+                                "beta": {
+                                  "op": "is not empty",
+                                  "args": []
+                                }
+                              },
+                              "response": {
+                                "error": {
+                                  "value": false
+                                },
+                                "status": {
+                                  "value": "beta isnt empty"
+                                }
+                              }
+                            },
+                            {
+                              "request": {},
+                              "response": {
+                                "error": {
+                                  "value": true
+                                },
+                                "status": {
+                                  "value": "failure"
+                                }
+                              },
+                              "settings": {
+                                "enabled": true,
+                                "groupId": null,
+                                "priority": 0,
+                                "schedule": []
+                              }
+                            }
+                          ]
+                        ],
+                        "published_requestSchema": [
+                          null,
+                          [
+                            {
+                              "key": "beta",
+                              "name": "Beta",
+                              "show": true,
+                              "type": "string",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": "",
+                              "valuesPrefix": ""
+                            }
+                          ]
+                        ],
+                        "published_responseSchema": [
+                          null,
+                          [
+                            {
+                              "key": "status",
+                              "name": "Status",
+                              "show": true,
+                              "type": "string",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": "success",
+                              "valuesPrefix": ""
+                            },
+                            {
+                              "key": "error",
+                              "name": "Error",
+                              "show": true,
+                              "type": "boolean",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": false,
+                              "valuesPrefix": ""
+                            }
+                          ]
+                        ]
+                      },
+                      "email": "support@rulebricks.com",
+                      "score": null,
+                      "action": "publish",
+                      "timestamp": "2025-07-15T00:30:23.611Z"
+                    }
+                  ],
+                  "version": "1",
+                  "releases": {},
+                  "runCount": 0,
+                  "settings": {},
+                  "createdAt": "2025-07-15T00:29:45.344+00:00",
+                  "flowError": false,
+                  "flowState": {
+                    "beta": "a"
+                  },
+                  "published": true,
+                  "testSuite": [],
+                  "updatedAt": "2025-07-15T00:30:20.325+00:00",
+                  "updatedBy": "support@rulebricks.com",
+                  "conditions": [
+                    {
+                      "request": {
+                        "beta": {
+                          "op": "is not empty",
+                          "args": []
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "beta isnt empty"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ],
+                  "flowResult": {
+                    "error": false,
+                    "status": "beta isnt empty"
+                  },
+                  "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+                  "publishedAt": "2025-07-15T00:30:23.611+00:00",
+                  "testRequest": {},
+                  "accessGroups": [],
+                  "requestCount": 0,
+                  "no_conditions": 1,
+                  "requestSchema": [
+                    {
+                      "key": "beta",
+                      "name": "Beta",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "",
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "sampleRequest": {
+                    "beta": ""
+                  },
+                  "responseSchema": [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "sampleResponse": {
+                    "error": false,
+                    "status": "success"
+                  },
+                  "published_groups": {},
+                  "published_conditions": [
+                    {
+                      "request": {
+                        "beta": {
+                          "op": "is not empty",
+                          "args": []
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "beta isnt empty"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ],
+                  "published_requestSchema": [
+                    {
+                      "key": "beta",
+                      "name": "Beta",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "",
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "published_responseSchema": [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                },
+                "type": "rule",
+                "width": 404,
+                "height": 201,
+                "dragging": false,
+                "position": {
+                  "x": 500,
+                  "y": 100
+                },
+                "selected": false,
+                "positionAbsolute": {
+                  "x": 500,
+                  "y": 100
+                }
+              },
+              {
+                "id": "I0C19IQUqA3dpYDK2AmXu",
+                "data": {
+                  "id": "b75da5ea-39c7-44bb-afc1-1e806b80e3cc",
+                  "tag": null,
+                  "form": null,
+                  "name": "C Rule",
+                  "slug": "H3ez3qrXV7",
+                  "owner": "e9245fe2-4956-4e7c-836e-5d03857d41e9",
+                  "groups": {},
+                  "history": [
+                    {
+                      "id": "hNqyoSAtE8",
+                      "diff": {
+                        "published_groups": [
+                          null,
+                          {}
+                        ],
+                        "published_conditions": [
+                          null,
+                          [
+                            {
+                              "request": {
+                                "charlie": {
+                                  "op": "is true",
+                                  "args": []
+                                }
+                              },
+                              "response": {
+                                "error": {
+                                  "value": false
+                                },
+                                "status": {
+                                  "value": "charlie is true"
+                                }
+                              }
+                            },
+                            {
+                              "request": {},
+                              "response": {
+                                "error": {
+                                  "value": true
+                                },
+                                "status": {
+                                  "value": "failure"
+                                }
+                              },
+                              "settings": {
+                                "enabled": true,
+                                "groupId": null,
+                                "priority": 0,
+                                "schedule": []
+                              }
+                            }
+                          ]
+                        ],
+                        "published_requestSchema": [
+                          null,
+                          [
+                            {
+                              "key": "charlie",
+                              "name": "Charlie",
+                              "show": true,
+                              "type": "boolean",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": false,
+                              "valuesPrefix": ""
+                            }
+                          ]
+                        ],
+                        "published_responseSchema": [
+                          null,
+                          [
+                            {
+                              "key": "status",
+                              "name": "Status",
+                              "show": true,
+                              "type": "string",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": "success",
+                              "valuesPrefix": ""
+                            },
+                            {
+                              "key": "error",
+                              "name": "Error",
+                              "show": true,
+                              "type": "boolean",
+                              "valuesOnly": false,
+                              "description": "",
+                              "defaultValue": false,
+                              "valuesPrefix": ""
+                            }
+                          ]
+                        ]
+                      },
+                      "email": "support@rulebricks.com",
+                      "score": null,
+                      "action": "publish",
+                      "timestamp": "2025-07-15T00:31:07.358Z"
+                    }
+                  ],
+                  "version": "1",
+                  "releases": {},
+                  "runCount": 0,
+                  "settings": {},
+                  "createdAt": "2025-07-15T00:29:47.065+00:00",
+                  "flowError": false,
+                  "flowState": {
+                    "charlie": true
+                  },
+                  "published": true,
+                  "testSuite": [],
+                  "updatedAt": "2025-07-15T00:31:01.004+00:00",
+                  "updatedBy": "support@rulebricks.com",
+                  "conditions": [
+                    {
+                      "request": {
+                        "charlie": {
+                          "op": "is true",
+                          "args": []
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "charlie is true"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ],
+                  "flowResult": {
+                    "error": false,
+                    "status": "charlie is true"
+                  },
+                  "description": "Start with a mostly blank rule and configure your own rule schema as needed.",
+                  "publishedAt": "2025-07-15T00:31:07.358+00:00",
+                  "testRequest": {},
+                  "accessGroups": [],
+                  "requestCount": 0,
+                  "no_conditions": 1,
+                  "requestSchema": [
+                    {
+                      "key": "charlie",
+                      "name": "Charlie",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "sampleRequest": {
+                    "charlie": false
+                  },
+                  "responseSchema": [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "sampleResponse": {
+                    "error": false,
+                    "status": "success"
+                  },
+                  "published_groups": {},
+                  "published_conditions": [
+                    {
+                      "request": {
+                        "charlie": {
+                          "op": "is true",
+                          "args": []
+                        }
+                      },
+                      "response": {
+                        "error": {
+                          "value": false
+                        },
+                        "status": {
+                          "value": "charlie is true"
+                        }
+                      }
+                    },
+                    {
+                      "request": {},
+                      "response": {
+                        "error": {
+                          "value": true
+                        },
+                        "status": {
+                          "value": "failure"
+                        }
+                      },
+                      "settings": {
+                        "enabled": true,
+                        "groupId": null,
+                        "priority": 0,
+                        "schedule": []
+                      }
+                    }
+                  ],
+                  "published_requestSchema": [
+                    {
+                      "key": "charlie",
+                      "name": "Charlie",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ],
+                  "published_responseSchema": [
+                    {
+                      "key": "status",
+                      "name": "Status",
+                      "show": true,
+                      "type": "string",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": "success",
+                      "valuesPrefix": ""
+                    },
+                    {
+                      "key": "error",
+                      "name": "Error",
+                      "show": true,
+                      "type": "boolean",
+                      "valuesOnly": false,
+                      "description": "",
+                      "defaultValue": false,
+                      "valuesPrefix": ""
+                    }
+                  ]
+                },
+                "type": "rule",
+                "width": 400,
+                "height": 201,
+                "dragging": false,
+                "position": {
+                  "x": 500,
+                  "y": 350
+                },
+                "selected": false,
+                "positionAbsolute": {
+                  "x": 500,
+                  "y": 350
+                }
+              },
+              {
+                "id": "NUiiS7cPJXo5jz8AC-ZET",
+                "data": {
+                  "key": "beta_result",
+                  "flowState": {
+                    "error": false,
+                    "status": "beta isnt empty",
+                    "request_req_id": ""
+                  }
+                },
+                "type": "result",
+                "width": 400,
+                "height": 402,
+                "position": {
+                  "x": 950,
+                  "y": -50
+                },
+                "positionAbsolute": {
+                  "x": 950,
+                  "y": -50
+                }
+              },
+              {
+                "id": "mtQ_wtgT4l0nkZELLbRBC",
+                "data": {
+                  "key": "charlie_result",
+                  "flowState": {
+                    "error": false,
+                    "status": "charlie is true",
+                    "request_req_id": ""
+                  }
+                },
+                "type": "result",
+                "width": 400,
+                "height": 402,
+                "dragging": false,
+                "position": {
+                  "x": 950,
+                  "y": 400
+                },
+                "selected": false,
+                "positionAbsolute": {
+                  "x": 950,
+                  "y": 400
+                }
+              },
+              {
+                "id": "q9HFK22f1e2DKuStxFmx_",
+                "data": {
+                  "key": "alpha_result",
+                  "flowState": {
+                    "error": true,
+                    "status": "failure",
+                    "request_req_id": ""
+                  }
+                },
+                "type": "result",
+                "width": 400,
+                "height": 402,
+                "dragging": false,
+                "position": {
+                  "x": 950,
+                  "y": -500
+                },
+                "selected": false,
+                "positionAbsolute": {
+                  "x": 950,
+                  "y": -500
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "email": "support@rulebricks.com",
+      "score": null,
+      "action": "publish",
+      "timestamp": "2025-07-15T00:32:26.932Z"
+    }
+  ],
+  "testSuite": [],
+  "settings": {},
+  "accessGroups": [],
+  "tag": null,
+  "releases": {}
+}

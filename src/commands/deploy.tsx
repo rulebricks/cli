@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Box, Text, useApp, useInput } from "ink";
+import { platform } from "os";
 import {
   BorderBox,
   Spinner,
@@ -674,6 +675,16 @@ function DeployCommandInner({
               </Text>
             )}
           </Box>
+
+          <Box marginTop={1} flexDirection="column">
+            <Text color={colors.muted} dimColor>
+              Tip: If the URL isn't accessible yet, your local DNS may need time
+              to propagate.
+            </Text>
+            <Text color={colors.muted} dimColor>
+              Flush DNS cache: {getDnsFlushCommand()}
+            </Text>
+          </Box>
         </Box>
       </BorderBox>
     );
@@ -726,6 +737,17 @@ function DeployCommandInner({
       </Box>
     </BorderBox>
   );
+}
+
+function getDnsFlushCommand(): string {
+  switch (platform()) {
+    case "darwin":
+      return "sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder";
+    case "win32":
+      return "ipconfig /flushdns";
+    default:
+      return "sudo systemd-resolve --flush-caches";
+  }
 }
 
 function getStepLabel(step: DeployStep, useExternalDns: boolean): string {

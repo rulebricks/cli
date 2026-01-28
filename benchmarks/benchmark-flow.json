@@ -1,0 +1,26 @@
+{
+  "_readme": "This is a placeholder file. Replace this with the actual benchmark flow JSON provided by Rulebricks.",
+  "_instructions": [
+    "1. Download the benchmark flow from your Rulebricks documentation or support",
+    "2. Replace the contents of this file with the actual flow JSON",
+    "3. Import this flow into your Rulebricks instance via the dashboard",
+    "4. Note the flow ID from the URL after import",
+    "5. Use that flow ID in the API_URL when running benchmarks"
+  ],
+  "_expected_schema": {
+    "description": "The benchmark flow expects payloads with the following structure:",
+    "input": {
+      "req_id": "string - Unique request identifier for tracking",
+      "alpha": "number - Numeric value (0-100)",
+      "beta": "string - String value (can be empty)",
+      "charlie": "boolean - Boolean flag"
+    },
+    "example": {
+      "req_id": "req_1_0_1234567890",
+      "alpha": 42,
+      "beta": "test",
+      "charlie": true
+    }
+  }
+}
+

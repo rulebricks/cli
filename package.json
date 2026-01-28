@@ -1,6 +1,6 @@
 {
   "name": "@rulebricks/cli",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "CLI for deploying and managing private Rulebricks instances",
   "type": "module",
   "bin": {
@@ -59,7 +59,8 @@
   "pkg": {
     "scripts": "dist/**/*.js",
     "assets": [
-      "terraform/**/*"
+      "terraform/**/*",
+      "benchmarks/**/*"
     ],
     "targets": [
       "node20-linux-x64",
@@ -73,6 +74,7 @@
   "files": [
     "dist",
     "terraform",
-    "templates"
+    "templates",
+    "benchmarks"
   ]
 }

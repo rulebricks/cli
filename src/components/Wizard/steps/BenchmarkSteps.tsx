@@ -378,6 +378,7 @@ export function TestModeStep({ onComplete, onBack, state }: StepProps) {
       <SelectInput
         items={items}
         onSelect={handleSelect}
+        indicatorComponent={() => null}
         itemComponent={({ isSelected, label }) => {
           const item = items.find((i) => i.label === label);
           return (
@@ -588,6 +589,7 @@ export function PresetsStep({ onComplete, onBack, state }: StepProps) {
       <SelectInput
         items={items}
         onSelect={handleSelect}
+        indicatorComponent={() => null}
         itemComponent={({ isSelected, label }) => {
           const item = items.find((i) => i.label === label);
           return (
