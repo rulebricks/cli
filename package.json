@@ -1,0 +1,78 @@
+{
+  "name": "@rulebricks/cli",
+  "version": "1.9.0",
+  "description": "CLI for deploying and managing private Rulebricks instances",
+  "type": "module",
+  "bin": {
+    "rulebricks": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "lint": "eslint src --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "rulebricks",
+    "kubernetes",
+    "helm",
+    "cli",
+    "deployment"
+  ],
+  "author": "Rulebricks",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rulebricks/cli.git"
+  },
+  "homepage": "https://github.com/rulebricks/cli#readme",
+  "bugs": {
+    "url": "https://github.com/rulebricks/cli/issues"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "execa": "^8.0.1",
+    "figures": "^6.1.0",
+    "ink": "^5.0.1",
+    "ink-select-input": "^6.0.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "node-fetch": "^3.3.2",
+    "ora": "^8.0.1",
+    "react": "^18.3.1",
+    "yaml": "^2.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/react": "^18.3.3",
+    "typescript": "^5.5.3"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "pkg": {
+    "scripts": "dist/**/*.js",
+    "assets": [
+      "terraform/**/*"
+    ],
+    "targets": [
+      "node20-linux-x64",
+      "node20-linux-arm64",
+      "node20-macos-x64",
+      "node20-macos-arm64",
+      "node20-win-x64"
+    ],
+    "outputPath": "release"
+  },
+  "files": [
+    "dist",
+    "terraform",
+    "email-templates"
+  ]
+}

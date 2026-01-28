@@ -1,229 +1,195 @@
-#!/bin/sh
-# Rulebricks CLI Installation Script
-# This script installs the latest version of the Rulebricks CLI
+#!/bin/bash
+# Rulebricks CLI Install Script
+# https://github.com/rulebricks/cli
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/rulebricks/cli/main/install.sh | bash
+#   
+# Options:
+#   VERSION=v2.0.0 curl -fsSL ... | bash   # Install specific version
+#   INSTALL_DIR=/custom/path curl -fsSL ... | bash
 
 set -e
 
-# Default installation directory
-INSTALL_DIR=${INSTALL_DIR:-"/usr/local/bin"}
+# Configuration
+REPO="rulebricks/cli"
 BINARY_NAME="rulebricks"
-GITHUB_REPO="rulebricks/cli"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
-# Colors for output
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Print colored output
-print_error() {
-    printf "${RED}Error: %s${NC}\n" "$1" >&2
-}
-
-print_success() {
-    printf "${GREEN}%s${NC}\n" "$1"
-}
-
-print_info() {
-    printf "${YELLOW}%s${NC}\n" "$1"
-}
+# Logging functions
+info() { echo -e "${BLUE}ℹ${NC} $1"; }
+success() { echo -e "${GREEN}✓${NC} $1"; }
+warn() { echo -e "${YELLOW}⚠${NC} $1"; }
+error() { echo -e "${RED}✗${NC} $1"; exit 1; }
 
 # Detect OS and architecture
 detect_platform() {
-    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-    ARCH=$(uname -m)
+    OS="$(uname -s)"
+    ARCH="$(uname -m)"
 
-    case $OS in
-        linux*)
-            PLATFORM="linux"
-            ;;
-        darwin*)
-            PLATFORM="darwin"
-            ;;
-        msys*|mingw*|cygwin*)
-            PLATFORM="windows"
-            ;;
-        *)
-            print_error "Unsupported operating system: $OS"
-            exit 1
-            ;;
+    case "$OS" in
+        Linux*)  OS="Linux" ;;
+        Darwin*) OS="Darwin" ;;
+        MINGW*|MSYS*|CYGWIN*) OS="Windows" ;;
+        *) error "Unsupported operating system: $OS" ;;
     esac
 
-    case $ARCH in
-        x86_64|amd64)
-            ARCH="x86_64"
-            ;;
-        aarch64|arm64)
-            ARCH="arm64"
-            ;;
-        *)
-            print_error "Unsupported architecture: $ARCH"
-            exit 1
-            ;;
+    case "$ARCH" in
+        x86_64|amd64) ARCH="x86_64" ;;
+        arm64|aarch64) ARCH="arm64" ;;
+        *) error "Unsupported architecture: $ARCH" ;;
     esac
 
-    echo "${PLATFORM}_${ARCH}"
+    # Windows doesn't support arm64 binaries
+    if [ "$OS" = "Windows" ] && [ "$ARCH" = "arm64" ]; then
+        error "Windows ARM64 is not supported. Please use WSL or the npm package."
+    fi
 }
 
-# Get the latest release version from GitHub
+# Get latest release version
 get_latest_version() {
-    if command -v curl >/dev/null 2>&1; then
-        VERSION=$(curl -s "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    elif command -v wget >/dev/null 2>&1; then
-        VERSION=$(wget -qO- "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    else
-        print_error "Neither curl nor wget found. Please install one of them."
-        exit 1
+    if [ -n "$VERSION" ]; then
+        echo "$VERSION"
+        return
     fi
 
-    if [ -z "$VERSION" ]; then
-        print_error "Failed to get latest version"
-        exit 1
+    LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    
+    if [ -z "$LATEST" ]; then
+        error "Could not determine latest version. Please specify VERSION explicitly."
     fi
-
-    echo "$VERSION"
+    
+    echo "$LATEST"
 }
 
-# Download the binary
-download_binary() {
-    PLATFORM=$1
-    VERSION=$2
+# Download and install
+install() {
+    detect_platform
+    VERSION=$(get_latest_version)
+
+    echo ""
+    echo -e "${MAGENTA}╭─────────────────────────────────────╮${NC}"
+    echo -e "${MAGENTA}│${NC}       ${CYAN}Rulebricks CLI Installer${NC}       ${MAGENTA}│${NC}"
+    echo -e "${MAGENTA}╰─────────────────────────────────────╯${NC}"
+    echo ""
+
+    info "Detected platform: ${OS} ${ARCH}"
+    info "Installing version: ${VERSION}"
 
     # Construct download URL
-    FILENAME="${BINARY_NAME}_${VERSION#v}_${PLATFORM}"
-    if [ "$PLATFORM" = "windows_x86_64" ]; then
-        FILENAME="${FILENAME}.zip"
+    if [ "$OS" = "Windows" ]; then
+        ARCHIVE_NAME="${BINARY_NAME}_${VERSION}_${OS}_${ARCH}.zip"
     else
-        FILENAME="${FILENAME}.tar.gz"
+        ARCHIVE_NAME="${BINARY_NAME}_${VERSION}_${OS}_${ARCH}.tar.gz"
     fi
+    
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE_NAME}"
 
-    DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${FILENAME}"
-
-    print_info "Downloading ${BINARY_NAME} ${VERSION} for ${PLATFORM}..."
-
-    # Create temporary directory
+    # Create temp directory
     TMP_DIR=$(mktemp -d)
     trap "rm -rf $TMP_DIR" EXIT
 
-    # Download the archive
-    if command -v curl >/dev/null 2>&1; then
-        curl -L -o "$TMP_DIR/$FILENAME" "$DOWNLOAD_URL" || {
-            print_error "Failed to download ${BINARY_NAME}"
-            exit 1
-        }
-    else
-        wget -O "$TMP_DIR/$FILENAME" "$DOWNLOAD_URL" || {
-            print_error "Failed to download ${BINARY_NAME}"
-            exit 1
-        }
+    # Download
+    info "Downloading ${ARCHIVE_NAME}..."
+    if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/$ARCHIVE_NAME"; then
+        error "Failed to download from ${DOWNLOAD_URL}"
     fi
 
-    # Extract the binary
-    print_info "Extracting ${BINARY_NAME}..."
+    # Extract
+    info "Extracting..."
     cd "$TMP_DIR"
-
-    if [ "${FILENAME##*.}" = "zip" ]; then
-        unzip -q "$FILENAME" || {
-            print_error "Failed to extract archive"
-            exit 1
-        }
+    if [ "$OS" = "Windows" ]; then
+        unzip -q "$ARCHIVE_NAME"
+        BINARY_FILE=$(ls rulebricks-*.exe 2>/dev/null | head -1)
     else
-        tar -xzf "$FILENAME" || {
-            print_error "Failed to extract archive"
-            exit 1
-        }
+        tar -xzf "$ARCHIVE_NAME"
+        BINARY_FILE=$(ls rulebricks-* 2>/dev/null | head -1)
     fi
 
-    # Find the binary
-    if [ ! -f "${BINARY_NAME}" ]; then
-        print_error "Binary not found in archive"
-        exit 1
+    if [ -z "$BINARY_FILE" ]; then
+        error "Could not find binary in archive"
     fi
 
-    echo "$TMP_DIR/${BINARY_NAME}"
-}
-
-# Install the binary
-install_binary() {
-    BINARY_PATH=$1
-
+    # Install
+    info "Installing to ${INSTALL_DIR}..."
+    
     # Check if we need sudo
     if [ -w "$INSTALL_DIR" ]; then
-        SUDO=""
+        mv "$BINARY_FILE" "${INSTALL_DIR}/${BINARY_NAME}"
+        chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
     else
-        if command -v sudo >/dev/null 2>&1; then
-            print_info "Installation requires administrator privileges..."
-            SUDO="sudo"
-        else
-            print_error "Cannot write to $INSTALL_DIR and sudo is not available"
-            print_info "Please run as root or choose a different installation directory with INSTALL_DIR=<path>"
-            exit 1
-        fi
+        warn "Elevated permissions required to install to ${INSTALL_DIR}"
+        sudo mv "$BINARY_FILE" "${INSTALL_DIR}/${BINARY_NAME}"
+        sudo chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
     fi
 
-    # Create install directory if it doesn't exist
-    if [ ! -d "$INSTALL_DIR" ]; then
-        print_info "Creating installation directory $INSTALL_DIR..."
-        $SUDO mkdir -p "$INSTALL_DIR" || {
-            print_error "Failed to create installation directory"
-            exit 1
-        }
-    fi
+    echo ""
+    success "Rulebricks CLI ${VERSION} installed successfully!"
+    echo ""
+    echo -e "  Run ${CYAN}rulebricks --help${NC} to get started"
+    echo -e "  Run ${CYAN}rulebricks init${NC} to create a new deployment configuration"
+    echo ""
 
-    # Install the binary
-    print_info "Installing ${BINARY_NAME} to ${INSTALL_DIR}..."
-    $SUDO cp "$BINARY_PATH" "$INSTALL_DIR/${BINARY_NAME}" || {
-        print_error "Failed to install binary"
-        exit 1
-    }
-
-    # Make it executable
-    $SUDO chmod +x "$INSTALL_DIR/${BINARY_NAME}" || {
-        print_error "Failed to make binary executable"
-        exit 1
-    }
-}
-
-# Verify installation
-verify_installation() {
-    if command -v "${BINARY_NAME}" >/dev/null 2>&1; then
-        INSTALLED_VERSION=$("${BINARY_NAME}" version 2>/dev/null | grep -E "Version:" | awk '{print $2}') || true
-        if [ -n "$INSTALLED_VERSION" ]; then
-            print_success "${BINARY_NAME} ${INSTALLED_VERSION} has been successfully installed!"
-        else
-            print_success "${BINARY_NAME} has been successfully installed!"
-        fi
-        print_info "Run '${BINARY_NAME} --help' to get started"
-    else
-        print_error "${BINARY_NAME} was installed to ${INSTALL_DIR} but is not in your PATH"
-        print_info "Add the following to your shell configuration file:"
-        print_info "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+    # Check if install dir is in PATH
+    if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
+        warn "${INSTALL_DIR} is not in your PATH"
+        echo "  Add it to your shell profile:"
+        echo ""
+        echo "    export PATH=\"\$PATH:${INSTALL_DIR}\""
+        echo ""
     fi
 }
 
-# Main installation flow
-main() {
-    print_info "Installing Rulebricks CLI..."
+# Alternative: install via npm
+install_npm() {
+    echo ""
+    echo -e "${MAGENTA}╭─────────────────────────────────────╮${NC}"
+    echo -e "${MAGENTA}│${NC}       ${CYAN}Rulebricks CLI Installer${NC}       ${MAGENTA}│${NC}"
+    echo -e "${MAGENTA}╰─────────────────────────────────────╯${NC}"
+    echo ""
 
-    # Check for custom version
-    if [ -n "$1" ]; then
-        VERSION=$1
+    if command -v npm &> /dev/null; then
+        info "npm detected. Installing via npm..."
+        npm install -g @rulebricks/cli
+        success "Rulebricks CLI installed via npm!"
+        echo ""
+        echo -e "  Run ${CYAN}rulebricks --help${NC} to get started"
+        echo ""
     else
-        VERSION=$(get_latest_version)
+        warn "npm not found. Installing standalone binary..."
+        install
     fi
-
-    # Detect platform
-    PLATFORM=$(detect_platform)
-
-    # Download binary
-    BINARY_PATH=$(download_binary "$PLATFORM" "$VERSION")
-
-    # Install binary
-    install_binary "$BINARY_PATH"
-
-    # Verify installation
-    verify_installation
 }
 
-# Run main function
-main "$@"
+# Parse arguments
+case "${1:-}" in
+    --npm)
+        install_npm
+        ;;
+    --help|-h)
+        echo "Rulebricks CLI Installer"
+        echo ""
+        echo "Usage:"
+        echo "  curl -fsSL https://raw.githubusercontent.com/rulebricks/cli/main/install.sh | bash"
+        echo ""
+        echo "Options:"
+        echo "  --npm          Install via npm instead of standalone binary"
+        echo "  --help, -h     Show this help message"
+        echo ""
+        echo "Environment variables:"
+        echo "  VERSION        Install specific version (e.g., VERSION=v2.0.0)"
+        echo "  INSTALL_DIR    Custom installation directory (default: /usr/local/bin)"
+        ;;
+    *)
+        install
+        ;;
+esac

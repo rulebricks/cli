@@ -3,13 +3,14 @@ name: Release CLI
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -17,20 +18,205 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          go-version: '1.21'
+          node-version: "20"
+          cache: "npm"
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v5
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run type check
+        run: npm run typecheck
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          version: latest
-          args: release --clean
+          name: dist
+          path: dist/
+
+  # Create standalone binaries for users without Node.js
+  package-binaries:
+    needs: build
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: node20-linux-x64
+            output: rulebricks-linux-x64
+          - os: ubuntu-latest
+            target: node20-linux-arm64
+            output: rulebricks-linux-arm64
+          - os: macos-latest
+            target: node20-macos-x64
+            output: rulebricks-darwin-x64
+          - os: macos-latest
+            target: node20-macos-arm64
+            output: rulebricks-darwin-arm64
+          - os: windows-latest
+            target: node20-win-x64
+            output: rulebricks-win-x64.exe
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install pkg
+        run: npm install -g @yao-pkg/pkg
+
+      - name: Create binary
+        run: pkg . --target ${{ matrix.target }} --output ${{ matrix.output }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: ${{ matrix.output }}
+
+  # Publish to npm
+  publish-npm:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          cache: "npm"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Publish to npm
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ $VERSION == *"rc"* ]]; then
+            npm publish --provenance --access public --tag rc
+          else
+            npm publish --provenance --access public
+          fi
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Upload install script
-        run: gh release upload ${{ github.ref_name }} install.sh --clobber
+  # Create GitHub Release
+  github-release:
+    needs: [build, package-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries/
+          pattern: rulebricks-*
+          merge-multiple: true
+
+      - name: Create archives
+        run: |
+          cd binaries
+
+          # Linux x64
+          chmod +x rulebricks-linux-x64
+          tar -czvf rulebricks_${{ github.ref_name }}_Linux_x86_64.tar.gz rulebricks-linux-x64
+
+          # Linux arm64
+          chmod +x rulebricks-linux-arm64
+          tar -czvf rulebricks_${{ github.ref_name }}_Linux_arm64.tar.gz rulebricks-linux-arm64
+
+          # macOS x64
+          chmod +x rulebricks-darwin-x64
+          tar -czvf rulebricks_${{ github.ref_name }}_Darwin_x86_64.tar.gz rulebricks-darwin-x64
+
+          # macOS arm64
+          chmod +x rulebricks-darwin-arm64
+          tar -czvf rulebricks_${{ github.ref_name }}_Darwin_arm64.tar.gz rulebricks-darwin-arm64
+
+          # Windows x64
+          zip rulebricks_${{ github.ref_name }}_Windows_x86_64.zip rulebricks-win-x64.exe
+
+      - name: Generate checksums
+        run: |
+          cd binaries
+          sha256sum *.tar.gz *.zip > checksums.txt
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get commits since last tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"* %s (%h)" $PREV_TAG..HEAD)
+          else
+            CHANGELOG=$(git log --pretty=format:"* %s (%h)" HEAD~10..HEAD)
+          fi
+
+          # Write to file for the release body
+          echo "## What's Changed" > RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "$CHANGELOG" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "## Installation" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### npm (recommended)" >> RELEASE_NOTES.md
+          echo '```bash' >> RELEASE_NOTES.md
+          echo "npm install -g @rulebricks/cli" >> RELEASE_NOTES.md
+          echo '```' >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### Standalone binaries" >> RELEASE_NOTES.md
+          echo "Download the appropriate binary for your platform from the assets below." >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### Quick install (macOS/Linux)" >> RELEASE_NOTES.md
+          echo '```bash' >> RELEASE_NOTES.md
+          echo 'curl -fsSL https://raw.githubusercontent.com/rulebricks/cli/main/install.sh | bash' >> RELEASE_NOTES.md
+          echo '```' >> RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Rulebricks CLI ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            binaries/*.tar.gz
+            binaries/*.zip
+            binaries/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

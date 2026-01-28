@@ -1,129 +1,62 @@
-```
+![Banner](./banner.png)
 
+The Rulebricks CLI is a management utility that automates the creation and maintenance of private Rulebricks clusters, helping you deploy Rulebricks in customizable, high-throughput configurations on AWS, GCP, or Azure.
 
-           ⟋ ‾‾‾‾⟋|
-           ██████  |
-           ██████  |
-           ██████ ⟋ ‾‾‾⟋|
-         ⟋     ⟋██████  |
-        ██████   ██████  |
-        ██████   ██████⟋
-        ██████⟋
-
-         [Rulebricks CLI]
-
-```
-
-<div align="start">
-  <p>
-    <a href="#installation">Installation</a> •
-    <a href="https://rulebricks.com/docs/private-deployment/quick-start">Full Documentation</a> •
-    <a href="https://github.com/rulebricks/terraform">Terraform</a> •
-    <a href="https://github.com/rulebricks/charts">App/Vendored Charts</a> •
-    <a href="#support">Support</a>
-  </p>
-</div>
-
----
-
-The Rulebricks CLI is a powerful deployment and management tool that automates the rapid creation and maintenance of production-ready Rulebricks rule engine clusters. It handles the complete infrastructure lifecycle across multiple cloud providers, from initial setup to ongoing operations. 
-
-- **🌐 Multi-Cloud Support**: Deploy seamlessly to AWS, Azure, or Google Cloud
-- **📦 Complete Stack**: Automatically provisions Kubernetes, databases, monitoring, and all required services
-- **🔄 Zero-Downtime Upgrades**: Safely upgrade your Rulebricks deployment with rollback capabilities
-- **🔒 Enterprise Security**: Built-in TLS/SSL, secrets management, and network security
-- **📊 Observability**: Integrated Prometheus, Grafana, and centralized logging
-- **⚡ High Performance**: Auto-scaling, Kafka event streaming, and optimized resource utilization
-
-> Under the hood, this is a deployment orchestrator that sequences Helm installs with computed cross-service dependencies. Rather than vendor everything into an umbrella chart or require manual coordination, the CLI calculates configs (Kafka partition counts, service URLs, resource limits) and feeds them between installations. Stateful tracking enables idempotent deploys and supports both fresh infrastructure provisioning and app-only upgrades.
-
-## Prerequisites
-
-You must have a valid Rulebricks license key to deploy using this CLI. You will be requested for this key during project configuration.
-
-The Rulebricks CLI requires the following tools to be installed locally:
-- **docker**
-- **kubectl**
-- **helm**
-- **terraform**
-- **Cloud CLI** (one of (aws cli + eksctl), (google-cloud-sdk), (azure-cli))
-- **Supabase CLI**
-  
-> The CLI will check for any other required dependencies and provide installation instructions if any are missing.
+You can choose how much you would like the CLI to automate for you– use it to generate valid configuration values, automate infrastructure provisioning (via Terraform), software deployment (via Helm), or all of the above.
 
 ## Installation
 
-### Quick Install (Recommended)
-
-**macOS and Linux:**
-```bash
-curl -sSfL https://raw.githubusercontent.com/rulebricks/cli/main/install.sh | sh
-```
-
-**Windows:**
-Download the latest Windows binary from the [releases page](https://github.com/rulebricks/cli/releases/latest) and add it to your PATH.
-
-### Install from Source
-
-Requires Go 1.21+:
-```bash
-git clone https://github.com/rulebricks/cli.git
-cd cli
-make install
-```
-
-### Verify Installation
+Try the quick install script (macOS/Linux):
 
 ```bash
-rulebricks version
+curl -fsSL https://raw.githubusercontent.com/rulebricks/cli/main/install.sh | bash
 ```
 
-### Commands
+Standalone binaries are available on the [Releases page](https://github.com/rulebricks/cli/releases).
 
-| Command | Description |
-|---------|-------------|
-| `rulebricks init` | Initialize a new project configuration |
-| `rulebricks deploy` | Deploy Rulebricks to your cluster |
-| `rulebricks destroy` | Remove Rulebricks deployment |
-| `rulebricks status` | Show deployment status and health |
-| `rulebricks logs [component]` | View component logs |
-| `rulebricks upgrade` | Manage version upgrades |
+## Prerequisites
 
-### Troubleshooting
+You must have a valid **Rulebricks license key**
+to deploy using this CLI. You will be
+requested for this key during project
+configuration.
 
-Get CLI help:
+Rulebricks requires TLS. You will require either external-dns on your cluster to automatically add DNS records, or you will need **access** to manually add **DNS records** for the subdomain(s) where you would like to access your private deployment from.
+
+Finally, you will need to have the following tools installed and ready on your machine:
+
+- **Node.js** >= 20
+- **kubectl** - Kubernetes CLI
+- **Helm** >= 3.0
+- **Terraform** >= 1.0 (for infrastructure provisioning)
+- Cloud CLI (`aws`, `gcloud`, or `az`) configured for your provider
+
+## Quick Start
+
 ```bash
-rulebricks <command> --help
+# Configuration wizard (generates values.yaml)
+rulebricks init
+
+# Provision and/or deploy to your cluster
+rulebricks deploy my-deployment
 ```
 
-Enable verbose logging:
-```bash
-rulebricks deploy --verbose
-```
+## Commands
 
-Retry deployment:
-```bash
-rulebricks destroy
-rulebricks deploy --verbose
-```
-> Running `rulebricks init` locks the version to the latest as of executing the command. Make sure to run `rulebricks upgrade list` and point to the latest version in your `rulebricks.yaml` when redeploying after a while.
+| Command                     | Description                            |
+| --------------------------- | -------------------------------------- |
+| `rulebricks init`           | Interactive setup wizard               |
+| `rulebricks deploy [name]`  | Deploy to Kubernetes                   |
+| `rulebricks upgrade [name]` | Upgrade to a new version               |
+| `rulebricks destroy [name]` | Remove a deployment                    |
+| `rulebricks status [name]`  | Show deployment health                 |
+| `rulebricks logs [name]`    | Inspect services                       |
+| `rulebricks open [name]`    | Open the generated configuration files |
 
-> If TLS was successfully configured on a prior failed deployment, you likely need to edit your `rulebricks.yaml` config to point to a different domain before redeploying– you may encounter certificate errors in Traefik.
+Add `-h` to any command to learn more about its options.
 
-Check component health:
-```bash
-kubectl get pods --all-namespaces
-kubectl describe pod <pod-name> -n <namespace>
-```
-> Check out `rulebricks status` & `rulebricks logs --help` for a convenient shortcut to explore logs in Rulebricks related namespaces. 
+## Notes
 
+There are a uniquely wide variety of customization options this CLI makes available (multi-cloud, hybrid vs. self-hosted database deployment, custom email templates, etc.), and not all combinations have been validated.
 
-## License
-
-This CLI requires a valid Rulebricks license key to use. Contact support@rulebricks.com for licensing information.
-
-## Support
-
-- **CLI Documentation**: [rulebricks.com/docs](https://rulebricks.com/docs/private-deployment/quick-start)
-- **Issues**: [GitHub Issues](https://github.com/rulebricks/cli/issues)
-- **Email**: support@rulebricks.com
+If you encounter any issue deploying your private Rulebricks cluster, please [email us](mailto:support@rulebricks.com) or [open an issue](https://github.com/rulebricks/cli/issues) and we will follow up promptly.
