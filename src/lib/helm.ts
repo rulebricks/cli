@@ -131,7 +131,7 @@ export async function getInstalledVersion(
 }
 
 /**
- * Installs the Rulebricks Helm chart
+ * Installs the Rulebricks Helm chart (use installOrUpgradeChart for idempotent operations)
  */
 export async function installChart(
   deploymentName: string,
@@ -182,6 +182,64 @@ export async function installChart(
     await execa("helm", args);
   } catch (error) {
     throw new Error(`Helm install failed:\n${getErrorMessage(error)}`);
+  }
+}
+
+/**
+ * Installs or upgrades the Rulebricks Helm chart (idempotent operation).
+ * Uses `helm upgrade --install` which will install if release doesn't exist,
+ * or upgrade if it does. This is safe to run multiple times.
+ */
+export async function installOrUpgradeChart(
+  deploymentName: string,
+  options: {
+    releaseName: string;
+    namespace: string;
+    version?: string;
+    wait?: boolean;
+    timeout?: string;
+    createNamespace?: boolean;
+  },
+): Promise<void> {
+  const {
+    releaseName,
+    namespace,
+    version,
+    wait = true,
+    timeout = "15m",
+    createNamespace = true,
+  } = options;
+
+  const valuesPath = getHelmValuesPath(deploymentName);
+
+  const args = [
+    "upgrade",
+    "--install", // This makes it idempotent - install if not exists, upgrade if exists
+    releaseName,
+    HELM_CHART_OCI,
+    "--namespace",
+    namespace,
+    "--values",
+    valuesPath,
+  ];
+
+  if (version) {
+    args.push("--version", version);
+  }
+
+  if (createNamespace) {
+    args.push("--create-namespace");
+  }
+
+  if (wait) {
+    args.push("--wait");
+    args.push("--timeout", timeout);
+  }
+
+  try {
+    await execa("helm", args);
+  } catch (error) {
+    throw new Error(`Helm install/upgrade failed:\n${getErrorMessage(error)}`);
   }
 }
 

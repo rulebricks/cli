@@ -45,7 +45,7 @@ rulebricks init
 rulebricks deploy my-deployment
 ```
 
-## Commands
+## Main Commands
 
 | Command                     | Description                            |
 | --------------------------- | -------------------------------------- |
@@ -57,10 +57,10 @@ rulebricks deploy my-deployment
 | `rulebricks logs [name]`    | Inspect services                       |
 | `rulebricks open [name]`    | Open the generated configuration files |
 
-Add `-h` to any command to learn more about its options.
+Use `rulebricks -h` to explore all commands, and add `-h` to any command to learn more about a particular command's options.
 
 ## Notes
 
 There are a uniquely wide variety of customization options this CLI makes available (multi-cloud, hybrid vs. self-hosted database deployment, custom email templates, etc.), and not all combinations have been validated.
 
-If you encounter any issue deploying your private Rulebricks cluster, please [email us](mailto:support@rulebricks.com) or [open an issue](https://github.com/rulebricks/cli/issues) and we will follow up promptly.
+If you encounter any issue deploying your private Rulebricks cluster, please [email us](mailto:support@rulebricks.com) or [open an issue](https://github.com/rulebricks/cli/issues) and we will follow up promptly. If you are particularly familiar with helm/k8s, you are also free to review generated values.yaml files and reconcile them with our [Helm chart](https://github.com/rulebricks/helm).

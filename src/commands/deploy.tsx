@@ -25,7 +25,11 @@ import {
   hasTerraformState,
   isTerraformInstalled,
 } from "../lib/terraform.js";
-import { installChart, upgradeChart, isHelmInstalled } from "../lib/helm.js";
+import {
+  installOrUpgradeChart,
+  upgradeChart,
+  isHelmInstalled,
+} from "../lib/helm.js";
 import {
   isKubectlInstalled,
   checkClusterAccessible,
@@ -303,7 +307,7 @@ function DeployCommandInner({
         // SINGLE-PHASE DEPLOYMENT (External DNS)
         // Install with TLS enabled from the start - external-dns handles DNS records
         await generateHelmValues(cfg, { tlsEnabled: true });
-        await installChart(name, {
+        await installOrUpgradeChart(name, {
           releaseName,
           namespace,
           version,
@@ -334,7 +338,7 @@ function DeployCommandInner({
         // TWO-PHASE DEPLOYMENT (Manual DNS)
         // Phase 1: Install without TLS
         await generateHelmValues(cfg, { tlsEnabled: false });
-        await installChart(name, {
+        await installOrUpgradeChart(name, {
           releaseName,
           namespace,
           version,

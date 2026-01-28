@@ -250,7 +250,7 @@ function DestroyCommandInner({
         setStep("error");
       }
     },
-    [name, cluster, exit],
+    [name, cluster, config, exit],
   );
 
   // Loading screen
@@ -480,7 +480,7 @@ function DestroyCommandInner({
                 <Text color={colors.muted}> • Local configuration files</Text>
               )}
 
-              {!needsInfraConfirm && (
+              {!cluster && scope?.hasInfrastructure && (
                 <Box marginTop={1}>
                   <Text color={colors.muted} dimColor>
                     Cloud infrastructure will be preserved. Use --cluster to
@@ -488,8 +488,15 @@ function DestroyCommandInner({
                   </Text>
                 </Box>
               )}
+              {cluster && !scope?.hasInfrastructure && (
+                <Box marginTop={1}>
+                  <Text color={colors.muted} dimColor>
+                    No CLI managed infrastructure found for this deployment.
+                  </Text>
+                </Box>
+              )}
               {!willDeleteConfig && (
-                <Box marginTop={!needsInfraConfirm ? 0 : 1}>
+                <Box marginTop={!needsInfraConfirm && !cluster ? 0 : 1}>
                   <Text color={colors.muted} dimColor>
                     Local config files will be preserved. Use --config to remove
                     them.

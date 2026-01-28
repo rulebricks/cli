@@ -165,6 +165,37 @@ resource "google_compute_router_nat" "nat" {
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 }
 
+# Firewall rule to allow all internal traffic within the VPC
+# This ensures services on any port can communicate between nodes
+resource "google_compute_firewall" "allow_internal" {
+  name    = "${var.cluster_name}-allow-internal"
+  network = google_compute_network.vpc.name
+
+  allow {
+    protocol = "tcp"
+    ports    = ["0-65535"]
+  }
+
+  allow {
+    protocol = "udp"
+    ports    = ["0-65535"]
+  }
+
+  allow {
+    protocol = "icmp"
+  }
+
+  # Allow traffic from nodes, pods, and services in the same VPC
+  source_ranges = [
+    google_compute_subnetwork.subnet.ip_cidr_range,                        # Node IPs (10.0.0.0/16)
+    google_compute_subnetwork.subnet.secondary_ip_range[0].ip_cidr_range,  # Pod IPs (10.1.0.0/16)
+    google_compute_subnetwork.subnet.secondary_ip_range[1].ip_cidr_range   # Service IPs (10.2.0.0/16)
+  ]
+
+  # Target all instances in the VPC
+  target_tags = ["gke-${var.cluster_name}"]
+}
+
 # GKE Cluster
 resource "google_container_cluster" "cluster" {
   provider = google-beta
@@ -265,6 +296,9 @@ resource "google_container_node_pool" "primary" {
       environment = "rulebricks"
       tier        = var.tier
     }
+
+    # Network tags for firewall rules
+    tags = ["gke-${var.cluster_name}"]
 
     workload_metadata_config {
       mode = "GKE_METADATA"

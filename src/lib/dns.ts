@@ -1,10 +1,21 @@
-import dns from "dns";
-import { promisify } from "util";
+import * as dns from "dns";
 import { execa } from "execa";
 import { DNSRecord, DEFAULT_NAMESPACE } from "../types/index.js";
 
-const resolve4 = promisify(dns.resolve4);
-const resolveCname = promisify(dns.resolveCname);
+/**
+ * DNS resolvers to try in order:
+ * - null = system default
+ * - Google Public DNS
+ * - Cloudflare DNS
+ */
+const DNS_RESOLVERS: (string[] | null)[] = [
+  null, // System default
+  ["8.8.8.8", "8.8.4.4"], // Google
+  ["1.1.1.1", "1.0.0.1"], // Cloudflare
+];
+
+/** Timeout for each DNS lookup attempt (ms) */
+const DNS_TIMEOUT_MS = 5000;
 
 /**
  * Helper to detect if a string is an IP address
@@ -29,7 +40,152 @@ function cnameMatchesTarget(
 }
 
 /**
- * Checks if a DNS record resolves
+ * Wrap a promise with a timeout
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("DNS lookup timeout")), ms);
+    promise
+      .then((result) => {
+        clearTimeout(timer);
+        resolve(result);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
+/**
+ * Create promisified resolver functions for a specific DNS server
+ */
+function createResolver(servers: string[] | null): {
+  resolve4: (hostname: string) => Promise<string[]>;
+  resolveCname: (hostname: string) => Promise<string[]>;
+} {
+  const resolver = new dns.Resolver();
+  if (servers) {
+    resolver.setServers(servers);
+  }
+
+  return {
+    resolve4: (hostname: string) =>
+      new Promise((resolve, reject) => {
+        resolver.resolve4(hostname, (err, addresses) => {
+          if (err) reject(err);
+          else resolve(addresses);
+        });
+      }),
+    resolveCname: (hostname: string) =>
+      new Promise((resolve, reject) => {
+        resolver.resolveCname(hostname, (err, addresses) => {
+          if (err) reject(err);
+          else resolve(addresses);
+        });
+      }),
+  };
+}
+
+/**
+ * Check DNS record with a specific resolver
+ */
+async function checkWithResolver(
+  hostname: string,
+  expectedTarget: string | undefined,
+  servers: string[] | null,
+): Promise<{
+  resolved: boolean;
+  records: string[];
+  type: "A" | "CNAME" | null;
+  matchesTarget: boolean;
+}> {
+  const { resolve4, resolveCname } = createResolver(servers);
+
+  // If expected target is a hostname (not an IP), check CNAME first
+  if (expectedTarget && !isIPAddress(expectedTarget)) {
+    try {
+      const cnameRecords = await withTimeout(
+        resolveCname(hostname),
+        DNS_TIMEOUT_MS,
+      );
+      const matchesTarget = cnameMatchesTarget(cnameRecords, expectedTarget);
+      return {
+        resolved: true,
+        records: cnameRecords,
+        type: "CNAME",
+        matchesTarget,
+      };
+    } catch {
+      // No CNAME record exists - try A record check
+      // For hostname targets, we need to resolve both the hostname and target
+      // to IPs and compare them
+      try {
+        const [hostnameIPs, targetIPs] = await withTimeout(
+          Promise.all([resolve4(hostname), resolve4(expectedTarget)]),
+          DNS_TIMEOUT_MS,
+        );
+        const matchesTarget = hostnameIPs.some((ip) => targetIPs.includes(ip));
+        return {
+          resolved: true,
+          records: hostnameIPs,
+          type: "A",
+          matchesTarget,
+        };
+      } catch {
+        return {
+          resolved: false,
+          records: [],
+          type: null,
+          matchesTarget: false,
+        };
+      }
+    }
+  }
+
+  // Expected target is an IP address - check A records directly
+  try {
+    const aRecords = await withTimeout(resolve4(hostname), DNS_TIMEOUT_MS);
+    const matchesTarget = expectedTarget
+      ? aRecords.some((r) => r === expectedTarget)
+      : true;
+    return {
+      resolved: true,
+      records: aRecords,
+      type: "A",
+      matchesTarget,
+    };
+  } catch {
+    // Try CNAME if A fails (fallback for when no expected target)
+    try {
+      const cnameRecords = await withTimeout(
+        resolveCname(hostname),
+        DNS_TIMEOUT_MS,
+      );
+      const matchesTarget = expectedTarget
+        ? cnameMatchesTarget(cnameRecords, expectedTarget)
+        : true;
+      return {
+        resolved: true,
+        records: cnameRecords,
+        type: "CNAME",
+        matchesTarget,
+      };
+    } catch {
+      return {
+        resolved: false,
+        records: [],
+        type: null,
+        matchesTarget: false,
+      };
+    }
+  }
+}
+
+/**
+ * Checks if a DNS record resolves using multiple DNS resolvers for reliability.
+ * Tries system DNS first, then Google (8.8.8.8), then Cloudflare (1.1.1.1).
+ * Returns success if ANY resolver confirms the record matches the target.
  */
 export async function checkDNSRecord(
   hostname: string,
@@ -40,77 +196,27 @@ export async function checkDNSRecord(
   type: "A" | "CNAME" | null;
   matchesTarget: boolean;
 }> {
-  try {
-    // If expected target is a hostname (not an IP), check CNAME first
-    if (expectedTarget && !isIPAddress(expectedTarget)) {
-      try {
-        const cnameRecords = await resolveCname(hostname);
-        // CNAME records found - return the comparison result directly
-        // Don't fall through to A record check, as that would incorrectly
-        // compare IPs against a hostname target
-        const matchesTarget = cnameMatchesTarget(cnameRecords, expectedTarget);
-        return {
-          resolved: true,
-          records: cnameRecords,
-          type: "CNAME",
-          matchesTarget,
-        };
-      } catch {
-        // No CNAME record exists - try A record check
-        // For hostname targets, we need to resolve both the hostname and target
-        // to IPs and compare them
-        try {
-          const [hostnameIPs, targetIPs] = await Promise.all([
-            resolve4(hostname),
-            resolve4(expectedTarget),
-          ]);
-          // Check if any of the hostname's IPs match any of the target's IPs
-          const matchesTarget = hostnameIPs.some((ip) =>
-            targetIPs.includes(ip),
-          );
-          return {
-            resolved: true,
-            records: hostnameIPs,
-            type: "A",
-            matchesTarget,
-          };
-        } catch {
-          // Could not resolve - DNS not configured
-          return {
-            resolved: false,
-            records: [],
-            type: null,
-            matchesTarget: false,
-          };
-        }
-      }
-    }
-
-    // Expected target is an IP address - check A records directly
+  // Try each resolver in sequence until one succeeds with a matching target
+  for (const servers of DNS_RESOLVERS) {
     try {
-      const aRecords = await resolve4(hostname);
-      const matchesTarget = expectedTarget
-        ? aRecords.some((r) => r === expectedTarget)
-        : true;
-      return {
-        resolved: true,
-        records: aRecords,
-        type: "A",
-        matchesTarget,
-      };
+      const result = await checkWithResolver(hostname, expectedTarget, servers);
+
+      // If we found a matching record, return immediately
+      if (result.resolved && result.matchesTarget) {
+        return result;
+      }
+
+      // If resolved but doesn't match, continue to next resolver
+      // (different resolvers might have different cache states)
     } catch {
-      // Try CNAME if A fails (fallback for when no expected target)
-      const cnameRecords = await resolveCname(hostname);
-      const matchesTarget = expectedTarget
-        ? cnameMatchesTarget(cnameRecords, expectedTarget)
-        : true;
-      return {
-        resolved: true,
-        records: cnameRecords,
-        type: "CNAME",
-        matchesTarget,
-      };
+      // This resolver failed entirely, try the next one
     }
+  }
+
+  // No resolver found a matching record - do one final check with system DNS
+  // to return whatever we can find (even if not matching)
+  try {
+    return await checkWithResolver(hostname, expectedTarget, null);
   } catch {
     return {
       resolved: false,

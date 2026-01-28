@@ -12,6 +12,7 @@ import { StatusCommand } from "./commands/status.js";
 import { LogsCommand } from "./commands/logs.js";
 import { CloneCommand } from "./commands/clone.js";
 import { OpenCommand } from "./commands/open.js";
+import { BenchmarkCommand } from "./commands/benchmark.js";
 import { listDeployments, deploymentExists } from "./lib/config.js";
 import { THEMES } from "./lib/theme.js";
 
@@ -80,10 +81,24 @@ program
   .option("--version <version>", "Target version (defaults to latest)")
   .option("--dry-run", "Preview changes without applying")
   .action(async (name, options) => {
-    const deploymentName = name || (await selectDeployment());
+    let deploymentName = name;
     if (!deploymentName) {
-      console.error(chalk.red("No deployment specified."));
-      process.exit(1);
+      const deployments = await listDeployments();
+      if (deployments.length === 0) {
+        console.error(
+          chalk.red('No deployments found. Run "rulebricks init" first.'),
+        );
+        process.exit(1);
+      } else if (deployments.length > 1) {
+        console.error(chalk.red("Please specify a deployment to upgrade.\n"));
+        console.log("Available deployments:");
+        for (const d of deployments) {
+          console.log(`  ${chalk.yellow("•")} ${d}`);
+        }
+        console.log(`\nUsage: ${chalk.cyan("rulebricks upgrade <name>")}`);
+        process.exit(1);
+      }
+      deploymentName = deployments[0]; // Only one deployment, auto-select
     }
 
     const { waitUntilExit } = render(
@@ -167,10 +182,28 @@ program
   .option("-t, --tail <lines>", "Number of lines to show", "100")
   .option("-s, --split", "Show logs in split-pane view (side-by-side columns)")
   .action(async (name, component, options) => {
-    const deploymentName = name || (await selectDeployment());
+    let deploymentName = name;
     if (!deploymentName) {
-      console.error(chalk.red("No deployment specified."));
-      process.exit(1);
+      const deployments = await listDeployments();
+      if (deployments.length === 0) {
+        console.error(
+          chalk.red('No deployments found. Run "rulebricks init" first.'),
+        );
+        process.exit(1);
+      } else if (deployments.length > 1) {
+        console.error(
+          chalk.red("Please specify a deployment to view logs for.\n"),
+        );
+        console.log("Available deployments:");
+        for (const d of deployments) {
+          console.log(`  ${chalk.yellow("•")} ${d}`);
+        }
+        console.log(
+          `\nUsage: ${chalk.cyan("rulebricks logs <name> [component]")}`,
+        );
+        process.exit(1);
+      }
+      deploymentName = deployments[0]; // Only one deployment, auto-select
     }
 
     const { waitUntilExit } = render(
@@ -256,6 +289,16 @@ program
     const { waitUntilExit } = render(
       <OpenCommand name={name} target={target} />,
     );
+    await waitUntilExit();
+  });
+
+// Benchmark command
+program
+  .command("benchmark")
+  .description("Run load tests against a Rulebricks deployment")
+  .argument("[name]", "Deployment name (optional)")
+  .action(async (name) => {
+    const { waitUntilExit } = render(<BenchmarkCommand name={name} />);
     await waitUntilExit();
   });
 

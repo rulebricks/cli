@@ -138,6 +138,51 @@ resource "azurerm_subnet" "aks" {
   address_prefixes     = ["10.240.0.0/16"]
 }
 
+# Network Security Group for AKS subnet
+# Allows all intra-VNet traffic for Kubernetes node-to-node communication
+resource "azurerm_network_security_group" "aks" {
+  name                = "${var.cluster_name}-nsg"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  # Allow all intra-VNet inbound traffic for Kubernetes
+  security_rule {
+    name                       = "AllowVNetInbound"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  # Allow all intra-VNet outbound traffic for Kubernetes
+  security_rule {
+    name                       = "AllowVNetOutbound"
+    priority                   = 100
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  tags = {
+    Environment = "rulebricks"
+    Terraform   = "true"
+  }
+}
+
+# Associate NSG with AKS subnet
+resource "azurerm_subnet_network_security_group_association" "aks" {
+  subnet_id                 = azurerm_subnet.aks.id
+  network_security_group_id = azurerm_network_security_group.aks.id
+}
+
 # User Assigned Identity for AKS
 resource "azurerm_user_assigned_identity" "aks" {
   name                = "${var.cluster_name}-identity"

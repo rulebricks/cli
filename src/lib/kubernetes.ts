@@ -435,7 +435,11 @@ const RESET_COLOR = "\x1b[0m";
 /**
  * Callback type for receiving log lines from multiple pods
  */
-export type LogLineCallback = (podName: string, line: string, colorIndex: number) => void;
+export type LogLineCallback = (
+  podName: string,
+  line: string,
+  colorIndex: number,
+) => void;
 
 /**
  * Streams logs from multiple pods simultaneously.
@@ -473,7 +477,7 @@ export function streamMultiPodLogs(
 
     const colorIndex = index % POD_COLORS.length;
     const color = POD_COLORS[colorIndex];
-    
+
     // Shorten pod name for display (take last 2 segments or truncate)
     const shortName = shortenPodName(podName);
 
@@ -488,7 +492,7 @@ export function streamMultiPodLogs(
         const lines = buffer.split("\n");
         // Keep the last incomplete line in buffer
         buffer = lines.pop() || "";
-        
+
         for (const line of lines) {
           if (line.trim()) {
             if (onLine) {
@@ -520,7 +524,9 @@ export function streamMultiPodLogs(
       proc.stderr.on("data", (chunk: Buffer) => {
         const errLine = chunk.toString().trim();
         if (errLine) {
-          console.error(`${color}[${shortName}]${RESET_COLOR} \x1b[31m${errLine}${RESET_COLOR}`);
+          console.error(
+            `${color}[${shortName}]${RESET_COLOR} \x1b[31m${errLine}${RESET_COLOR}`,
+          );
         }
       });
     }
@@ -551,13 +557,13 @@ function shortenPodName(podName: string): string {
     // Try to find the component name and keep it with the random suffix
     // Pattern: <release>-<component>-<hash>-<suffix> or <component>-<hash>-<suffix>
     const suffix = parts[parts.length - 1];
-    
+
     // Find meaningful component name (skip 'rulebricks' prefix)
     let componentIndex = 0;
     if (parts[0] === "rulebricks" || parts[0].length > 10) {
       componentIndex = 1;
     }
-    
+
     const component = parts[componentIndex] || parts[0];
     return `${component}-${suffix}`;
   }
@@ -600,6 +606,7 @@ export const VALID_LOG_COMPONENTS = [
   "kafka",
   "supabase",
   "traefik",
+  "redis",
 ];
 
 /**
@@ -613,6 +620,7 @@ const COMPONENT_POD_PATTERNS: Record<string, string[]> = {
   kafka: ["kafka"],
   supabase: ["supabase", "db", "postgres"],
   traefik: ["traefik"],
+  redis: ["redis", "dragonfly", "keydb"],
 };
 
 /**

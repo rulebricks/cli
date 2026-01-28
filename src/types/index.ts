@@ -777,3 +777,156 @@ export function getNamespace(deploymentName: string): string {
 export function getReleaseName(deploymentName: string): string {
   return `rulebricks-${deploymentName}`;
 }
+
+// ============================================================================
+// Benchmark Types
+// ============================================================================
+
+/** Benchmark test mode - QPS measures requests/sec, throughput measures solutions/sec */
+export type BenchmarkTestMode = "qps" | "throughput";
+
+/** Benchmark preset intensity level */
+export type BenchmarkPreset = "light" | "medium" | "heavy" | "custom";
+
+/** Configuration for a benchmark test run */
+export interface BenchmarkConfig {
+  /** Name of the deployment being tested */
+  deploymentName: string;
+  /** Full API URL including flow slug (e.g., https://domain.com/api/v1/flows/benchmark-flow) */
+  apiUrl: string;
+  /** Rulebricks API key */
+  apiKey: string;
+  /** Test mode - qps or throughput */
+  testMode: BenchmarkTestMode;
+  /** Test duration (e.g., "2m", "4m") */
+  testDuration: string;
+  /** Target requests per second */
+  targetRps: number;
+  /** Bulk size - only for throughput mode (payloads per request) */
+  bulkSize?: number;
+}
+
+/** Result metrics from a benchmark test */
+export interface BenchmarkMetrics {
+  /** Actual requests per second achieved */
+  actualRps: number;
+  /** Success rate as percentage (0-100) */
+  successRate: number;
+  /** P50 latency in milliseconds */
+  p50Latency: number;
+  /** P90 latency in milliseconds */
+  p90Latency: number;
+  /** P95 latency in milliseconds */
+  p95Latency: number;
+  /** P99 latency in milliseconds */
+  p99Latency: number;
+  /** Minimum latency in milliseconds */
+  minLatency: number;
+  /** Maximum latency in milliseconds */
+  maxLatency: number;
+  /** Average latency in milliseconds */
+  avgLatency: number;
+  /** Total requests made */
+  totalRequests: number;
+  /** Number of failed requests */
+  failedRequests: number;
+  /** Test duration in seconds */
+  testDuration: number;
+  /** Total data sent in bytes */
+  dataSent: number;
+  /** Total data received in bytes */
+  dataReceived: number;
+  /** Max virtual users used */
+  maxVUs: number;
+  /** For throughput tests: actual throughput (solutions/sec) */
+  actualThroughput?: number;
+  /** For throughput tests: total payloads processed */
+  totalPayloads?: number;
+}
+
+/** Result of a benchmark test run */
+export interface BenchmarkResult {
+  /** Whether the test completed successfully */
+  success: boolean;
+  /** Path to the output directory */
+  outputDir: string;
+  /** Path to the HTML report */
+  reportPath: string;
+  /** Path to the JSON results */
+  resultsPath: string;
+  /** Parsed metrics from the test (if successful) */
+  metrics?: BenchmarkMetrics;
+  /** Error message if the test failed */
+  error?: string;
+}
+
+/** Preset configurations for QPS tests */
+export const QPS_PRESETS: Record<
+  Exclude<BenchmarkPreset, "custom">,
+  {
+    targetRps: number;
+    testDuration: string;
+    label: string;
+    description: string;
+  }
+> = {
+  light: {
+    targetRps: 100,
+    testDuration: "2m",
+    label: "Light",
+    description: "100 RPS for 2 minutes - quick validation",
+  },
+  medium: {
+    targetRps: 500,
+    testDuration: "4m",
+    label: "Medium",
+    description: "500 RPS for 4 minutes - standard load test",
+  },
+  heavy: {
+    targetRps: 1000,
+    testDuration: "4m",
+    label: "Heavy",
+    description: "1000 RPS for 4 minutes - stress test",
+  },
+};
+
+/** Preset configurations for throughput tests */
+export const THROUGHPUT_PRESETS: Record<
+  Exclude<BenchmarkPreset, "custom">,
+  {
+    targetRps: number;
+    bulkSize: number;
+    testDuration: string;
+    label: string;
+    description: string;
+  }
+> = {
+  light: {
+    targetRps: 50,
+    bulkSize: 25,
+    testDuration: "2m",
+    label: "Light",
+    description: "1,250 solutions/sec for 2 minutes",
+  },
+  medium: {
+    targetRps: 100,
+    bulkSize: 50,
+    testDuration: "4m",
+    label: "Medium",
+    description: "5,000 solutions/sec for 4 minutes",
+  },
+  heavy: {
+    targetRps: 200,
+    bulkSize: 100,
+    testDuration: "4m",
+    label: "Heavy",
+    description: "20,000 solutions/sec for 4 minutes",
+  },
+};
+
+/** Cloud URLs that should be blocked from benchmarking */
+export const BLOCKED_BENCHMARK_DOMAINS = [
+  "api.rulebricks.com",
+  "rulebricks.io",
+  "app.rulebricks.com",
+];

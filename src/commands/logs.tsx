@@ -32,6 +32,7 @@ const COMPONENTS = [
   { label: "Kafka", value: "kafka" },
   { label: "Supabase", value: "supabase" },
   { label: "Traefik", value: "traefik" },
+  { label: "Redis", value: "redis" },
 ];
 
 /**
