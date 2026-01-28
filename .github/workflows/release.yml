@@ -81,11 +81,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Bundle for pkg
+        run: npm run bundle
+
       - name: Install pkg
         run: npm install -g @yao-pkg/pkg
 
       - name: Create binary
-        run: pkg . --target ${{ matrix.target }} --output ${{ matrix.output }}
+        run: pkg bundle/cli.cjs --target ${{ matrix.target }} --output ${{ matrix.output }}
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
