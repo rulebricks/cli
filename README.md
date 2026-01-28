@@ -10,14 +10,6 @@ You can choose how much you would like the CLI to automate for you– use it to 
 npm install -g @rulebricks/cli
 ```
 
-Alternatively, try the quick install script (macOS/Linux):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/rulebricks/cli/main/install.sh | bash
-```
-
-Standalone binaries are also available on the [Releases page](https://github.com/rulebricks/cli/releases).
-
 ## Prerequisites
 
 You must have a valid **Rulebricks license key**
