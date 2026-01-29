@@ -186,27 +186,47 @@ export async function listS3Buckets(): Promise<string[]> {
 }
 
 /**
- * Static fallback for AWS regions
+ * Static fallback for AWS regions (c8g Graviton4 ARM64 available or expected)
  */
 function getStaticAwsRegions(): string[] {
   return [
+    // US regions (c8g Graviton4 available)
     "us-east-1",
     "us-east-2",
     "us-west-1",
     "us-west-2",
-    "ap-south-1",
+    // Canada
+    "ca-central-1",
+    "ca-west-1",
+    // Europe (c8g available)
+    "eu-west-1",
+    "eu-west-2",
+    "eu-west-3",
+    "eu-central-1",
+    "eu-central-2",
+    "eu-north-1",
+    "eu-south-1",
+    "eu-south-2",
+    // Asia Pacific (c8g available)
     "ap-northeast-1",
     "ap-northeast-2",
     "ap-northeast-3",
     "ap-southeast-1",
     "ap-southeast-2",
-    "ca-central-1",
-    "eu-central-1",
-    "eu-west-1",
-    "eu-west-2",
-    "eu-west-3",
-    "eu-north-1",
+    "ap-southeast-3",
+    "ap-southeast-4",
+    "ap-southeast-5",
+    "ap-southeast-7",
+    "ap-south-1",
+    "ap-south-2",
+    "ap-east-1",
+    // South America
     "sa-east-1",
+    // Middle East & Africa
+    "me-south-1",
+    "me-central-1",
+    "af-south-1",
+    "il-central-1",
   ];
 }
 
@@ -234,7 +254,12 @@ export async function listEksClusters(region: string): Promise<string[]> {
 // ============================================================================
 
 /**
- * Check if gcloud CLI is installed and authenticated
+ * Check if gcloud CLI is installed and fully authenticated
+ * 
+ * For GCP to be considered "authenticated", the user must have:
+ * 1. Logged in with `gcloud auth login`
+ * 2. Set a default project with `gcloud config set project PROJECT_ID`
+ * 3. Configured Application Default Credentials with `gcloud auth application-default login`
  */
 export async function checkGcloudCli(): Promise<CloudCliStatus> {
   const status: CloudCliStatus = {
@@ -268,18 +293,30 @@ export async function checkGcloudCli(): Promise<CloudCliStatus> {
       const account = config.core?.account;
       const project = config.core?.project;
 
+      // Step 1: Check if logged in
       if (!account) {
         status.error = 'Not authenticated - run "gcloud auth login"';
         return status;
       }
 
-      status.authenticated = true;
-      status.identity = project ? `Project: ${project}` : `Account: ${account}`;
-
+      // Step 2: Check if project is set
       if (!project) {
         status.error =
           'No default project set - run "gcloud config set project PROJECT_ID"';
+        return status;
       }
+
+      // Step 3: Check Application Default Credentials
+      const adcResult = await checkGcpApplicationDefaultCredentials();
+      if (!adcResult.configured) {
+        status.error =
+          'Application Default Credentials not configured - run "gcloud auth application-default login"';
+        return status;
+      }
+
+      // All checks passed
+      status.authenticated = true;
+      status.identity = `Project: ${project}`;
     } catch {
       status.error = "Failed to parse gcloud config";
     }
@@ -300,6 +337,51 @@ export async function getGcpProjectId(): Promise<string | null> {
     return projectId && projectId !== "(unset)" ? projectId : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Check if GCP Application Default Credentials (ADC) are configured
+ * ADC is required for Terraform to authenticate with Google Cloud
+ */
+export async function checkGcpApplicationDefaultCredentials(): Promise<{
+  configured: boolean;
+  error?: string;
+}> {
+  try {
+    // Try to get an access token using ADC
+    const result = await execCommand(
+      "gcloud auth application-default print-access-token"
+    );
+    
+    if (result.stdout && result.stdout.trim().length > 0) {
+      return { configured: true };
+    }
+    
+    return {
+      configured: false,
+      error: "Application Default Credentials not configured",
+    };
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : "Unknown error";
+    
+    // Check if it's specifically an authentication error
+    if (
+      errorMessage.includes("not found") ||
+      errorMessage.includes("not configured") ||
+      errorMessage.includes("Could not automatically determine credentials")
+    ) {
+      return {
+        configured: false,
+        error: "Application Default Credentials not configured",
+      };
+    }
+    
+    return {
+      configured: false,
+      error: errorMessage,
+    };
   }
 }
 
@@ -348,40 +430,33 @@ export async function listGcsBuckets(): Promise<string[]> {
 }
 
 /**
- * Static fallback for GCP regions
+ * Static fallback for GCP regions (C4A/Google Axion ARM64 confirmed availability)
+ * Only includes regions with full C4A zone coverage for GKE regional clusters
  */
 function getStaticGcpRegions(): string[] {
   return [
-    "us-central1",
-    "us-east1",
-    "us-east4",
-    "us-west1",
-    "us-west2",
-    "us-west3",
-    "us-west4",
-    "northamerica-northeast1",
-    "northamerica-northeast2",
-    "southamerica-east1",
-    "southamerica-west1",
-    "europe-central2",
-    "europe-north1",
-    "europe-west1",
-    "europe-west2",
-    "europe-west3",
-    "europe-west4",
-    "europe-west6",
-    "europe-southwest1",
-    "asia-east1",
-    "asia-east2",
-    "asia-northeast1",
-    "asia-northeast2",
-    "asia-northeast3",
-    "asia-south1",
-    "asia-south2",
-    "asia-southeast1",
-    "asia-southeast2",
-    "australia-southeast1",
-    "australia-southeast2",
+    // Tier 1: Full C4A (Google Axion ARM64) availability - 3+ zones confirmed
+    // US regions
+    "us-central1",    // C4A in zones a, b, c, f (best availability)
+    "us-east1",       // C4A in zones b, c, d
+    "us-east4",       // C4A in zones a, b, c
+    "us-west1",       // C4A in zones a, b, c
+    "us-west4",       // C4A in zones a, b, c
+    // North America
+    "northamerica-south1", // C4A in zones a, b, c (Mexico)
+    // Europe
+    "europe-west1",   // C4A in zones b, c, d
+    "europe-west2",   // C4A in zones a, b, c
+    "europe-west3",   // C4A in zones a, b, c
+    "europe-west4",   // C4A in zones a, b, c
+    "europe-north1",  // C4A in zones a, b
+    // Asia Pacific
+    "asia-east1",     // C4A in zones a, b, c
+    "asia-northeast1", // C4A in zones b, c
+    "asia-south1",    // C4A in zones a, b, c
+    "asia-southeast1", // C4A in zones a, b, c
+    // Australia
+    "australia-southeast2", // C4A in zones a, b, c
   ];
 }
 
@@ -411,7 +486,13 @@ export async function listGkeClusters(region: string): Promise<string[]> {
 // ============================================================================
 
 /**
- * Check if Azure CLI is installed and authenticated
+ * Check if Azure CLI is installed and fully authenticated
+ * 
+ * For Azure to be considered "authenticated", the user must have:
+ * 1. Logged in with `az login`
+ * 2. An active subscription in "Enabled" state
+ * 3. Required resource providers registered (Microsoft.ContainerService, etc.)
+ * 4. Sufficient vCPU quota for at least the small tier (8 cores)
  */
 export async function checkAzureCli(): Promise<CloudCliStatus> {
   const status: CloudCliStatus = {
@@ -433,7 +514,7 @@ export async function checkAzureCli(): Promise<CloudCliStatus> {
     const versionMatch = versionResult.stdout.match(/azure-cli\s+([\d.]+)/);
     status.version = versionMatch ? versionMatch[1] : undefined;
 
-    // Check authentication
+    // Step 1: Check authentication and subscription
     const accountResult = await execCommand("az account show --output json");
 
     if (accountResult.stderr && accountResult.stderr.includes("Please run")) {
@@ -441,15 +522,49 @@ export async function checkAzureCli(): Promise<CloudCliStatus> {
       return status;
     }
 
+    let subscriptionName: string | undefined;
     try {
       const account = JSON.parse(accountResult.stdout);
-      status.authenticated = true;
-      status.identity = account.name
-        ? `Subscription: ${account.name}`
+      subscriptionName = account.name;
+      
+      // Step 2: Check subscription state is Enabled
+      if (account.state !== "Enabled") {
+        status.error = `Subscription "${account.name}" is not enabled (state: ${account.state})`;
+        return status;
+      }
+      
+      status.identity = subscriptionName
+        ? `Subscription: ${subscriptionName}`
         : undefined;
     } catch {
       status.error = "Failed to parse account info";
+      return status;
     }
+
+    // Step 3: Check required resource providers are registered
+    const providerCheck = await checkAzureResourceProviders();
+    if (!providerCheck.allRegistered) {
+      status.error =
+        `Resource providers not registered: ${providerCheck.missing.join(", ")}. ` +
+        `Run: ${providerCheck.missing.map((p) => `az provider register --namespace ${p}`).join(" && ")}`;
+      return status;
+    }
+
+    // Step 4: Check minimum vCPU quota (small tier = 8 cores)
+    const quotaCheck = await checkAzureVmQuota(
+      AZURE_DEFAULT_QUOTA_CHECK_REGION,
+      AZURE_TIER_CORES.small,
+    );
+    
+    if (!quotaCheck.sufficient) {
+      status.error =
+        `Insufficient vCPU quota (${quotaCheck.available}/${quotaCheck.limit} available in ${AZURE_DEFAULT_QUOTA_CHECK_REGION}). ` +
+        "Request increase at Azure portal > Subscriptions > Usage + quotas";
+      return status;
+    }
+
+    // All checks passed
+    status.authenticated = true;
   } catch (error) {
     status.error = error instanceof Error ? error.message : "Unknown error";
   }
@@ -529,42 +644,61 @@ export async function listAzureBlobContainers(
 }
 
 /**
- * Static fallback for Azure regions
+ * Static fallback for Azure regions (Dpsv5 ARM64 available or expected)
  */
 function getStaticAzureRegions(): string[] {
   return [
+    // US regions (Dpsv5 ARM64 available)
     "eastus",
     "eastus2",
-    "centralus",
-    "northcentralus",
-    "southcentralus",
     "westus",
     "westus2",
     "westus3",
+    "centralus",
+    "northcentralus",
+    "southcentralus",
+    "westcentralus",
+    // Canada
     "canadacentral",
     "canadaeast",
+    // South America
     "brazilsouth",
+    // Europe (Dpsv5 available)
     "northeurope",
     "westeurope",
     "uksouth",
     "ukwest",
     "francecentral",
+    "francesouth",
     "germanywestcentral",
+    "germanynorth",
     "switzerlandnorth",
+    "switzerlandwest",
     "norwayeast",
+    "norwaywest",
+    "swedencentral",
+    "polandcentral",
+    // Asia Pacific
     "eastasia",
     "southeastasia",
     "japaneast",
     "japanwest",
     "koreacentral",
+    "koreasouth",
+    // Australia
     "australiaeast",
     "australiasoutheast",
     "australiacentral",
+    // India
     "centralindia",
     "southindia",
     "westindia",
+    // Middle East & Africa
     "uaenorth",
+    "uaecentral",
     "southafricanorth",
+    "qatarcentral",
+    "israelcentral",
   ];
 }
 
@@ -587,6 +721,138 @@ export async function listAksClusters(
     return clusters.sort();
   } catch {
     return [];
+  }
+}
+
+/**
+ * Required Azure resource providers for AKS deployment
+ */
+const AZURE_REQUIRED_PROVIDERS = [
+  "Microsoft.ContainerService", // For AKS
+  "Microsoft.Network", // For VNets, NSGs
+  "Microsoft.ManagedIdentity", // For managed identities
+  "Microsoft.Compute", // For VMs
+];
+
+/**
+ * Azure tier to vCPU core requirements mapping
+ */
+export const AZURE_TIER_CORES: Record<string, number> = {
+  small: 8, // 4 nodes × 2 vCPU
+  medium: 16, // 4 nodes × 4 vCPU
+  large: 40, // 5 nodes × 8 vCPU
+};
+
+/**
+ * Default region used for baseline quota checks when region is not yet selected
+ */
+const AZURE_DEFAULT_QUOTA_CHECK_REGION = "eastus";
+
+/**
+ * Check if required Azure resource providers are registered
+ */
+export async function checkAzureResourceProviders(): Promise<{
+  allRegistered: boolean;
+  missing: string[];
+}> {
+  const missing: string[] = [];
+
+  try {
+    for (const provider of AZURE_REQUIRED_PROVIDERS) {
+      const result = await execCommand(
+        `az provider show --namespace ${provider} --query "registrationState" --output tsv`,
+      );
+
+      const state = result.stdout.trim();
+      if (state !== "Registered") {
+        missing.push(provider);
+      }
+    }
+
+    return {
+      allRegistered: missing.length === 0,
+      missing,
+    };
+  } catch {
+    // If we can't check, assume they're not registered
+    return {
+      allRegistered: false,
+      missing: AZURE_REQUIRED_PROVIDERS,
+    };
+  }
+}
+
+/**
+ * Check Azure VM quota for a specific region
+ * 
+ * @param region - Azure region to check quota for
+ * @param requiredCores - Number of vCPUs required
+ * @returns Quota check result with availability info
+ */
+export async function checkAzureVmQuota(
+  region: string,
+  requiredCores: number,
+): Promise<{
+  sufficient: boolean;
+  available: number;
+  limit: number;
+  used: number;
+  error?: string;
+}> {
+  try {
+    const result = await execCommand(
+      `az vm list-usage --location ${region} --output json`,
+    );
+
+    if (result.stderr && !result.stdout) {
+      return {
+        sufficient: false,
+        available: 0,
+        limit: 0,
+        used: 0,
+        error: "Failed to check VM quota",
+      };
+    }
+
+    const usageList = JSON.parse(result.stdout) as Array<{
+      name: { value: string; localizedValue: string };
+      currentValue: number;
+      limit: number;
+    }>;
+
+    // Find total regional vCPU quota
+    const regionalQuota = usageList.find(
+      (u) => u.name.value === "cores" || u.name.localizedValue === "Total Regional vCPUs",
+    );
+
+    if (!regionalQuota) {
+      return {
+        sufficient: false,
+        available: 0,
+        limit: 0,
+        used: 0,
+        error: "Could not find regional vCPU quota",
+      };
+    }
+
+    const used = regionalQuota.currentValue;
+    const limit = regionalQuota.limit;
+    const available = limit - used;
+
+    return {
+      sufficient: available >= requiredCores,
+      available,
+      limit,
+      used,
+    };
+  } catch (error) {
+    return {
+      sufficient: false,
+      available: 0,
+      limit: 0,
+      used: 0,
+      error: error instanceof Error ? error.message : "Failed to check VM quota",
+    };
   }
 }
 
@@ -690,10 +956,18 @@ export const CLI_INSTALL_URLS: Record<
 /**
  * Get login commands for cloud CLIs
  */
-export const CLI_LOGIN_COMMANDS: Record<CloudProvider, string> = {
+export const CLI_LOGIN_COMMANDS: Record<CloudProvider, string | string[]> = {
   aws: "aws configure",
-  gcp: "gcloud auth login",
-  azure: "az login",
+  gcp: [
+    "gcloud auth login",
+    "gcloud config set project PROJECT_ID",
+    "gcloud auth application-default login",
+  ],
+  azure: [
+    "az login",
+    "az account set --subscription YOUR_SUBSCRIPTION_ID",
+    "az provider register --namespace Microsoft.ContainerService",
+  ],
 };
 
 // ============================================================================

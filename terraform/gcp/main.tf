@@ -53,7 +53,7 @@ variable "tier" {
 variable "kubernetes_version" {
   description = "Kubernetes version"
   type        = string
-  default     = "1.29"
+  default     = "1.34"
 }
 
 variable "enable_external_dns" {
@@ -75,7 +75,8 @@ variable "logging_gcs_bucket" {
 }
 
 # Tier configurations
-# Using Axion C4A (ARM64) instances for compatibility with arm64 container images
+# Using C4A (Google Axion ARM64) instances for best ARM64 performance
+# C4A requires Hyperdisk (does not support Persistent Disk)
 locals {
   tier_configs = {
     small = {
@@ -83,21 +84,21 @@ locals {
       machine_type  = "c4a-standard-2"  # 2 vCPU, 8GB (Google Axion ARM64)
       min_nodes     = 4
       max_nodes     = 4
-      disk_size     = 50
+      disk_size     = 20
     }
     medium = {
       node_count    = 4
       machine_type  = "c4a-standard-4"  # 4 vCPU, 16GB (Google Axion ARM64)
       min_nodes     = 4
       max_nodes     = 8
-      disk_size     = 100
+      disk_size     = 30
     }
     large = {
       node_count    = 5
       machine_type  = "c4a-standard-8"  # 8 vCPU, 32GB (Google Axion ARM64)
       min_nodes     = 5
       max_nodes     = 16
-      disk_size     = 200
+      disk_size     = 50
     }
   }
 
@@ -211,6 +212,9 @@ resource "google_container_cluster" "cluster" {
   remove_default_node_pool = true
   initial_node_count       = 1
 
+  # Allow terraform destroy to delete the cluster
+  deletion_protection = false
+
   # Cluster configuration
   min_master_version = var.kubernetes_version
 
@@ -286,7 +290,7 @@ resource "google_container_node_pool" "primary" {
     preemptible  = false
     machine_type = local.config.machine_type
     disk_size_gb = local.config.disk_size
-    disk_type    = "pd-ssd"
+    disk_type    = "hyperdisk-balanced"
 
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform"

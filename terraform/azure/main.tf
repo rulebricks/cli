@@ -44,7 +44,7 @@ variable "tier" {
 variable "kubernetes_version" {
   description = "Kubernetes version"
   type        = string
-  default     = "1.29"
+  default     = "1.34"
 }
 
 variable "enable_external_dns" {
@@ -86,21 +86,21 @@ locals {
       vm_size      = "Standard_D2ps_v5"  # 2 vCPU, 8GB (Ampere ARM64)
       min_nodes    = 4
       max_nodes    = 4
-      disk_size    = 50
+      disk_size    = 20
     }
     medium = {
       node_count   = 4
       vm_size      = "Standard_D4ps_v5"  # 4 vCPU, 16GB (Ampere ARM64)
       min_nodes    = 4
       max_nodes    = 8
-      disk_size    = 100
+      disk_size    = 30
     }
     large = {
       node_count   = 5
       vm_size      = "Standard_D8ps_v5"  # 8 vCPU, 32GB (Ampere ARM64)
       min_nodes    = 5
       max_nodes    = 16
-      disk_size    = 200
+      disk_size    = 50
     }
   }
 

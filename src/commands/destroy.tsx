@@ -507,7 +507,7 @@ function DestroyCommandInner({
               {!scope?.clusterAccessible && (
                 <Box marginTop={1}>
                   <Text color={colors.warning} dimColor>
-                    ⚠ Cluster is not accessible. Cluster resources may need
+                    ⚠ Cluster is not accessible. Some cluster resources may need
                     manual cleanup.
                   </Text>
                 </Box>

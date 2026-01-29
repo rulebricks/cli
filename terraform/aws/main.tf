@@ -38,7 +38,7 @@ variable "tier" {
 variable "kubernetes_version" {
   description = "Kubernetes version"
   type        = string
-  default     = "1.29"
+  default     = "1.34"
 }
 
 variable "enable_external_dns" {
@@ -74,21 +74,21 @@ locals {
       instance_type  = "c8g.large"  # 2 vCPU, 4GB (Graviton4 ARM64)
       min_nodes      = 4
       max_nodes      = 4
-      disk_size      = 50
+      disk_size      = 20
     }
     medium = {
       node_count     = 4
       instance_type  = "c8g.xlarge"  # 4 vCPU, 8GB (Graviton4 ARM64)
       min_nodes      = 4
       max_nodes      = 8
-      disk_size      = 100
+      disk_size      = 30
     }
     large = {
       node_count     = 5
       instance_type  = "c8g.2xlarge"  # 8 vCPU, 16GB (Graviton4 ARM64)
       min_nodes      = 5
       max_nodes      = 16
-      disk_size      = 200
+      disk_size      = 50
     }
   }
 

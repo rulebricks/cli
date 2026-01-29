@@ -15,6 +15,7 @@ import {
   loadDeploymentState,
   saveDeploymentState,
   updateDeploymentStatus,
+  saveTerraformVars,
 } from "../lib/config.js";
 import {
   setupTerraformWorkspace,
@@ -25,7 +26,14 @@ import {
   updateKubeconfig,
   hasTerraformState,
   isTerraformInstalled,
+  generateTerraformVars,
 } from "../lib/terraform.js";
+import {
+  checkGcpApplicationDefaultCredentials,
+  checkAzureResourceProviders,
+  checkAzureVmQuota,
+  AZURE_TIER_CORES,
+} from "../lib/cloudCli.js";
 import {
   installOrUpgradeChart,
   upgradeChart,
@@ -257,6 +265,11 @@ function DeployCommandInner({
           await setupTerraformWorkspace(name, cfg.infrastructure.provider!);
         }
 
+        // Generate and save terraform variables (always do this before plan,
+        // even if state exists, in case config changed)
+        const terraformVars = generateTerraformVars(cfg);
+        await saveTerraformVars(name, terraformVars);
+
         setStep("infra-init");
         await terraformInit(name);
 
@@ -413,6 +426,67 @@ function DeployCommandInner({
       throw new Error(
         "Terraform is not installed. Required for infrastructure provisioning.",
       );
+    }
+
+    // Check GCP Application Default Credentials if provisioning GCP infrastructure
+    if (
+      cfg.infrastructure.mode === "provision" &&
+      cfg.infrastructure.provider === "gcp"
+    ) {
+      const adcCheck = await checkGcpApplicationDefaultCredentials();
+      if (!adcCheck.configured) {
+        throw new Error(
+          "GCP Application Default Credentials (ADC) not configured.\n\n" +
+            "Terraform requires ADC to authenticate with Google Cloud.\n\n" +
+            "To fix this:\n" +
+            "  • Run: gcloud auth login\n" +
+            "  • Run: gcloud auth application-default login\n" +
+            "  • Verify: gcloud auth application-default print-access-token\n\n" +
+            "For more information: https://cloud.google.com/docs/authentication/application-default-credentials"
+        );
+      }
+    }
+
+    // Check Azure prerequisites if provisioning Azure infrastructure
+    if (
+      cfg.infrastructure.mode === "provision" &&
+      cfg.infrastructure.provider === "azure"
+    ) {
+      // 1. Verify resource providers are registered
+      const providerCheck = await checkAzureResourceProviders();
+      if (!providerCheck.allRegistered) {
+        throw new Error(
+          `Azure resource providers not registered: ${providerCheck.missing.join(", ")}\n\n` +
+            "To register:\n" +
+            providerCheck.missing
+              .map((p) => `  • az provider register --namespace ${p}`)
+              .join("\n") +
+            "\n\nNote: Registration may take a few minutes to complete."
+        );
+      }
+
+      // 2. Check VM quota for the selected tier
+      const tier = cfg.tier || "small";
+      const region = cfg.infrastructure.region;
+      if (!region) {
+        throw new Error("Azure region is required for infrastructure provisioning");
+      }
+      
+      const requiredCores = AZURE_TIER_CORES[tier] || AZURE_TIER_CORES.small;
+      const quotaCheck = await checkAzureVmQuota(
+        region,
+        requiredCores,
+      );
+
+      if (!quotaCheck.sufficient) {
+        throw new Error(
+          `Insufficient Azure vCPU quota in ${region}.\n` +
+            `Required: ${requiredCores} cores (${tier} tier), Available: ${quotaCheck.available}/${quotaCheck.limit}\n\n` +
+            "Request a quota increase in the Azure portal:\n" +
+            "  • Go to: Subscriptions > Usage + quotas\n" +
+            "  • Request increase for 'Total Regional vCPUs' in your region"
+        );
+      }
     }
 
     // Check cluster access if using existing infrastructure

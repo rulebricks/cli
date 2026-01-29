@@ -68,51 +68,120 @@ export const LOGGING_SINK_CATEGORIES: Record<
 // Region mappings
 export const CLOUD_REGIONS: Record<CloudProvider, string[]> = {
   aws: [
+    // US regions (c8g Graviton4 available)
     "us-east-1",
     "us-east-2",
     "us-west-1",
     "us-west-2",
+    // Canada
+    "ca-central-1",
+    "ca-west-1",
+    // Europe (c8g available)
     "eu-west-1",
     "eu-west-2",
     "eu-west-3",
     "eu-central-1",
-    "ap-south-1",
-    "ap-southeast-1",
-    "ap-southeast-2",
+    "eu-central-2",
+    "eu-north-1",
+    "eu-south-1",
+    "eu-south-2",
+    // Asia Pacific (c8g available)
     "ap-northeast-1",
     "ap-northeast-2",
-    "ca-central-1",
+    "ap-northeast-3",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-southeast-3",
+    "ap-southeast-4",
+    "ap-southeast-5",
+    "ap-southeast-7",
+    "ap-south-1",
+    "ap-south-2",
+    "ap-east-1",
+    // South America
     "sa-east-1",
+    // Middle East & Africa
+    "me-south-1",
+    "me-central-1",
+    "af-south-1",
+    "il-central-1",
   ],
   gcp: [
-    "us-central1",
-    "us-east1",
-    "us-west1",
-    "us-west2",
-    "europe-west1",
-    "europe-west2",
-    "europe-west3",
-    "asia-east1",
-    "asia-northeast1",
-    "asia-southeast1",
-    "australia-southeast1",
-    "southamerica-east1",
+    // Tier 1: Full C4A (Google Axion ARM64) availability - 3+ zones confirmed
+    // US regions
+    "us-central1",    // C4A in zones a, b, c, f (best availability)
+    "us-east1",       // C4A in zones b, c, d
+    "us-east4",       // C4A in zones a, b, c
+    "us-west1",       // C4A in zones a, b, c
+    "us-west4",       // C4A in zones a, b, c
+    // North America
+    "northamerica-south1", // C4A in zones a, b, c (Mexico)
+    // Europe
+    "europe-west1",   // C4A in zones b, c, d
+    "europe-west2",   // C4A in zones a, b, c
+    "europe-west3",   // C4A in zones a, b, c
+    "europe-west4",   // C4A in zones a, b, c
+    "europe-north1",  // C4A in zones a, b
+    // Asia Pacific
+    "asia-east1",     // C4A in zones a, b, c
+    "asia-northeast1", // C4A in zones b, c
+    "asia-south1",    // C4A in zones a, b, c
+    "asia-southeast1", // C4A in zones a, b, c
+    // Australia
+    "australia-southeast2", // C4A in zones a, b, c
   ],
   azure: [
+    // US regions (Dpsv5 ARM64 available)
     "eastus",
     "eastus2",
     "westus",
     "westus2",
+    "westus3",
     "centralus",
+    "northcentralus",
+    "southcentralus",
+    "westcentralus",
+    // Canada
+    "canadacentral",
+    "canadaeast",
+    // South America
+    "brazilsouth",
+    // Europe (Dpsv5 available)
     "northeurope",
     "westeurope",
     "uksouth",
+    "ukwest",
+    "francecentral",
+    "francesouth",
+    "germanywestcentral",
+    "germanynorth",
+    "switzerlandnorth",
+    "switzerlandwest",
+    "norwayeast",
+    "norwaywest",
+    "swedencentral",
+    "polandcentral",
+    // Asia Pacific
     "eastasia",
     "southeastasia",
     "japaneast",
+    "japanwest",
+    "koreacentral",
+    "koreasouth",
+    // Australia
     "australiaeast",
-    "canadacentral",
-    "brazilsouth",
+    "australiasoutheast",
+    "australiacentral",
+    // India
+    "centralindia",
+    "southindia",
+    "westindia",
+    // Middle East & Africa
+    "uaenorth",
+    "uaecentral",
+    "southafricanorth",
+    "qatarcentral",
+    "israelcentral",
   ],
 };
 

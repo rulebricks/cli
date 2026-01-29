@@ -243,14 +243,26 @@ export async function generateHelmValues(
     config.dns.autoManage && isSupportedDnsProvider(config.dns.provider);
 
   // Determine storage class based on provider
+  // Note: GCP uses "hyperdisk-balanced" because C4A instances only support Hyperdisk (not Persistent Disk)
   const storageClass =
     config.infrastructure.provider === "aws"
       ? "gp3"
       : config.infrastructure.provider === "gcp"
-        ? "standard"
+        ? "hyperdisk-balanced"
         : config.infrastructure.provider === "azure"
           ? "managed-premium"
           : "gp3";
+
+  // ARM64 tolerations for GKE C4A nodes (and other ARM64 providers)
+  // GKE automatically taints ARM64 nodes with kubernetes.io/arch=arm64:NoSchedule
+  const arm64Tolerations = [
+    {
+      key: "kubernetes.io/arch",
+      operator: "Equal",
+      value: "arm64",
+      effect: "NoSchedule",
+    },
+  ];
 
   // Build global.supabase configuration
   const supabaseGlobalConfig: Record<string, unknown> =
@@ -352,6 +364,7 @@ export async function generateHelmValues(
           : {}),
         replicaCount: tierConfig.appReplicas,
         resources: tierConfig.appResources,
+        tolerations: arm64Tolerations,
 
         // Logging configuration
         logging: {
@@ -378,6 +391,7 @@ export async function generateHelmValues(
           : {}),
         replicas: tierConfig.hpsReplicas,
         resources: tierConfig.hpsResources,
+        tolerations: arm64Tolerations,
 
         // HPS Workers with KEDA autoscaling
         workers: {
@@ -393,6 +407,7 @@ export async function generateHelmValues(
             cpuThreshold: 25,
           },
           resources: tierConfig.hpsWorkerResources,
+          tolerations: arm64Tolerations,
         },
       },
 
@@ -406,6 +421,7 @@ export async function generateHelmValues(
       // Redis configuration
       redis: {
         resources: tierConfig.redisResources,
+        tolerations: arm64Tolerations,
         persistence: {
           enabled: true,
           size: tierConfig.redisPersistenceSize,
@@ -437,6 +453,7 @@ export async function generateHelmValues(
       controller: {
         replicaCount: tierConfig.kafkaReplication,
         resources: tierConfig.kafkaResources,
+        tolerations: arm64Tolerations,
         persistence: {
           enabled: true,
           size: tierConfig.kafkaStorage,
@@ -466,6 +483,7 @@ export async function generateHelmValues(
       ingressClass: {
         name: "traefik",
       },
+      tolerations: arm64Tolerations,
       autoscaling: {
         enabled: true,
         minReplicas: 1,
@@ -507,6 +525,7 @@ export async function generateHelmValues(
     // =============================================================================
     keda: {
       enabled: true,
+      tolerations: arm64Tolerations,
       crds: {
         install: false, // CRDs managed in parent chart
       },
@@ -518,6 +537,13 @@ export async function generateHelmValues(
     "cert-manager": {
       enabled: tlsEnabled,
       installCRDs: false, // CRDs managed in parent chart
+      tolerations: arm64Tolerations,
+      webhook: {
+        tolerations: arm64Tolerations,
+      },
+      cainjector: {
+        tolerations: arm64Tolerations,
+      },
     },
 
     // Cluster Issuer for Let's Encrypt
@@ -535,6 +561,7 @@ export async function generateHelmValues(
       role: "Stateless-Aggregator",
       replicas: tierConfig.vectorReplicas,
       resources: tierConfig.vectorResources,
+      tolerations: arm64Tolerations,
       service: {
         enabled: true,
         ports: [{ name: "api", port: 8686, protocol: "TCP", targetPort: 8686 }],
@@ -589,18 +616,35 @@ export async function generateHelmValues(
             },
             db: {
               resources: tierConfig.dbResources,
+              tolerations: arm64Tolerations,
               persistence: {
                 enabled: true,
                 size: tierConfig.dbPersistenceSize,
                 storageClassName: storageClass,
               },
             },
+            auth: {
+              tolerations: arm64Tolerations,
+            },
+            rest: {
+              tolerations: arm64Tolerations,
+            },
+            realtime: {
+              tolerations: arm64Tolerations,
+            },
+            meta: {
+              tolerations: arm64Tolerations,
+            },
             kong: {
+              tolerations: arm64Tolerations,
               ingress: {
                 enabled: true,
                 className: "traefik",
                 annotations: {},
               },
+            },
+            studio: {
+              tolerations: arm64Tolerations,
             },
           }
         : {}),
@@ -662,14 +706,15 @@ export async function generateHelmValues(
             : config.infrastructure.provider === "azure"
               ? "disk.csi.azure.com"
               : "ebs.csi.aws.com",
-      type:
+      // Parameters for the StorageClass - must include type for disk provisioning
+      parameters:
         config.infrastructure.provider === "aws"
-          ? "gp3"
+          ? { type: "gp3" }
           : config.infrastructure.provider === "gcp"
-            ? "pd-ssd"
+            ? { type: "hyperdisk-balanced" }
             : config.infrastructure.provider === "azure"
-              ? "Premium_LRS"
-              : "gp3",
+              ? { skuName: "Premium_LRS" }
+              : { type: "gp3" },
       fsType: "ext4",
       reclaimPolicy: "Delete",
       volumeBindingMode: "WaitForFirstConsumer",

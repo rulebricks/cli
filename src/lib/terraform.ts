@@ -2,7 +2,7 @@ import { execa, ExecaError } from 'execa';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { CloudProvider } from '../types/index.js';
+import { CloudProvider, DeploymentConfig, isSupportedDnsProvider } from '../types/index.js';
 import { getTerraformDir } from './config.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,6 +12,39 @@ const __dirname = path.dirname(__filename);
 const TERRAFORM_TEMPLATES_DIR = path.resolve(__dirname, '../../terraform');
 
 /**
+ * Detects if an error is a GCP authentication error
+ */
+function isGcpAuthError(output: string): boolean {
+  const lowerOutput = output.toLowerCase();
+  return (
+    lowerOutput.includes('oauth2') ||
+    lowerOutput.includes('invalid_grant') ||
+    lowerOutput.includes('reauth') ||
+    lowerOutput.includes('invalid_rapt') ||
+    lowerOutput.includes('authentication') && lowerOutput.includes('google') ||
+    lowerOutput.includes('unable to find default credentials') ||
+    lowerOutput.includes('application default credentials')
+  );
+}
+
+/**
+ * Enhances GCP authentication errors with helpful guidance
+ */
+function enhanceGcpAuthError(output: string): string {
+  return (
+    'GCP Authentication Error\n\n' +
+    'Terraform requires Application Default Credentials (ADC) to authenticate with Google Cloud.\n\n' +
+    'To fix this:\n' +
+    '  • Run: gcloud auth login\n' +
+    '  • Run: gcloud auth application-default login\n' +
+    '  • Verify: gcloud auth application-default print-access-token\n\n' +
+    'For more information: https://cloud.google.com/docs/authentication/application-default-credentials\n\n' +
+    'Original error:\n' +
+    (output.length > 500 ? '...' + output.slice(-500) : output)
+  );
+}
+
+/**
  * Extracts meaningful error message from execa error
  */
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -19,6 +52,10 @@ function getErrorMessage(error: unknown, fallback: string): string {
   // Try stderr first, then stdout (terraform sometimes writes errors to stdout)
   const output = execaError.stderr || execaError.stdout || '';
   if (output) {
+    // Check if this is a GCP authentication error
+    if (isGcpAuthError(output)) {
+      return enhanceGcpAuthError(output);
+    }
     // Get last 500 chars of output for the error message
     const truncated = output.length > 500 ? '...' + output.slice(-500) : output;
     return truncated;
@@ -156,12 +193,28 @@ export async function terraformApply(deploymentName: string): Promise<void> {
 }
 
 /**
- * Destroys Terraform infrastructure
+ * Destroys Terraform infrastructure.
+ * Runs init first to ensure .terraform folder exists (handles partial deployments).
  */
 export async function terraformDestroy(deploymentName: string): Promise<void> {
   const workDir = getTerraformDir(deploymentName);
   
   try {
+    // Run init first to ensure terraform is ready (handles partial deployments
+    // where .terraform folder might be missing or corrupted)
+    try {
+      await execa('terraform', ['init', '-upgrade'], {
+        cwd: workDir
+      });
+    } catch (initError) {
+      // If init fails, still try destroy - it might work if state exists
+      const execaInitError = initError as ExecaError;
+      if (execaInitError.stdout || execaInitError.stderr) {
+        await saveLogFile(workDir, 'destroy-init', execaInitError.stdout || '', execaInitError.stderr || '');
+      }
+      // Don't throw - continue to try destroy anyway
+    }
+    
     await execa('terraform', ['destroy', '-auto-approve'], {
       cwd: workDir
     });
@@ -201,17 +254,116 @@ export async function getTerraformOutputs(
 }
 
 /**
- * Checks if Terraform state exists for a deployment
+ * Checks if Terraform files/state exist for a deployment.
+ * Returns true if the terraform directory contains any terraform files,
+ * not just the state file. This allows destroy to work on partial infrastructure.
  */
 export async function hasTerraformState(deploymentName: string): Promise<boolean> {
   const workDir = getTerraformDir(deploymentName);
-  const statePath = path.join(workDir, 'terraform.tfstate');
   
   try {
-    await fs.access(statePath);
-    return true;
+    // Check if terraform directory exists
+    await fs.access(workDir);
+    
+    // Check for any of: state file, .terraform folder, or .tf files
+    const entries = await fs.readdir(workDir);
+    const hasTerraformFiles = entries.some(
+      (e) =>
+        e === 'terraform.tfstate' || 
+        e === '.terraform' || 
+        e.endsWith('.tf')
+    );
+    
+    return hasTerraformFiles;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Generates Terraform variables from deployment configuration
+ */
+export function generateTerraformVars(config: DeploymentConfig): Record<string, unknown> {
+  const provider = config.infrastructure.provider;
+  if (!provider) {
+    throw new Error('Cloud provider is required for infrastructure provisioning');
+  }
+
+  const region = config.infrastructure.region || (provider === 'gcp' ? 'us-central1' : provider === 'aws' ? 'us-east-1' : 'eastus');
+  const clusterName = config.infrastructure.clusterName || `${config.name}-cluster`;
+  const tier = config.tier || 'small';
+  const kubernetesVersion = '1.34';
+
+  // Determine if external DNS should be enabled
+  const enableExternalDns = config.dns.autoManage && isSupportedDnsProvider(config.dns.provider);
+
+  // Determine logging configuration
+  const loggingSink = config.features.logging.sink;
+  const loggingBucket = config.features.logging.bucket || '';
+
+  switch (provider) {
+    case 'gcp': {
+      if (!config.infrastructure.gcpProjectId) {
+        throw new Error('GCP project ID is required for GCP infrastructure provisioning');
+      }
+
+      const vars: Record<string, unknown> = {
+        project_id: config.infrastructure.gcpProjectId,
+        region,
+        cluster_name: clusterName,
+        tier,
+        kubernetes_version: kubernetesVersion,
+        enable_external_dns: enableExternalDns,
+        enable_gcs_logging: loggingSink === 'gcs',
+        logging_gcs_bucket: loggingSink === 'gcs' ? loggingBucket : '',
+      };
+
+      return vars;
+    }
+
+    case 'aws': {
+      // Extract domain suffix for external DNS domain filter
+      const domainSuffix = enableExternalDns && config.domain ? config.domain.split('.').slice(1).join('.') : '';
+
+      const vars: Record<string, unknown> = {
+        region,
+        cluster_name: clusterName,
+        tier,
+        kubernetes_version: kubernetesVersion,
+        enable_external_dns: enableExternalDns,
+        external_dns_domain: enableExternalDns ? domainSuffix : '',
+        enable_s3_logging: loggingSink === 's3',
+        logging_s3_bucket: loggingSink === 's3' ? loggingBucket : '',
+      };
+
+      return vars;
+    }
+
+    case 'azure': {
+      const resourceGroupName = config.infrastructure.azureResourceGroup || `${config.name}-rg`;
+
+      // For Azure DNS, we need the DNS zone resource group
+      // This is typically the same as the resource group, but can be different
+      const dnsZoneResourceGroup = enableExternalDns ? resourceGroupName : '';
+
+      const vars: Record<string, unknown> = {
+        resource_group_name: resourceGroupName,
+        location: region,
+        cluster_name: clusterName,
+        tier,
+        kubernetes_version: kubernetesVersion,
+        enable_external_dns: enableExternalDns,
+        dns_zone_resource_group: dnsZoneResourceGroup,
+        enable_blob_logging: loggingSink === 'azure-blob',
+        logging_storage_account: loggingSink === 'azure-blob' ? loggingBucket : '',
+        logging_container_name: loggingSink === 'azure-blob' ? 'logs' : '',
+      };
+
+      return vars;
+    }
+
+    default:
+      throw new Error(`Unsupported cloud provider: ${provider}`);
   }
 }
 

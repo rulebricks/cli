@@ -146,12 +146,16 @@ export function CloudProviderStep({
     dispatch({ type: "SET_PROVIDER", provider });
 
     if (provider === "gcp") {
-      // Try to auto-fill GCP project ID
+      // GCP requires project to be pre-configured, so use the detected project
       const detectedProject = await getGcpProjectId();
       if (detectedProject) {
-        setGcpProject(detectedProject);
+        dispatch({ type: "SET_GCP_PROJECT", projectId: detectedProject });
+        // Skip project input and go directly to regions
+        loadRegions(provider);
+      } else {
+        // Fallback to project input if somehow not detected (shouldn't happen with new auth check)
+        setSubStep("gcp-project");
       }
-      setSubStep("gcp-project");
     } else if (provider === "azure") {
       setSubStep("azure-rg");
     } else {
@@ -230,8 +234,9 @@ export function CloudProviderStep({
     onComplete();
   };
 
-  const handleGcpProjectSubmit = () => {
+  const handleGcpProjectSubmit = async () => {
     dispatch({ type: "SET_GCP_PROJECT", projectId: gcpProject });
+    // ADC is now checked upfront in checkGcloudCli(), so proceed directly to regions
     loadRegions("gcp");
   };
 
@@ -248,6 +253,13 @@ export function CloudProviderStep({
       return <Text color="gray"> (not installed)</Text>;
     }
     if (!status.authenticated) {
+      // Check for specific error types to show more helpful messages
+      if (status.error?.toLowerCase().includes("quota")) {
+        return <Text color="yellow"> (insufficient quota)</Text>;
+      }
+      if (status.error?.toLowerCase().includes("resource provider")) {
+        return <Text color="yellow"> (providers not registered)</Text>;
+      }
       return <Text color="yellow"> (log in required)</Text>;
     }
     return <Text color="green"> ✓</Text>;
@@ -291,10 +303,18 @@ export function CloudProviderStep({
           </Box>
           <Box marginLeft={2} flexDirection="column">
             {Object.entries(CLI_LOGIN_COMMANDS).map(([provider, cmd]) => (
-              <Text key={provider} color="gray">
-                {" "}
-                {provider}: {cmd}
-              </Text>
+              <Box key={provider} flexDirection="column">
+                {Array.isArray(cmd) ? (
+                  <>
+                    <Text color="gray"> {provider}:</Text>
+                    {cmd.map((c, i) => (
+                      <Text key={i} color="gray">   {c}</Text>
+                    ))}
+                  </>
+                ) : (
+                  <Text color="gray"> {provider}: {cmd}</Text>
+                )}
+              </Box>
             ))}
           </Box>
         </Box>
