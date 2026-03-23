@@ -71,6 +71,7 @@ function DestroyCommandInner({
   const [scope, setScope] = useState<DeploymentScope | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmText, setConfirmText] = useState("");
+  const [infraError, setInfraError] = useState<string | null>(null);
   const [status, setStatus] = useState<StepStatus>({
     helm: "pending",
     pvc: "pending",
@@ -221,9 +222,17 @@ function DestroyCommandInner({
         if (cluster && deploymentScope.hasInfrastructure) {
           setStatus((s) => ({ ...s, infrastructure: "running" }));
           try {
-            await terraformDestroy(name);
+            const cloudContext = cfg?.infrastructure.provider && cfg?.infrastructure.region
+              ? {
+                  provider: cfg.infrastructure.provider,
+                  clusterName: cfg.infrastructure.clusterName || `${name}-cluster`,
+                  region: cfg.infrastructure.region,
+                }
+              : undefined;
+            await terraformDestroy(name, cloudContext);
             setStatus((s) => ({ ...s, infrastructure: "success" }));
-          } catch {
+          } catch (infraErr) {
+            setInfraError(infraErr instanceof Error ? infraErr.message : "Infrastructure destroy failed");
             setStatus((s) => ({ ...s, infrastructure: "error" }));
           }
         } else {
@@ -301,12 +310,21 @@ function DestroyCommandInner({
       status.pvc === "skipped" &&
       status.namespace === "skipped";
 
+    const hasInfraFailure = status.infrastructure === "error";
+    const title = hasInfraFailure ? "Destruction Partially Complete" : "Destruction Complete";
+
     return (
-      <BorderBox title="Destruction Complete">
+      <BorderBox title={title}>
         <Box flexDirection="column" marginY={1}>
-          <Text color={colors.success} bold>
-            ✓ Deployment "{name}" has been destroyed
-          </Text>
+          {hasInfraFailure ? (
+            <Text color={colors.warning} bold>
+              ⚠ Deployment "{name}" was partially destroyed
+            </Text>
+          ) : (
+            <Text color={colors.success} bold>
+              ✓ Deployment "{name}" has been destroyed
+            </Text>
+          )}
 
           {cleanedItems.length > 0 && (
             <Box marginTop={1} flexDirection="column">
@@ -320,7 +338,22 @@ function DestroyCommandInner({
             </Box>
           )}
 
-          {noClusterCleanup && status.cleanup === "success" && (
+          {hasInfraFailure && (
+            <Box marginTop={1} flexDirection="column">
+              <Text color={colors.error} bold>
+                ✗ Infrastructure destroy failed
+              </Text>
+              <Text color={colors.error}>{infraError}</Text>
+              <Box marginTop={1}>
+                <Text color={colors.muted}>
+                  Cloud resources may still exist. Run `rulebricks destroy {name}{" "}
+                  --cluster` to retry.
+                </Text>
+              </Box>
+            </Box>
+          )}
+
+          {noClusterCleanup && status.cleanup === "success" && !hasInfraFailure && (
             <Box marginTop={1}>
               <Text color={colors.muted} dimColor>
                 Note: No cluster resources found, only local files were cleaned

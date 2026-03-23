@@ -193,37 +193,91 @@ export async function terraformApply(deploymentName: string): Promise<void> {
 }
 
 /**
- * Destroys Terraform infrastructure.
- * Runs init first to ensure .terraform folder exists (handles partial deployments).
+ * Cleans up orphaned cloud resources that may linger after a failed deploy or
+ * incomplete destroy. Best-effort: failures are logged but never thrown.
  */
-export async function terraformDestroy(deploymentName: string): Promise<void> {
-  const workDir = getTerraformDir(deploymentName);
-  
-  try {
-    // Run init first to ensure terraform is ready (handles partial deployments
-    // where .terraform folder might be missing or corrupted)
+export async function cleanupOrphanedResources(
+  provider: CloudProvider,
+  clusterName: string,
+  region: string,
+): Promise<void> {
+  if (provider === 'aws') {
+    // The EKS module (or AWS itself) creates /aws/eks/<cluster>/cluster.
+    // Since we disabled Terraform management of this log group, we must
+    // delete it ourselves to ensure a clean slate.
+    const logGroupName = `/aws/eks/${clusterName}/cluster`;
     try {
-      await execa('terraform', ['init', '-upgrade'], {
-        cwd: workDir
-      });
-    } catch (initError) {
-      // If init fails, still try destroy - it might work if state exists
-      const execaInitError = initError as ExecaError;
-      if (execaInitError.stdout || execaInitError.stderr) {
-        await saveLogFile(workDir, 'destroy-init', execaInitError.stdout || '', execaInitError.stderr || '');
-      }
-      // Don't throw - continue to try destroy anyway
+      await execa('aws', [
+        'logs', 'delete-log-group',
+        '--log-group-name', logGroupName,
+        '--region', region,
+      ]);
+    } catch {
+      // Log group may not exist — that's fine
     }
-    
-    await execa('terraform', ['destroy', '-auto-approve'], {
+  }
+  // GCP and Azure don't have an equivalent orphan problem today
+}
+
+const DESTROY_MAX_ATTEMPTS = 3;
+const DESTROY_RETRY_DELAY_MS = 5_000;
+
+/**
+ * Destroys Terraform infrastructure with retry logic.
+ * Runs init first to ensure .terraform folder exists (handles partial deployments).
+ * After all attempts, sweeps orphaned cloud resources that Terraform doesn't manage.
+ */
+export async function terraformDestroy(
+  deploymentName: string,
+  cloudContext?: { provider: CloudProvider; clusterName: string; region: string },
+): Promise<void> {
+  const workDir = getTerraformDir(deploymentName);
+
+  // Run init first to ensure terraform is ready
+  try {
+    await execa('terraform', ['init', '-upgrade'], {
       cwd: workDir
     });
-  } catch (error) {
-    const execaError = error as ExecaError;
-    if (execaError.stdout || execaError.stderr) {
-      await saveLogFile(workDir, 'destroy', execaError.stdout || '', execaError.stderr || '');
+  } catch (initError) {
+    const execaInitError = initError as ExecaError;
+    if (execaInitError.stdout || execaInitError.stderr) {
+      await saveLogFile(workDir, 'destroy-init', execaInitError.stdout || '', execaInitError.stderr || '');
     }
-    throw new Error(`Terraform destroy failed:\n${getErrorMessage(error, 'Unknown error')}\n\nLogs saved to: ${workDir}`);
+    // Don't throw — continue to try destroy anyway
+  }
+
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= DESTROY_MAX_ATTEMPTS; attempt++) {
+    try {
+      await execa('terraform', ['destroy', '-auto-approve'], {
+        cwd: workDir
+      });
+      lastError = undefined;
+      break;
+    } catch (error) {
+      const execaError = error as ExecaError;
+      if (execaError.stdout || execaError.stderr) {
+        await saveLogFile(workDir, `destroy-attempt-${attempt}`, execaError.stdout || '', execaError.stderr || '');
+      }
+      lastError = new Error(
+        `Terraform destroy failed (attempt ${attempt}/${DESTROY_MAX_ATTEMPTS}):\n` +
+        `${getErrorMessage(error, 'Unknown error')}\n\nLogs saved to: ${workDir}`
+      );
+
+      if (attempt < DESTROY_MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, DESTROY_RETRY_DELAY_MS));
+      }
+    }
+  }
+
+  // Best-effort cleanup of orphaned cloud resources regardless of destroy outcome
+  if (cloudContext) {
+    await cleanupOrphanedResources(cloudContext.provider, cloudContext.clusterName, cloudContext.region);
+  }
+
+  if (lastError) {
+    throw lastError;
   }
 }
 

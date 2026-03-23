@@ -23,6 +23,7 @@ import {
   terraformPlan,
   terraformApply,
   terraformDestroy,
+  cleanupOrphanedResources,
   updateKubeconfig,
   hasTerraformState,
   isTerraformInstalled,
@@ -115,7 +116,14 @@ function DeployCommandInner({
   const handleCleanup = useCallback(async () => {
     setStep("cleanup-running");
     try {
-      await terraformDestroy(name);
+      const cloudContext = config?.infrastructure.provider && config?.infrastructure.region
+        ? {
+            provider: config.infrastructure.provider,
+            clusterName: config.infrastructure.clusterName || `${name}-cluster`,
+            region: config.infrastructure.region,
+          }
+        : undefined;
+      await terraformDestroy(name, cloudContext);
       setStep("cleanup-complete");
       setTimeout(() => exit(), 3000);
     } catch (err) {
@@ -123,7 +131,7 @@ function DeployCommandInner({
       setStep("cleanup-complete");
       setTimeout(() => exit(), 5000);
     }
-  }, [name, exit]);
+  }, [name, config, exit]);
 
   const skipCleanup = useCallback(() => {
     setStep("error");
@@ -275,6 +283,16 @@ function DeployCommandInner({
 
         setStep("infra-plan");
         await terraformPlan(name);
+
+        // Clean up orphaned cloud resources from prior failed deployments
+        // (e.g. CloudWatch log groups that survived an incomplete destroy)
+        if (cfg.infrastructure.provider && cfg.infrastructure.region) {
+          await cleanupOrphanedResources(
+            cfg.infrastructure.provider,
+            cfg.infrastructure.clusterName || `${name}-cluster`,
+            cfg.infrastructure.region,
+          );
+        }
 
         setStep("infra-apply");
         await terraformApply(name);
