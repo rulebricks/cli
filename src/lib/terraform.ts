@@ -294,7 +294,33 @@ async function deleteAwsCloudWatchLogGroup(clusterName: string, region: string):
   } catch { /* may not exist */ }
 }
 
-async function deleteAwsOidcProvider(clusterName: string): Promise<void> {
+/**
+ * Captures the OIDC issuer URL from an EKS cluster before it's deleted.
+ * The URL uses a random cluster ID (not the cluster name), so we must
+ * grab it while the cluster still exists to identify the OIDC provider later.
+ */
+async function getEksOidcIssuer(clusterName: string, region: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execa('aws', [
+      'eks', 'describe-cluster',
+      '--name', clusterName,
+      '--region', region,
+      '--query', 'cluster.identity.oidc.issuer',
+      '--output', 'text',
+    ]);
+    const url = stdout.trim();
+    return url && url !== 'None' ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function deleteAwsOidcProvider(oidcIssuerUrl: string | undefined): Promise<void> {
+  if (!oidcIssuerUrl) return;
+
+  // Strip the https:// prefix to match how IAM stores the URL
+  const issuerHost = oidcIssuerUrl.replace('https://', '');
+
   let providerArns: string[];
   try {
     const { stdout } = await execa('aws', [
@@ -315,7 +341,7 @@ async function deleteAwsOidcProvider(clusterName: string): Promise<void> {
         '--output', 'json',
       ]);
       const parsed = JSON.parse(stdout) as { Url?: string };
-      if (parsed.Url && parsed.Url.includes(clusterName)) {
+      if (parsed.Url && issuerHost.includes(parsed.Url)) {
         await execa('aws', [
           'iam', 'delete-open-id-connect-provider',
           '--open-id-connect-provider-arn', arn,
@@ -323,6 +349,28 @@ async function deleteAwsOidcProvider(clusterName: string): Promise<void> {
       }
     } catch { /* skip */ }
   }
+}
+
+async function releaseAwsElasticIps(clusterName: string, region: string): Promise<void> {
+  try {
+    const { stdout } = await execa('aws', [
+      'ec2', 'describe-addresses',
+      '--filters', `Name=tag:Name,Values=*${clusterName}*`,
+      '--region', region,
+      '--query', 'Addresses[?AssociationId==null].AllocationId',
+      '--output', 'json',
+    ]);
+    const allocationIds = JSON.parse(stdout) as string[];
+    for (const id of allocationIds) {
+      try {
+        await execa('aws', [
+          'ec2', 'release-address',
+          '--allocation-id', id,
+          '--region', region,
+        ]);
+      } catch { /* may already be released */ }
+    }
+  } catch { /* skip */ }
 }
 
 async function deleteAwsIamRole(roleName: string): Promise<void> {
@@ -410,6 +458,68 @@ async function deleteAwsKmsAlias(clusterName: string, region: string): Promise<v
   }
 }
 
+/**
+ * Finds KMS keys by the description the EKS module uses, and schedules them for
+ * deletion. Catches keys that survive after their alias is already deleted.
+ */
+async function scheduleAwsOrphanedKmsKeys(clusterName: string, region: string): Promise<void> {
+  try {
+    const { stdout } = await execa('aws', [
+      'kms', 'list-keys',
+      '--region', region,
+      '--query', 'Keys[].KeyId',
+      '--output', 'json',
+    ]);
+    const keyIds = JSON.parse(stdout) as string[];
+    for (const keyId of keyIds) {
+      try {
+        const { stdout: meta } = await execa('aws', [
+          'kms', 'describe-key',
+          '--key-id', keyId,
+          '--region', region,
+          '--query', 'KeyMetadata.{State:KeyState,Desc:Description,Manager:KeyManager}',
+          '--output', 'json',
+        ]);
+        const info = JSON.parse(meta) as { State: string; Desc: string; Manager: string };
+        if (
+          info.Manager === 'CUSTOMER' &&
+          info.State === 'Enabled' &&
+          info.Desc.includes(clusterName)
+        ) {
+          await execa('aws', [
+            'kms', 'schedule-key-deletion',
+            '--key-id', keyId,
+            '--pending-window-in-days', '7',
+            '--region', region,
+          ]);
+        }
+      } catch { /* skip individual key */ }
+    }
+  } catch { /* skip */ }
+}
+
+async function deleteAwsLaunchTemplates(clusterName: string, region: string): Promise<void> {
+  try {
+    const { stdout } = await execa('aws', [
+      'ec2', 'describe-launch-templates',
+      '--filters', `Name=tag:Environment,Values=rulebricks`,
+      '--region', region,
+      '--query', 'LaunchTemplates[].LaunchTemplateId',
+      '--output', 'json',
+    ]);
+    const ids = JSON.parse(stdout) as string[];
+    for (const id of ids) {
+      try {
+        await execa('aws', [
+          'ec2', 'delete-launch-template',
+          '--launch-template-id', id,
+          '--region', region,
+        ]);
+      } catch { /* may not exist or in use */ }
+    }
+  } catch { /* skip */ }
+}
+
 async function deleteAwsIamPolicy(policyName: string): Promise<void> {
   try {
     const { stdout } = await execa('aws', [
@@ -432,6 +542,10 @@ async function deleteAwsIamPolicy(policyName: string): Promise<void> {
  * Entirely best-effort: every step silently swallows errors.
  */
 async function cleanupAwsResources(clusterName: string, region: string): Promise<void> {
+  // Capture the OIDC issuer URL BEFORE deleting the cluster -- the URL uses a
+  // random cluster ID (not the cluster name) so we can't find it after deletion.
+  const oidcIssuerUrl = await getEksOidcIssuer(clusterName, region);
+
   // 1. EKS node groups (must be deleted before cluster)
   await deleteAwsEksNodeGroups(clusterName, region);
 
@@ -441,8 +555,8 @@ async function cleanupAwsResources(clusterName: string, region: string): Promise
   // 3. CloudWatch log group (now safe -- cluster is gone, won't be recreated)
   await deleteAwsCloudWatchLogGroup(clusterName, region);
 
-  // 4. OIDC provider (created by EKS module for IRSA)
-  await deleteAwsOidcProvider(clusterName);
+  // 4. OIDC provider (matched by issuer URL captured above)
+  await deleteAwsOidcProvider(oidcIssuerUrl);
 
   // 5. IAM roles created by terraform modules
   await deleteAwsIamRole(`${clusterName}-ebs-csi`);
@@ -454,6 +568,15 @@ async function cleanupAwsResources(clusterName: string, region: string): Promise
 
   // 7. KMS key + alias (created by EKS module for envelope encryption)
   await deleteAwsKmsAlias(clusterName, region);
+
+  // 8. KMS keys that lost their alias but are still Enabled (matched by description)
+  await scheduleAwsOrphanedKmsKeys(clusterName, region);
+
+  // 9. Launch templates (created by EKS managed node groups)
+  await deleteAwsLaunchTemplates(clusterName, region);
+
+  // 10. Elastic IPs (created by VPC module for NAT gateways, cost money if leaked)
+  await releaseAwsElasticIps(clusterName, region);
 }
 
 /**
