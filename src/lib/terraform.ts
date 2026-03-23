@@ -370,6 +370,46 @@ async function deleteAwsIamRole(roleName: string): Promise<void> {
   } catch { /* may not exist */ }
 }
 
+async function deleteAwsKmsAlias(clusterName: string, region: string): Promise<void> {
+  const aliasName = `alias/eks/${clusterName}`;
+  let keyId: string | undefined;
+
+  // Find the KMS key behind the alias so we can schedule it for deletion
+  try {
+    const { stdout } = await execa('aws', [
+      'kms', 'list-aliases',
+      '--query', `Aliases[?AliasName=='${aliasName}'].TargetKeyId | [0]`,
+      '--output', 'text',
+      '--region', region,
+    ]);
+    const id = stdout.trim();
+    if (id && id !== 'None') {
+      keyId = id;
+    }
+  } catch { /* skip */ }
+
+  // Delete the alias (unique name constraint -- blocks re-deploy if left behind)
+  try {
+    await execa('aws', [
+      'kms', 'delete-alias',
+      '--alias-name', aliasName,
+      '--region', region,
+    ]);
+  } catch { /* may not exist */ }
+
+  // Schedule the underlying key for deletion (7-day mandatory minimum)
+  if (keyId) {
+    try {
+      await execa('aws', [
+        'kms', 'schedule-key-deletion',
+        '--key-id', keyId,
+        '--pending-window-in-days', '7',
+        '--region', region,
+      ]);
+    } catch { /* key may already be pending deletion or not exist */ }
+  }
+}
+
 async function deleteAwsIamPolicy(policyName: string): Promise<void> {
   try {
     const { stdout } = await execa('aws', [
@@ -411,6 +451,9 @@ async function cleanupAwsResources(clusterName: string, region: string): Promise
 
   // 6. Customer-managed IAM policies
   await deleteAwsIamPolicy(`${clusterName}-vector-s3`);
+
+  // 7. KMS key + alias (created by EKS module for envelope encryption)
+  await deleteAwsKmsAlias(clusterName, region);
 }
 
 /**
