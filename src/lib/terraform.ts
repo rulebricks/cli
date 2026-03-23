@@ -193,8 +193,9 @@ export async function terraformApply(deploymentName: string): Promise<void> {
 }
 
 /**
- * Cleans up orphaned cloud resources that may linger after a failed deploy or
- * incomplete destroy. Best-effort: failures are logged but never thrown.
+ * Lightweight pre-deploy cleanup for the CloudWatch log group that the EKS module
+ * no longer manages (create_cloudwatch_log_group = false). Safe to call before
+ * terraform apply since it targets a resource outside terraform's control.
  */
 export async function cleanupOrphanedResources(
   provider: CloudProvider,
@@ -202,9 +203,6 @@ export async function cleanupOrphanedResources(
   region: string,
 ): Promise<void> {
   if (provider === 'aws') {
-    // The EKS module (or AWS itself) creates /aws/eks/<cluster>/cluster.
-    // Since we disabled Terraform management of this log group, we must
-    // delete it ourselves to ensure a clean slate.
     const logGroupName = `/aws/eks/${clusterName}/cluster`;
     try {
       await execa('aws', [
@@ -216,16 +214,213 @@ export async function cleanupOrphanedResources(
       // Log group may not exist — that's fine
     }
   }
-  // GCP and Azure don't have an equivalent orphan problem today
 }
 
-const DESTROY_MAX_ATTEMPTS = 3;
-const DESTROY_RETRY_DELAY_MS = 5_000;
+// ============================================================================
+// Post-destroy cloud-native cleanup (AWS)
+//
+// Handles every uniquely-named resource that terraform tends to leave behind
+// after a failed destroy or partial apply. Runs unconditionally after every
+// terraform destroy since terraform can report success while resources linger.
+// Every step is best-effort: failures are silently swallowed.
+// ============================================================================
+
+async function deleteAwsEksNodeGroups(clusterName: string, region: string): Promise<void> {
+  let nodeGroups: string[];
+  try {
+    const { stdout } = await execa('aws', [
+      'eks', 'list-nodegroups',
+      '--cluster-name', clusterName,
+      '--region', region,
+      '--output', 'json',
+    ]);
+    const parsed = JSON.parse(stdout) as { nodegroups?: string[] };
+    nodeGroups = parsed.nodegroups ?? [];
+  } catch {
+    return; // Cluster may not exist
+  }
+
+  for (const ng of nodeGroups) {
+    try {
+      await execa('aws', [
+        'eks', 'delete-nodegroup',
+        '--cluster-name', clusterName,
+        '--nodegroup-name', ng,
+        '--region', region,
+      ]);
+    } catch { /* already gone */ }
+  }
+
+  // Wait for all node groups to finish deleting
+  for (const ng of nodeGroups) {
+    try {
+      await execa('aws', [
+        'eks', 'wait', 'nodegroup-deleted',
+        '--cluster-name', clusterName,
+        '--nodegroup-name', ng,
+        '--region', region,
+      ]);
+    } catch { /* timeout or already gone */ }
+  }
+}
+
+async function deleteAwsEksCluster(clusterName: string, region: string): Promise<void> {
+  try {
+    await execa('aws', [
+      'eks', 'delete-cluster',
+      '--name', clusterName,
+      '--region', region,
+    ]);
+  } catch {
+    return; // Cluster may not exist
+  }
+
+  try {
+    await execa('aws', [
+      'eks', 'wait', 'cluster-deleted',
+      '--name', clusterName,
+      '--region', region,
+    ]);
+  } catch { /* timeout or already gone */ }
+}
+
+async function deleteAwsCloudWatchLogGroup(clusterName: string, region: string): Promise<void> {
+  try {
+    await execa('aws', [
+      'logs', 'delete-log-group',
+      '--log-group-name', `/aws/eks/${clusterName}/cluster`,
+      '--region', region,
+    ]);
+  } catch { /* may not exist */ }
+}
+
+async function deleteAwsOidcProvider(clusterName: string): Promise<void> {
+  let providerArns: string[];
+  try {
+    const { stdout } = await execa('aws', [
+      'iam', 'list-open-id-connect-providers',
+      '--output', 'json',
+    ]);
+    const parsed = JSON.parse(stdout) as { OpenIDConnectProviderList?: { Arn: string }[] };
+    providerArns = (parsed.OpenIDConnectProviderList ?? []).map((p) => p.Arn);
+  } catch {
+    return;
+  }
+
+  for (const arn of providerArns) {
+    try {
+      const { stdout } = await execa('aws', [
+        'iam', 'get-open-id-connect-provider',
+        '--open-id-connect-provider-arn', arn,
+        '--output', 'json',
+      ]);
+      const parsed = JSON.parse(stdout) as { Url?: string };
+      if (parsed.Url && parsed.Url.includes(clusterName)) {
+        await execa('aws', [
+          'iam', 'delete-open-id-connect-provider',
+          '--open-id-connect-provider-arn', arn,
+        ]);
+      }
+    } catch { /* skip */ }
+  }
+}
+
+async function deleteAwsIamRole(roleName: string): Promise<void> {
+  // Detach all managed policies
+  try {
+    const { stdout } = await execa('aws', [
+      'iam', 'list-attached-role-policies',
+      '--role-name', roleName,
+      '--output', 'json',
+    ]);
+    const parsed = JSON.parse(stdout) as { AttachedPolicies?: { PolicyArn: string }[] };
+    for (const policy of parsed.AttachedPolicies ?? []) {
+      try {
+        await execa('aws', [
+          'iam', 'detach-role-policy',
+          '--role-name', roleName,
+          '--policy-arn', policy.PolicyArn,
+        ]);
+      } catch { /* skip */ }
+    }
+  } catch { /* role may not exist */ }
+
+  // Delete inline policies
+  try {
+    const { stdout } = await execa('aws', [
+      'iam', 'list-role-policies',
+      '--role-name', roleName,
+      '--output', 'json',
+    ]);
+    const parsed = JSON.parse(stdout) as { PolicyNames?: string[] };
+    for (const policyName of parsed.PolicyNames ?? []) {
+      try {
+        await execa('aws', [
+          'iam', 'delete-role-policy',
+          '--role-name', roleName,
+          '--policy-name', policyName,
+        ]);
+      } catch { /* skip */ }
+    }
+  } catch { /* role may not exist */ }
+
+  // Delete the role itself
+  try {
+    await execa('aws', ['iam', 'delete-role', '--role-name', roleName]);
+  } catch { /* may not exist */ }
+}
+
+async function deleteAwsIamPolicy(policyName: string): Promise<void> {
+  try {
+    const { stdout } = await execa('aws', [
+      'iam', 'list-policies',
+      '--query', `Policies[?PolicyName=='${policyName}']`,
+      '--output', 'json',
+    ]);
+    const policies = JSON.parse(stdout) as { Arn: string }[];
+    for (const policy of policies) {
+      try {
+        await execa('aws', ['iam', 'delete-policy', '--policy-arn', policy.Arn]);
+      } catch { /* may have attachments or not exist */ }
+    }
+  } catch { /* skip */ }
+}
 
 /**
- * Destroys Terraform infrastructure with retry logic.
- * Runs init first to ensure .terraform folder exists (handles partial deployments).
- * After all attempts, sweeps orphaned cloud resources that Terraform doesn't manage.
+ * Comprehensive post-destroy cleanup of AWS resources that terraform leaves
+ * behind. Handles the full dependency chain in the correct order.
+ * Entirely best-effort: every step silently swallows errors.
+ */
+async function cleanupAwsResources(clusterName: string, region: string): Promise<void> {
+  // 1. EKS node groups (must be deleted before cluster)
+  await deleteAwsEksNodeGroups(clusterName, region);
+
+  // 2. EKS cluster
+  await deleteAwsEksCluster(clusterName, region);
+
+  // 3. CloudWatch log group (now safe -- cluster is gone, won't be recreated)
+  await deleteAwsCloudWatchLogGroup(clusterName, region);
+
+  // 4. OIDC provider (created by EKS module for IRSA)
+  await deleteAwsOidcProvider(clusterName);
+
+  // 5. IAM roles created by terraform modules
+  await deleteAwsIamRole(`${clusterName}-ebs-csi`);
+  await deleteAwsIamRole(`${clusterName}-external-dns`);
+  await deleteAwsIamRole(`${clusterName}-vector`);
+
+  // 6. Customer-managed IAM policies
+  await deleteAwsIamPolicy(`${clusterName}-vector-s3`);
+}
+
+/**
+ * Destroys Terraform infrastructure, then sweeps remaining cloud resources.
+ *
+ * Flow:
+ *   1. terraform destroy (single attempt)
+ *   2. Cloud-native cleanup ALWAYS runs (terraform can report success while
+ *      resources still exist)
+ *   3. If terraform reported failure, try once more now that blockers are gone
  */
 export async function terraformDestroy(
   deploymentName: string,
@@ -243,41 +438,41 @@ export async function terraformDestroy(
     if (execaInitError.stdout || execaInitError.stderr) {
       await saveLogFile(workDir, 'destroy-init', execaInitError.stdout || '', execaInitError.stderr || '');
     }
-    // Don't throw — continue to try destroy anyway
   }
 
-  let lastError: Error | undefined;
+  // First terraform destroy attempt
+  let firstAttemptFailed = false;
+  try {
+    await execa('terraform', ['destroy', '-auto-approve'], {
+      cwd: workDir
+    });
+  } catch (error) {
+    firstAttemptFailed = true;
+    const execaError = error as ExecaError;
+    if (execaError.stdout || execaError.stderr) {
+      await saveLogFile(workDir, 'destroy', execaError.stdout || '', execaError.stderr || '');
+    }
+  }
 
-  for (let attempt = 1; attempt <= DESTROY_MAX_ATTEMPTS; attempt++) {
+  // ALWAYS run cloud-native cleanup -- terraform can't be trusted to report
+  // accurately whether all resources were actually destroyed
+  if (cloudContext?.provider === 'aws') {
+    await cleanupAwsResources(cloudContext.clusterName, cloudContext.region);
+  }
+
+  // If terraform failed, try once more now that cloud-native cleanup removed blockers
+  if (firstAttemptFailed) {
     try {
       await execa('terraform', ['destroy', '-auto-approve'], {
         cwd: workDir
       });
-      lastError = undefined;
-      break;
     } catch (error) {
       const execaError = error as ExecaError;
       if (execaError.stdout || execaError.stderr) {
-        await saveLogFile(workDir, `destroy-attempt-${attempt}`, execaError.stdout || '', execaError.stderr || '');
+        await saveLogFile(workDir, 'destroy-final', execaError.stdout || '', execaError.stderr || '');
       }
-      lastError = new Error(
-        `Terraform destroy failed (attempt ${attempt}/${DESTROY_MAX_ATTEMPTS}):\n` +
-        `${getErrorMessage(error, 'Unknown error')}\n\nLogs saved to: ${workDir}`
-      );
-
-      if (attempt < DESTROY_MAX_ATTEMPTS) {
-        await new Promise((r) => setTimeout(r, DESTROY_RETRY_DELAY_MS));
-      }
+      throw new Error(`Terraform destroy failed:\n${getErrorMessage(error, 'Unknown error')}\n\nLogs saved to: ${workDir}`);
     }
-  }
-
-  // Best-effort cleanup of orphaned cloud resources regardless of destroy outcome
-  if (cloudContext) {
-    await cleanupOrphanedResources(cloudContext.provider, cloudContext.clusterName, cloudContext.region);
-  }
-
-  if (lastError) {
-    throw lastError;
   }
 }
 
