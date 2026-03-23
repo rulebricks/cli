@@ -16,7 +16,9 @@ import { BenchmarkCommand } from "./commands/benchmark.js";
 import { listDeployments, deploymentExists } from "./lib/config.js";
 import { THEMES } from "./lib/theme.js";
 
-const VERSION = "2.0.0";
+import packageJson from "../package.json" with { type: "json" };
+
+const VERSION = packageJson.version;
 
 const program = new Command();
 
