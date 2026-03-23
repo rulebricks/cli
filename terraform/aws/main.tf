@@ -150,7 +150,7 @@ module "eks" {
     rulebricks = {
       name           = "rulebricks-nodes"
       instance_types = [local.config.instance_type]
-      ami_type       = "AL2023_ARM_64"  # ARM AMI for Graviton instances
+      ami_type       = "AL2023_ARM_64_STANDARD"  # ARM AMI for Graviton instances
 
       min_size     = local.config.min_nodes
       max_size     = local.config.max_nodes
