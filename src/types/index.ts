@@ -109,23 +109,23 @@ export const CLOUD_REGIONS: Record<CloudProvider, string[]> = {
   gcp: [
     // Tier 1: Full C4A (Google Axion ARM64) availability - 3+ zones confirmed
     // US regions
-    "us-central1",    // C4A in zones a, b, c, f (best availability)
-    "us-east1",       // C4A in zones b, c, d
-    "us-east4",       // C4A in zones a, b, c
-    "us-west1",       // C4A in zones a, b, c
-    "us-west4",       // C4A in zones a, b, c
+    "us-central1", // C4A in zones a, b, c, f (best availability)
+    "us-east1", // C4A in zones b, c, d
+    "us-east4", // C4A in zones a, b, c
+    "us-west1", // C4A in zones a, b, c
+    "us-west4", // C4A in zones a, b, c
     // North America
     "northamerica-south1", // C4A in zones a, b, c (Mexico)
     // Europe
-    "europe-west1",   // C4A in zones b, c, d
-    "europe-west2",   // C4A in zones a, b, c
-    "europe-west3",   // C4A in zones a, b, c
-    "europe-west4",   // C4A in zones a, b, c
-    "europe-north1",  // C4A in zones a, b
+    "europe-west1", // C4A in zones b, c, d
+    "europe-west2", // C4A in zones a, b, c
+    "europe-west3", // C4A in zones a, b, c
+    "europe-west4", // C4A in zones a, b, c
+    "europe-north1", // C4A in zones a, b
     // Asia Pacific
-    "asia-east1",     // C4A in zones a, b, c
+    "asia-east1", // C4A in zones a, b, c
     "asia-northeast1", // C4A in zones b, c
-    "asia-south1",    // C4A in zones a, b, c
+    "asia-south1", // C4A in zones a, b, c
     "asia-southeast1", // C4A in zones a, b, c
     // Australia
     "australia-southeast2", // C4A in zones a, b, c
@@ -823,7 +823,7 @@ export type ProfileConfig = z.infer<typeof ProfileConfigSchema>;
 
 // Constants
 export const CHANGELOG_URL = "https://rulebricks.com/docs/changelog";
-export const HELM_CHART_OCI = "oci://ghcr.io/rulebricks/charts/stack";
+export const HELM_CHART_OCI = "oci://ghcr.io/rulebricks/helm/stack";
 
 // Legacy namespace/release name - kept for backwards compatibility with existing deployments
 export const DEFAULT_NAMESPACE = "rulebricks";

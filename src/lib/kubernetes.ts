@@ -363,18 +363,38 @@ export async function getCertificateStatus(
       items: Array<{
         metadata: { name: string };
         spec: { dnsNames?: string[] };
-        status: { conditions?: Array<{ type: string; status: string }> };
+        status: {
+          conditions?: Array<{
+            type: string;
+            status: string;
+            reason?: string;
+            message?: string;
+          }>;
+        };
       }>;
     };
 
-    return data.items.map((cert) => ({
-      name: cert.metadata.name,
-      dnsNames: cert.spec.dnsNames ?? [],
-      ready:
-        cert.status.conditions?.some(
-          (c) => c.type === "Ready" && c.status === "True",
-        ) ?? false,
-    }));
+    return data.items.map((cert) => {
+      const readyCond = cert.status.conditions?.find(
+        (c) => c.type === "Ready",
+      );
+      const issuingCond = cert.status.conditions?.find(
+        (c) => c.type === "Issuing",
+      );
+      const ready = readyCond?.status === "True";
+      const failed =
+        !ready &&
+        issuingCond?.status === "False" &&
+        issuingCond?.reason === "Failed";
+
+      return {
+        name: cert.metadata.name,
+        dnsNames: cert.spec.dnsNames ?? [],
+        ready,
+        failed: failed ?? false,
+        message: failed ? issuingCond?.message : readyCond?.message,
+      };
+    });
   } catch {
     return [];
   }
@@ -384,6 +404,124 @@ export interface CertificateStatus {
   name: string;
   dnsNames: string[];
   ready: boolean;
+  failed: boolean;
+  message?: string;
+}
+
+/**
+ * Deletes a failed cert-manager Certificate and recreates it from its spec,
+ * bypassing cert-manager's exponential backoff on failed issuance attempts.
+ * The delete cascades to the failed CertificateRequest and ACME Order via
+ * owner references, so the recreated Certificate starts with a clean slate.
+ */
+export async function recreateFailedCertificate(
+  namespace: string,
+  certName: string,
+): Promise<boolean> {
+  try {
+    const { stdout } = await execa("kubectl", [
+      "get",
+      "certificate",
+      certName,
+      "-n",
+      namespace,
+      "-o",
+      "json",
+    ]);
+
+    const cert = JSON.parse(stdout) as {
+      metadata: {
+        name: string;
+        namespace: string;
+        labels?: Record<string, string>;
+        annotations?: Record<string, string>;
+      };
+      spec: Record<string, unknown>;
+    };
+
+    const recreated = {
+      apiVersion: "cert-manager.io/v1",
+      kind: "Certificate",
+      metadata: {
+        name: cert.metadata.name,
+        namespace: cert.metadata.namespace,
+        ...(cert.metadata.labels ? { labels: cert.metadata.labels } : {}),
+        ...(cert.metadata.annotations
+          ? { annotations: cert.metadata.annotations }
+          : {}),
+      },
+      spec: cert.spec,
+    };
+
+    await execa("kubectl", ["delete", "certificate", certName, "-n", namespace]);
+    await execa("kubectl", ["apply", "-f", "-"], {
+      input: JSON.stringify(recreated),
+    });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Polls cert-manager Certificates until all are Ready, with automatic retry
+ * for transient ACME failures (e.g. order finalization race conditions).
+ *
+ * On failure detection: deletes and recreates the Certificate resource to
+ * bypass cert-manager's 1-hour exponential backoff, then continues polling.
+ *
+ * Throws on timeout with details about which certs are not ready.
+ * Returns silently if no Certificate resources exist in the namespace.
+ */
+export async function waitForCertificatesReady(
+  namespace: string,
+  options?: {
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+    maxRetries?: number;
+  },
+): Promise<void> {
+  const {
+    timeoutMs = 120_000,
+    pollIntervalMs = 5_000,
+    maxRetries = 1,
+  } = options ?? {};
+
+  let retriesUsed = 0;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const certs = await getCertificateStatus(namespace);
+
+    if (certs.length === 0) return;
+    if (certs.every((c) => c.ready)) return;
+
+    const failed = certs.filter((c) => c.failed);
+    if (failed.length > 0 && retriesUsed < maxRetries) {
+      for (const cert of failed) {
+        await recreateFailedCertificate(namespace, cert.name);
+      }
+      retriesUsed++;
+    }
+
+    await sleep(pollIntervalMs);
+  }
+
+  // Final check after timeout
+  const certs = await getCertificateStatus(namespace);
+  if (certs.length > 0 && certs.every((c) => c.ready)) return;
+
+  const notReady = certs.filter((c) => !c.ready);
+  if (notReady.length > 0) {
+    const details = notReady
+      .map((c) => `  ${c.name}: ${c.message || "not ready"}`)
+      .join("\n");
+    throw new Error(
+      `TLS certificates not ready after ${timeoutMs / 1000}s:\n${details}\n\n` +
+        `Run 'rulebricks status' to check certificate status.`,
+    );
+  }
 }
 
 /**

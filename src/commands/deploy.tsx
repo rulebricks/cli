@@ -43,6 +43,7 @@ import {
 import {
   isKubectlInstalled,
   checkClusterAccessible,
+  waitForCertificatesReady,
 } from "../lib/kubernetes.js";
 import {
   generateHelmValues,
@@ -72,6 +73,7 @@ type DeployStep =
   | "infra-apply"
   | "kubeconfig"
   | "helm-install" // Single-phase (External DNS) or Phase 1 (manual DNS)
+  | "cert-check" // TLS certificate verification after Helm install/upgrade
   | "dns-wait" // Only for manual DNS
   | "helm-upgrade-tls" // Only for manual DNS
   | "complete"
@@ -85,6 +87,7 @@ interface StepStatus {
   infrastructure: "pending" | "running" | "success" | "error" | "skipped";
   kubeconfig: "pending" | "running" | "success" | "error" | "skipped";
   helmInstall: "pending" | "running" | "success" | "error" | "skipped";
+  certCheck: "pending" | "running" | "success" | "error" | "skipped";
   dnsConfig: "pending" | "running" | "success" | "error" | "skipped";
   helmUpgradeTls: "pending" | "running" | "success" | "error" | "skipped";
 }
@@ -103,11 +106,13 @@ function DeployCommandInner({
   const [useExternalDns, setUseExternalDns] = useState(false);
   const infraStartedRef = useRef(false); // Track if we started infra provisioning (ref for sync access)
   const [cleanupError, setCleanupError] = useState<string | null>(null);
+  const [tlsWarning, setTlsWarning] = useState<string | null>(null);
   const [status, setStatus] = useState<StepStatus>({
     preflight: "pending",
     infrastructure: "pending",
     kubeconfig: "pending",
     helmInstall: "pending",
+    certCheck: "pending",
     dnsConfig: "pending",
     helmUpgradeTls: "pending",
   });
@@ -173,7 +178,19 @@ function DeployCommandInner({
       // Upgrade the chart with TLS enabled
       await upgradeChart(name, { releaseName, namespace, version, wait: true });
 
-      setStatus((s) => ({ ...s, helmUpgradeTls: "success" }));
+      setStatus((s) => ({ ...s, helmUpgradeTls: "success", certCheck: "running" }));
+
+      setStep("cert-check");
+      try {
+        await waitForCertificatesReady(namespace);
+        setStatus((s) => ({ ...s, certCheck: "success" }));
+      } catch (certErr) {
+        setStatus((s) => ({ ...s, certCheck: "error" }));
+        setTlsWarning(
+          "TLS certificates are still being issued. " +
+            "HTTPS may not be available yet.",
+        );
+      }
 
       // Update state
       await updateDeploymentStatus(name, "running", {
@@ -205,6 +222,7 @@ function DeployCommandInner({
       ...s,
       dnsConfig: "skipped",
       helmUpgradeTls: "skipped",
+      certCheck: "skipped",
     }));
 
     const namespace = getNamespace(config.name);
@@ -351,7 +369,20 @@ function DeployCommandInner({
           helmInstall: "success",
           dnsConfig: "skipped", // External DNS handles this
           helmUpgradeTls: "skipped", // TLS enabled from start
+          certCheck: "running",
         }));
+
+        setStep("cert-check");
+        try {
+          await waitForCertificatesReady(namespace);
+          setStatus((s) => ({ ...s, certCheck: "success" }));
+        } catch (certErr) {
+          setStatus((s) => ({ ...s, certCheck: "error" }));
+          setTlsWarning(
+            "TLS certificates are still being issued. " +
+              "HTTPS may not be available yet.",
+          );
+        }
 
         // Update state to running
         await updateDeploymentStatus(name, "running", {
@@ -385,6 +416,7 @@ function DeployCommandInner({
             ...s,
             dnsConfig: "skipped",
             helmUpgradeTls: "skipped",
+            certCheck: "skipped",
           }));
           await updateDeploymentStatus(name, "waiting-dns", {
             application: {
@@ -748,6 +780,13 @@ function DeployCommandInner({
                 </Text>
               </Box>
             )}
+            {tlsWarning && (
+              <Box marginTop={1}>
+                <Text color={colors.warning}>
+                  ⚠ {tlsWarning}
+                </Text>
+              </Box>
+            )}
           </Box>
 
           <Box marginTop={1} flexDirection="column">
@@ -764,6 +803,12 @@ function DeployCommandInner({
               <Text color={colors.muted}>
                 {" "}
                 • Configure DNS and re-run deploy for TLS
+              </Text>
+            )}
+            {tlsWarning && (
+              <Text color={colors.muted}>
+                {" "}
+                • Run `rulebricks status {name}` to check TLS certificate status
               </Text>
             )}
           </Box>
@@ -820,6 +865,10 @@ function DeployCommandInner({
             />
           </>
         )}
+        <StatusLine
+          status={status.certCheck}
+          label="TLS certificate verification"
+        />
 
         {step !== "dns-wait" && (
           <Box marginTop={1}>
@@ -866,6 +915,8 @@ function getStepLabel(step: DeployStep, useExternalDns: boolean): string {
       return "Waiting for DNS configuration...";
     case "helm-upgrade-tls":
       return "Enabling TLS certificates...";
+    case "cert-check":
+      return "Verifying TLS certificates...";
     default:
       return "Processing...";
   }
