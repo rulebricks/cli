@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createRequire } from "node:module";
 import { Command } from "commander";
 import { render } from "ink";
 import React from "react";
@@ -14,9 +15,9 @@ import { CloneCommand } from "./commands/clone.js";
 import { OpenCommand } from "./commands/open.js";
 import { BenchmarkCommand } from "./commands/benchmark.js";
 import { listDeployments, deploymentExists } from "./lib/config.js";
-import { THEMES } from "./lib/theme.js";
 
-import packageJson from "../package.json" with { type: "json" };
+const require = createRequire(import.meta.url);
+const packageJson = require("../package.json") as { version: string };
 
 const VERSION = packageJson.version;
 
