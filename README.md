@@ -27,6 +27,32 @@ Finally, you will need to have the following tools installed and ready on your m
 - **Terraform** >= 1.0 (for infrastructure provisioning)
 - Cloud CLI (`aws`, `gcloud`, or `az`) configured for your provider
 
+## Cluster Setup
+
+If you want to create the Kubernetes cluster yourself, use the resources in `cluster-setup/` before running the CLI wizard. These files provide minimum compatible AWS, Azure, and GCP cluster setup guidance plus optional access checks. Monitoring destinations are configured later by the CLI wizard and Helm values, not by these cluster setup files.
+
+```bash
+# AWS: optional access check, then create EKS with eksctl
+AWS_REGION=us-east-1 bash cluster-setup/aws/check-aws-access.sh
+cd cluster-setup/aws && eksctl create cluster -f cluster.yaml
+
+# Azure: optional access check, then deploy AKS with Bicep
+az login
+az account set --subscription <subscription-id>
+AZURE_LOCATION=eastus bash cluster-setup/azure/check-aks-prereqs.sh
+az group create --name rulebricks-rg --location eastus
+az deployment group create \
+  --resource-group rulebricks-rg \
+  --template-file cluster-setup/azure/main.bicep \
+  --parameters @cluster-setup/azure/main.parameters.json
+
+# GCP: optional access check, then create GKE with gcloud
+GCP_REGION=us-central1 bash cluster-setup/gcp/check-gke-prereqs.sh
+# Follow cluster-setup/gcp/README.md for the gcloud create commands.
+```
+
+After the cluster exists, update kubeconfig, then run `rulebricks init` and choose **Use existing Kubernetes cluster**. The existing Terraform provisioning path remains available, but native cloud setup is the clearest path when you want to own the cluster directly.
+
 ## Quick Start
 
 ```bash

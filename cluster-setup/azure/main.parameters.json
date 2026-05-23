@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "clusterName": { "value": "rulebricks-cluster" },
+    "location": { "value": "eastus" },
+    "kubernetesVersion": { "value": "1.34" },
+    "nodeCount": { "value": 4 },
+    "nodeVmSize": { "value": "Standard_D2ps_v5" },
+    "osDiskSizeGB": { "value": 20 },
+    "osDiskType": { "value": "Managed" },
+
+    "rulebricksNamespace": { "value": "rulebricks" },
+    "vectorServiceAccountName": { "value": "vector" },
+    "prometheusServiceAccountName": { "value": "prometheus" },
+    "enableExternalDns": { "value": false },
+    "dnsZoneResourceGroup": { "value": "" },
+    "enableBlobLogging": { "value": false },
+    "loggingStorageAccountName": { "value": "" }
+  }
+}

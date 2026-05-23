@@ -49,6 +49,50 @@ export type LoggingSink =
 // Logging sink categories
 export type LoggingSinkCategory = "cloud-storage" | "logging-platform";
 
+// Prometheus remote_write destination and auth configuration.
+export type MonitoringDestination =
+  | "local-grafana"
+  | "aws-amp"
+  | "azure-monitor"
+  | "grafana-cloud"
+  | "generic";
+
+export type RemoteWriteDestination =
+  | "aws-amp"
+  | "azure-monitor"
+  | "grafana-cloud"
+  | "generic";
+
+export type RemoteWriteAuthType =
+  | "none"
+  | "managed-identity"
+  | "workload-identity"
+  | "oauth"
+  | "basic"
+  | "bearer";
+
+export interface SecretKeyRef {
+  name: string;
+  key: string;
+}
+
+export interface RemoteWriteConfig {
+  destination: RemoteWriteDestination;
+  url: string;
+  authType?: RemoteWriteAuthType;
+  awsRegion?: string;
+  awsRoleArn?: string;
+  azureCloud?: "AzurePublic" | "AzureChina" | "AzureGovernment";
+  clientId?: string;
+  tenantId?: string;
+  clientSecretRef?: SecretKeyRef;
+  usernameSecretRef?: SecretKeyRef;
+  passwordSecretRef?: SecretKeyRef;
+  bearerTokenSecretRef?: SecretKeyRef;
+}
+
+export type CloudLoggingAuthMode = "workload-identity" | "secret";
+
 // Sink category mappings
 export const LOGGING_SINK_CATEGORIES: Record<
   Exclude<LoggingSink, "console" | "pending">,
@@ -505,6 +549,45 @@ export function getLoggingDestinationLabel(sink: LoggingSink): string {
   return LOGGING_DESTINATION_LABELS[sink] || "Console (stdout)";
 }
 
+const SecretKeyRefSchema = z.object({
+  name: z.string().min(1),
+  key: z.string().min(1),
+});
+
+const RemoteWriteConfigSchema = z.object({
+  destination: z.enum(["aws-amp", "azure-monitor", "grafana-cloud", "generic"]),
+  url: z.string().url(),
+  authType: z
+    .enum([
+      "none",
+      "managed-identity",
+      "workload-identity",
+      "oauth",
+      "basic",
+      "bearer",
+    ])
+    .optional(),
+  awsRegion: z.string().optional(),
+  awsRoleArn: z.string().optional(),
+  azureCloud: z
+    .enum(["AzurePublic", "AzureChina", "AzureGovernment"])
+    .optional(),
+  clientId: z.string().optional(),
+  tenantId: z.string().optional(),
+  clientSecretRef: SecretKeyRefSchema.optional(),
+  usernameSecretRef: SecretKeyRefSchema.optional(),
+  passwordSecretRef: SecretKeyRefSchema.optional(),
+  bearerTokenSecretRef: SecretKeyRefSchema.optional(),
+});
+
+const MonitoringDestinationSchema = z.enum([
+  "local-grafana",
+  "aws-amp",
+  "azure-monitor",
+  "grafana-cloud",
+  "generic",
+]);
+
 // Deployment configuration schema
 export const DeploymentConfigSchema = z.object({
   name: z
@@ -584,8 +667,10 @@ export const DeploymentConfigSchema = z.object({
     }),
     monitoring: z.object({
       enabled: z.boolean(),
-      // Optional: Prometheus remote write URL (Datadog, Grafana Cloud, etc.)
+      destination: MonitoringDestinationSchema.optional(),
+      // Legacy optional URL retained for existing config files.
       remoteWriteUrl: z.string().url().optional(),
+      remoteWrite: RemoteWriteConfigSchema.optional(),
     }),
     logging: z.object({
       // Logging always happens to console by default
@@ -608,6 +693,13 @@ export const DeploymentConfigSchema = z.object({
       // For platforms: repurposed for credentials (API key) and extra config
       bucket: z.string().optional(),
       region: z.string().optional(),
+      cloudAuthMode: z.enum(["workload-identity", "secret"]).optional(),
+      awsIamRoleArn: z.string().optional(),
+      azureBlobContainer: z.string().optional(),
+      azureBlobClientId: z.string().optional(),
+      azureBlobTenantId: z.string().optional(),
+      azureBlobConnectionStringSecretRef: SecretKeyRefSchema.optional(),
+      gcpServiceAccountEmail: z.string().optional(),
     }),
     customEmails: z
       .object({

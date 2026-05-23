@@ -7,6 +7,10 @@ import {
   SSOProvider,
   DnsProvider,
   LoggingSink,
+  CloudLoggingAuthMode,
+  MonitoringDestination,
+  RemoteWriteAuthType,
+  RemoteWriteDestination,
   EmailSubjects,
   EmailTemplates,
   DEFAULT_EMAIL_SUBJECTS,
@@ -74,12 +78,31 @@ export interface WizardState {
 
   // Features - Monitoring (Prometheus)
   monitoringEnabled: boolean;
+  prometheusMonitoringDestination: MonitoringDestination | null;
   prometheusRemoteWriteUrl: string;
+  prometheusRemoteWriteDestination: RemoteWriteDestination | null;
+  prometheusRemoteWriteAuthType: RemoteWriteAuthType | null;
+  prometheusRemoteWriteAwsRegion: string;
+  prometheusRemoteWriteAwsRoleArn: string;
+  prometheusRemoteWriteAzureCloud: "AzurePublic" | "AzureChina" | "AzureGovernment";
+  prometheusRemoteWriteClientId: string;
+  prometheusRemoteWriteTenantId: string;
+  prometheusRemoteWriteSecretRef: string;
+  prometheusRemoteWriteUsernameSecretRef: string;
+  prometheusRemoteWritePasswordSecretRef: string;
+  prometheusRemoteWriteBearerTokenSecretRef: string;
 
   // Features - Logging (Vector sinks)
   loggingSink: LoggingSink;
   loggingBucket: string;
   loggingRegion: string;
+  loggingCloudAuthMode: CloudLoggingAuthMode;
+  loggingAwsIamRoleArn: string;
+  loggingAzureBlobContainer: string;
+  loggingAzureBlobClientId: string;
+  loggingAzureBlobTenantId: string;
+  loggingAzureBlobConnectionStringSecretRef: string;
+  loggingGcpServiceAccountEmail: string;
 
   // Features - Custom Email Templates
   customEmailsEnabled: boolean;
@@ -155,10 +178,43 @@ type WizardAction =
     }
   | { type: "SET_MONITORING"; enabled: boolean }
   | { type: "SET_PROMETHEUS_REMOTE_WRITE"; url: string }
+  | {
+      type: "SET_PROMETHEUS_REMOTE_WRITE_CONFIG";
+      config: Partial<
+        Pick<
+          WizardState,
+          | "prometheusMonitoringDestination"
+          | "prometheusRemoteWriteDestination"
+          | "prometheusRemoteWriteAuthType"
+          | "prometheusRemoteWriteAwsRegion"
+          | "prometheusRemoteWriteAwsRoleArn"
+          | "prometheusRemoteWriteAzureCloud"
+          | "prometheusRemoteWriteClientId"
+          | "prometheusRemoteWriteTenantId"
+          | "prometheusRemoteWriteSecretRef"
+          | "prometheusRemoteWriteUsernameSecretRef"
+          | "prometheusRemoteWritePasswordSecretRef"
+          | "prometheusRemoteWriteBearerTokenSecretRef"
+        >
+      >;
+    }
   | { type: "SET_LOGGING_SINK"; sink: LoggingSink }
   | {
       type: "SET_LOGGING_CONFIG";
-      config: Partial<Pick<WizardState, "loggingBucket" | "loggingRegion">>;
+      config: Partial<
+        Pick<
+          WizardState,
+          | "loggingBucket"
+          | "loggingRegion"
+          | "loggingCloudAuthMode"
+          | "loggingAwsIamRoleArn"
+          | "loggingAzureBlobContainer"
+          | "loggingAzureBlobClientId"
+          | "loggingAzureBlobTenantId"
+          | "loggingAzureBlobConnectionStringSecretRef"
+          | "loggingGcpServiceAccountEmail"
+        >
+      >;
     }
   | { type: "SET_CUSTOM_EMAILS_ENABLED"; enabled: boolean }
   | { type: "SET_EMAIL_SUBJECTS"; subjects: Partial<EmailSubjects> }
@@ -232,12 +288,31 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
 
     // Features - Monitoring
     monitoringEnabled: false,
+    prometheusMonitoringDestination: null,
     prometheusRemoteWriteUrl: "",
+    prometheusRemoteWriteDestination: null,
+    prometheusRemoteWriteAuthType: null,
+    prometheusRemoteWriteAwsRegion: "",
+    prometheusRemoteWriteAwsRoleArn: "",
+    prometheusRemoteWriteAzureCloud: "AzurePublic",
+    prometheusRemoteWriteClientId: "",
+    prometheusRemoteWriteTenantId: "",
+    prometheusRemoteWriteSecretRef: "",
+    prometheusRemoteWriteUsernameSecretRef: "",
+    prometheusRemoteWritePasswordSecretRef: "",
+    prometheusRemoteWriteBearerTokenSecretRef: "",
 
     // Features - Logging
     loggingSink: "console", // Default to console only
     loggingBucket: "",
     loggingRegion: "",
+    loggingCloudAuthMode: "workload-identity",
+    loggingAwsIamRoleArn: "",
+    loggingAzureBlobContainer: "rulebricks-logs",
+    loggingAzureBlobClientId: "",
+    loggingAzureBlobTenantId: "",
+    loggingAzureBlobConnectionStringSecretRef: "",
+    loggingGcpServiceAccountEmail: "",
 
     // Features - Custom Email Templates
     customEmailsEnabled: false,
@@ -261,6 +336,12 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
 
 // Default initial state (for backwards compatibility)
 const initialState: WizardState = getInitialState();
+
+function parseSecretKeyRef(value: string) {
+  const [name, key] = value.split(":").map((part) => part.trim());
+  if (!name || !key) return undefined;
+  return { name, key };
+}
 
 function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   switch (action.type) {
@@ -320,6 +401,8 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, monitoringEnabled: action.enabled };
     case "SET_PROMETHEUS_REMOTE_WRITE":
       return { ...state, prometheusRemoteWriteUrl: action.url };
+    case "SET_PROMETHEUS_REMOTE_WRITE_CONFIG":
+      return { ...state, ...action.config };
     case "SET_LOGGING_SINK":
       // Reset bucket/region if switching to console
       return {
@@ -364,7 +447,7 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
 interface WizardContextValue {
   state: WizardState;
   dispatch: React.Dispatch<WizardAction>;
-  toConfig: () => DeploymentConfig | null;
+  toConfig: (options?: { tier?: PerformanceTier }) => DeploymentConfig | null;
   skipToStep: (stepId: string) => void;
   profile: ProfileConfig | null;
   /** Suggests a domain based on the profile's domain suffix and deployment name */
@@ -390,7 +473,7 @@ export function WizardProvider({
     name: initialName || "",
   });
 
-  const toConfig = (): DeploymentConfig | null => {
+  const toConfig = (options: { tier?: PerformanceTier } = {}): DeploymentConfig | null => {
     // Validate required fields
     if (
       !state.name ||
@@ -431,6 +514,59 @@ export function WizardProvider({
     if (state.loggingSink !== "console" && !state.loggingBucket) {
       return null;
     }
+    if (
+      state.loggingSink === "azure-blob" &&
+      (!state.loggingAzureBlobContainer ||
+        (state.loggingCloudAuthMode === "workload-identity" &&
+          (!state.loggingAzureBlobClientId || !state.loggingAzureBlobTenantId)) ||
+        (state.loggingCloudAuthMode === "secret" &&
+          !parseSecretKeyRef(state.loggingAzureBlobConnectionStringSecretRef)))
+    ) {
+      return null;
+    }
+    if (state.loggingSink === "s3" && !state.loggingAwsIamRoleArn) {
+      return null;
+    }
+    if (state.loggingSink === "gcs" && !state.loggingGcpServiceAccountEmail) {
+      return null;
+    }
+
+    const remoteWrite =
+      state.monitoringEnabled &&
+      state.prometheusMonitoringDestination !== "local-grafana" &&
+      state.prometheusRemoteWriteDestination &&
+      state.prometheusRemoteWriteUrl
+        ? {
+            destination: state.prometheusRemoteWriteDestination,
+            url: state.prometheusRemoteWriteUrl,
+            authType: state.prometheusRemoteWriteAuthType || undefined,
+            awsRegion:
+              state.prometheusRemoteWriteDestination === "aws-amp"
+                ? state.prometheusRemoteWriteAwsRegion ||
+                  state.region ||
+                  undefined
+                : undefined,
+            awsRoleArn:
+              state.prometheusRemoteWriteDestination === "aws-amp"
+                ? state.prometheusRemoteWriteAwsRoleArn || undefined
+                : undefined,
+            azureCloud: state.prometheusRemoteWriteAzureCloud,
+            clientId: state.prometheusRemoteWriteClientId || undefined,
+            tenantId: state.prometheusRemoteWriteTenantId || undefined,
+            clientSecretRef: parseSecretKeyRef(
+              state.prometheusRemoteWriteSecretRef,
+            ),
+            usernameSecretRef: parseSecretKeyRef(
+              state.prometheusRemoteWriteUsernameSecretRef,
+            ),
+            passwordSecretRef: parseSecretKeyRef(
+              state.prometheusRemoteWritePasswordSecretRef,
+            ),
+            bearerTokenSecretRef: parseSecretKeyRef(
+              state.prometheusRemoteWriteBearerTokenSecretRef,
+            ),
+          }
+        : undefined;
 
     return {
       name: state.name,
@@ -470,7 +606,7 @@ export function WizardProvider({
         supabaseDashboardUser: state.supabaseDashboardUser || undefined,
         supabaseDashboardPass: state.supabaseDashboardPass || undefined,
       },
-      tier: state.tier || "small",
+      tier: options.tier || state.tier || "small",
       features: {
         ai: {
           enabled: state.aiEnabled,
@@ -485,12 +621,49 @@ export function WizardProvider({
         },
         monitoring: {
           enabled: state.monitoringEnabled,
+          destination:
+            state.prometheusMonitoringDestination ||
+            remoteWrite?.destination ||
+            undefined,
           remoteWriteUrl: state.prometheusRemoteWriteUrl || undefined,
+          remoteWrite,
         },
         logging: {
           sink: state.loggingSink,
           bucket: state.loggingBucket || undefined,
           region: state.loggingRegion || undefined,
+          cloudAuthMode:
+            state.loggingSink === "s3" ||
+            state.loggingSink === "azure-blob" ||
+            state.loggingSink === "gcs"
+              ? state.loggingCloudAuthMode
+              : undefined,
+          awsIamRoleArn:
+            state.loggingSink === "s3"
+              ? state.loggingAwsIamRoleArn || undefined
+              : undefined,
+          azureBlobContainer:
+            state.loggingSink === "azure-blob"
+              ? state.loggingAzureBlobContainer || undefined
+              : undefined,
+          azureBlobClientId:
+            state.loggingSink === "azure-blob"
+              ? state.loggingAzureBlobClientId || undefined
+              : undefined,
+          azureBlobTenantId:
+            state.loggingSink === "azure-blob"
+              ? state.loggingAzureBlobTenantId || undefined
+              : undefined,
+          azureBlobConnectionStringSecretRef:
+            state.loggingSink === "azure-blob"
+              ? parseSecretKeyRef(
+                  state.loggingAzureBlobConnectionStringSecretRef,
+                )
+              : undefined,
+          gcpServiceAccountEmail:
+            state.loggingSink === "gcs"
+              ? state.loggingGcpServiceAccountEmail || undefined
+              : undefined,
         },
         customEmails: state.customEmailsEnabled
           ? {

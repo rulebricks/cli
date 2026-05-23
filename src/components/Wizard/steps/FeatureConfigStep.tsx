@@ -8,6 +8,10 @@ import { Spinner } from "../../common/Spinner.js";
 import {
   SSOProvider,
   LoggingSink,
+  CloudLoggingAuthMode,
+  MonitoringDestination,
+  RemoteWriteAuthType,
+  RemoteWriteDestination,
   LOGGING_SINK_INFO,
   CLOUD_REGIONS,
   CloudProvider,
@@ -27,13 +31,31 @@ type SubStep =
   | "sso-client-id"
   | "sso-client-secret"
   | "monitoring-remote-write-ask"
+  | "monitoring-remote-write-destination"
   | "monitoring-remote-write-url"
+  | "monitoring-aws-region"
+  | "monitoring-aws-role-arn"
+  | "monitoring-remote-write-azure-auth"
+  | "monitoring-remote-write-generic-auth"
+  | "monitoring-remote-write-client-id"
+  | "monitoring-remote-write-tenant-id"
+  | "monitoring-remote-write-secret-ref"
+  | "monitoring-remote-write-username-secret-ref"
+  | "monitoring-remote-write-password-secret-ref"
+  | "monitoring-remote-write-bearer-secret-ref"
   | "logging-category"
   | "logging-sink"
   | "logging-region-loading"
   | "logging-region"
   | "logging-bucket-loading"
   | "logging-bucket"
+  | "logging-s3-role-arn"
+  | "logging-azure-container"
+  | "logging-azure-auth"
+  | "logging-azure-client-id"
+  | "logging-azure-tenant-id"
+  | "logging-azure-connection-string-secret"
+  | "logging-gcp-service-account"
   // Platform-specific config steps
   | "logging-datadog-config"
   | "logging-splunk-config"
@@ -189,9 +211,33 @@ function BucketSelector({
   );
 }
 
-const YES_NO_OPTIONS = [
-  { label: "No, just collect metrics locally", value: false },
-  { label: "Yes, send metrics to external system", value: true },
+const MONITORING_DESTINATIONS = [
+  { label: "Local Grafana (bundled)", value: "local-grafana" },
+  { label: "AWS Managed Prometheus (AMP)", value: "aws-amp" },
+  { label: "Azure Monitor managed Prometheus", value: "azure-monitor" },
+  { label: "Grafana Cloud", value: "grafana-cloud" },
+  { label: "Generic Prometheus remote_write", value: "generic" },
+];
+
+const REMOTE_WRITE_DESTINATIONS = MONITORING_DESTINATIONS.filter(
+  (destination) => destination.value !== "local-grafana",
+);
+
+const AZURE_REMOTE_WRITE_AUTH = [
+  { label: "Workload identity", value: "workload-identity" },
+  { label: "Managed identity", value: "managed-identity" },
+  { label: "OAuth client secret", value: "oauth" },
+];
+
+const AZURE_LOGGING_AUTH = [
+  { label: "Workload identity", value: "workload-identity" },
+  { label: "Connection string Secret (fallback)", value: "secret" },
+];
+
+const GENERIC_REMOTE_WRITE_AUTH = [
+  { label: "No additional auth", value: "none" },
+  { label: "Basic auth from Kubernetes Secret", value: "basic" },
+  { label: "Bearer token from Kubernetes Secret", value: "bearer" },
 ];
 
 export function FeatureConfigStep({
@@ -231,11 +277,65 @@ export function FeatureConfigStep({
   const [remoteWriteUrl, setRemoteWriteUrl] = useState(
     state.prometheusRemoteWriteUrl || "",
   );
+  const [remoteWriteDestination, setRemoteWriteDestination] =
+    useState<RemoteWriteDestination | null>(
+      state.prometheusRemoteWriteDestination,
+    );
+  const [remoteWriteAuthType, setRemoteWriteAuthType] =
+    useState<RemoteWriteAuthType | null>(state.prometheusRemoteWriteAuthType);
+  const [remoteWriteAwsRegion, setRemoteWriteAwsRegion] = useState(
+    state.prometheusRemoteWriteAwsRegion || state.region || "us-east-1",
+  );
+  const [remoteWriteAwsRoleArn, setRemoteWriteAwsRoleArn] = useState(
+    state.prometheusRemoteWriteAwsRoleArn || "",
+  );
+  const [remoteWriteAzureCloud] = useState<
+    "AzurePublic" | "AzureChina" | "AzureGovernment"
+  >(state.prometheusRemoteWriteAzureCloud || "AzurePublic");
+  const [remoteWriteClientId, setRemoteWriteClientId] = useState(
+    state.prometheusRemoteWriteClientId || "",
+  );
+  const [remoteWriteTenantId, setRemoteWriteTenantId] = useState(
+    state.prometheusRemoteWriteTenantId || "",
+  );
+  const [remoteWriteSecretRef, setRemoteWriteSecretRef] = useState(
+    state.prometheusRemoteWriteSecretRef || "",
+  );
+  const [remoteWriteUsernameSecretRef, setRemoteWriteUsernameSecretRef] =
+    useState(state.prometheusRemoteWriteUsernameSecretRef || "");
+  const [remoteWritePasswordSecretRef, setRemoteWritePasswordSecretRef] =
+    useState(state.prometheusRemoteWritePasswordSecretRef || "");
+  const [remoteWriteBearerSecretRef, setRemoteWriteBearerSecretRef] = useState(
+    state.prometheusRemoteWriteBearerTokenSecretRef || "",
+  );
   const [loggingSink, setLoggingSink] = useState<LoggingSink>(
     state.loggingSink,
   );
   const [loggingBucket, setLoggingBucket] = useState(state.loggingBucket || "");
   const [loggingRegion, setLoggingRegion] = useState(state.loggingRegion || "");
+  const [loggingCloudAuthMode, setLoggingCloudAuthMode] =
+    useState<CloudLoggingAuthMode>(
+      state.loggingCloudAuthMode || "workload-identity",
+    );
+  const [s3RoleArn, setS3RoleArn] = useState(
+    state.loggingAwsIamRoleArn || "",
+  );
+  const [azureBlobContainer, setAzureBlobContainer] = useState(
+    state.loggingAzureBlobContainer || "rulebricks-logs",
+  );
+  const [azureBlobClientId, setAzureBlobClientId] = useState(
+    state.loggingAzureBlobClientId || "",
+  );
+  const [azureBlobTenantId, setAzureBlobTenantId] = useState(
+    state.loggingAzureBlobTenantId || "",
+  );
+  const [
+    azureBlobConnectionStringSecretRef,
+    setAzureBlobConnectionStringSecretRef,
+  ] = useState(state.loggingAzureBlobConnectionStringSecretRef || "");
+  const [gcpServiceAccountEmail, setGcpServiceAccountEmail] = useState(
+    state.loggingGcpServiceAccountEmail || "",
+  );
   const [loggingCategory, setLoggingCategory] = useState<
     "cloud-storage" | "logging-platform" | null
   >(null);
@@ -332,8 +432,51 @@ export function FeatureConfigStep({
         else if (needsAI) setSubStep("openai-key");
         else onBack();
         break;
-      case "monitoring-remote-write-url":
+      case "monitoring-remote-write-destination":
         setSubStep("monitoring-remote-write-ask");
+        break;
+      case "monitoring-remote-write-url":
+        setSubStep("monitoring-remote-write-destination");
+        break;
+      case "monitoring-aws-region":
+        setSubStep("monitoring-remote-write-url");
+        break;
+      case "monitoring-aws-role-arn":
+        setSubStep("monitoring-aws-region");
+        break;
+      case "monitoring-remote-write-azure-auth":
+      case "monitoring-remote-write-generic-auth":
+        setSubStep("monitoring-remote-write-url");
+        break;
+      case "monitoring-remote-write-client-id":
+        if (remoteWriteDestination === "azure-monitor") {
+          setSubStep("monitoring-remote-write-azure-auth");
+        } else {
+          setSubStep("monitoring-remote-write-url");
+        }
+        break;
+      case "monitoring-remote-write-tenant-id":
+        setSubStep("monitoring-remote-write-client-id");
+        break;
+      case "monitoring-remote-write-secret-ref":
+        setSubStep(
+          remoteWriteDestination === "azure-monitor"
+            ? "monitoring-remote-write-tenant-id"
+            : "monitoring-remote-write-url",
+        );
+        break;
+      case "monitoring-remote-write-username-secret-ref":
+        setSubStep(
+          remoteWriteDestination === "grafana-cloud"
+            ? "monitoring-remote-write-url"
+            : "monitoring-remote-write-generic-auth",
+        );
+        break;
+      case "monitoring-remote-write-password-secret-ref":
+        setSubStep("monitoring-remote-write-username-secret-ref");
+        break;
+      case "monitoring-remote-write-bearer-secret-ref":
+        setSubStep("monitoring-remote-write-generic-auth");
         break;
       case "logging-category":
         if (needsMonitoring) setSubStep("monitoring-remote-write-ask");
@@ -351,6 +494,27 @@ export function FeatureConfigStep({
       case "logging-bucket":
       case "logging-bucket-loading":
         setSubStep("logging-region");
+        break;
+      case "logging-s3-role-arn":
+        setSubStep("logging-bucket");
+        break;
+      case "logging-azure-container":
+        setSubStep("logging-bucket");
+        break;
+      case "logging-azure-auth":
+        setSubStep("logging-azure-container");
+        break;
+      case "logging-azure-client-id":
+        setSubStep("logging-azure-auth");
+        break;
+      case "logging-azure-tenant-id":
+        setSubStep("logging-azure-client-id");
+        break;
+      case "logging-azure-connection-string-secret":
+        setSubStep("logging-azure-auth");
+        break;
+      case "logging-gcp-service-account":
+        setSubStep("logging-bucket");
         break;
       // Logging platform config steps
       case "logging-datadog-config":
@@ -409,12 +573,27 @@ export function FeatureConfigStep({
         else onComplete();
         break;
       case "monitoring-remote-write-ask":
+      case "monitoring-remote-write-destination":
       case "monitoring-remote-write-url":
+      case "monitoring-aws-region":
+      case "monitoring-aws-role-arn":
+      case "monitoring-remote-write-azure-auth":
+      case "monitoring-remote-write-generic-auth":
+      case "monitoring-remote-write-client-id":
+      case "monitoring-remote-write-tenant-id":
+      case "monitoring-remote-write-secret-ref":
+      case "monitoring-remote-write-username-secret-ref":
+      case "monitoring-remote-write-password-secret-ref":
+      case "monitoring-remote-write-bearer-secret-ref":
         if (needsLogging) setSubStep("logging-category");
         else if (needsCustomEmails) setSubStep("email-subject-invite");
         else onComplete();
         break;
       case "logging-bucket":
+      case "logging-s3-role-arn":
+      case "logging-azure-tenant-id":
+      case "logging-azure-connection-string-secret":
+      case "logging-gcp-service-account":
         // Cloud storage config complete, check for custom emails
         if (needsCustomEmails) setSubStep("email-subject-invite");
         else onComplete();
@@ -509,13 +688,39 @@ export function FeatureConfigStep({
   };
 
   // === Monitoring Configuration ===
-  const handleRemoteWriteAsk = (item: { value: boolean }) => {
-    if (item.value) {
-      setSubStep("monitoring-remote-write-url");
-    } else {
+  const handleRemoteWriteAsk = (item: { value: string }) => {
+    const destination = item.value as MonitoringDestination;
+
+    if (destination === "local-grafana") {
+      setRemoteWriteDestination(null);
       dispatch({ type: "SET_PROMETHEUS_REMOTE_WRITE", url: "" });
+      dispatch({
+        type: "SET_PROMETHEUS_REMOTE_WRITE_CONFIG",
+        config: {
+          prometheusMonitoringDestination: "local-grafana",
+          prometheusRemoteWriteDestination: null,
+          prometheusRemoteWriteAuthType: null,
+        },
+      });
       advanceToNext("monitoring-remote-write-ask");
+      return;
     }
+
+    handleRemoteWriteDestinationSelect({ value: destination });
+  };
+
+  const handleRemoteWriteDestinationSelect = (item: { value: string }) => {
+    const destination = item.value as RemoteWriteDestination;
+    setRemoteWriteDestination(destination);
+    setError(null);
+    dispatch({
+      type: "SET_PROMETHEUS_REMOTE_WRITE_CONFIG",
+      config: {
+        prometheusMonitoringDestination: destination,
+        prometheusRemoteWriteDestination: destination,
+      },
+    });
+    setSubStep("monitoring-remote-write-url");
   };
 
   const handleRemoteWriteUrlSubmit = () => {
@@ -529,7 +734,192 @@ export function FeatureConfigStep({
     }
     setError(null);
     dispatch({ type: "SET_PROMETHEUS_REMOTE_WRITE", url: remoteWriteUrl });
+
+    if (remoteWriteDestination === "aws-amp") {
+      setSubStep("monitoring-aws-region");
+    } else if (remoteWriteDestination === "azure-monitor") {
+      setSubStep("monitoring-remote-write-azure-auth");
+    } else if (remoteWriteDestination === "grafana-cloud") {
+      setRemoteWriteAuthType("basic");
+      dispatch({
+        type: "SET_PROMETHEUS_REMOTE_WRITE_CONFIG",
+        config: { prometheusRemoteWriteAuthType: "basic" },
+      });
+      setSubStep("monitoring-remote-write-username-secret-ref");
+    } else if (remoteWriteDestination === "generic") {
+      setSubStep("monitoring-remote-write-generic-auth");
+    } else {
+      setError("Select a remote_write destination first");
+    }
+  };
+
+  const handleAwsRemoteWriteRegionSubmit = () => {
+    if (!remoteWriteAwsRegion) {
+      setError("AWS region is required");
+      return;
+    }
+    setError(null);
+    setSubStep("monitoring-aws-role-arn");
+  };
+
+  const handleAwsRemoteWriteRoleArnSubmit = () => {
+    if (remoteWriteAwsRoleArn && !remoteWriteAwsRoleArn.startsWith("arn:")) {
+      setError("Enter a valid IAM role ARN or leave blank");
+      return;
+    }
+    dispatch({
+      type: "SET_PROMETHEUS_REMOTE_WRITE_CONFIG",
+      config: {
+        prometheusRemoteWriteDestination: "aws-amp",
+        prometheusMonitoringDestination: "aws-amp",
+        prometheusRemoteWriteAuthType: "none",
+        prometheusRemoteWriteAwsRegion: remoteWriteAwsRegion,
+        prometheusRemoteWriteAwsRoleArn: remoteWriteAwsRoleArn,
+      },
+    });
+    setError(null);
+    advanceToNext("monitoring-aws-role-arn");
+  };
+
+  const saveRemoteWriteConfig = (
+    authType: RemoteWriteAuthType,
+    overrides: Partial<{
+      clientId: string;
+      tenantId: string;
+      secretRef: string;
+      usernameSecretRef: string;
+      passwordSecretRef: string;
+      bearerTokenSecretRef: string;
+    }> = {},
+  ) => {
+    if (!remoteWriteDestination || !remoteWriteUrl) {
+      setError("Remote write destination and URL are required");
+      return;
+    }
+
+    dispatch({
+      type: "SET_PROMETHEUS_REMOTE_WRITE_CONFIG",
+      config: {
+        prometheusRemoteWriteDestination: remoteWriteDestination,
+        prometheusMonitoringDestination: remoteWriteDestination,
+        prometheusRemoteWriteAuthType: authType,
+        prometheusRemoteWriteAzureCloud: remoteWriteAzureCloud,
+        prometheusRemoteWriteClientId:
+          overrides.clientId ?? remoteWriteClientId,
+        prometheusRemoteWriteTenantId:
+          overrides.tenantId ?? remoteWriteTenantId,
+        prometheusRemoteWriteSecretRef:
+          overrides.secretRef ?? remoteWriteSecretRef,
+        prometheusRemoteWriteUsernameSecretRef:
+          overrides.usernameSecretRef ?? remoteWriteUsernameSecretRef,
+        prometheusRemoteWritePasswordSecretRef:
+          overrides.passwordSecretRef ?? remoteWritePasswordSecretRef,
+        prometheusRemoteWriteBearerTokenSecretRef:
+          overrides.bearerTokenSecretRef ?? remoteWriteBearerSecretRef,
+      },
+    });
+    setError(null);
     advanceToNext("monitoring-remote-write-url");
+  };
+
+  const handleAzureRemoteWriteAuthSelect = (item: { value: string }) => {
+    const authType = item.value as RemoteWriteAuthType;
+    setRemoteWriteAuthType(authType);
+    dispatch({
+      type: "SET_PROMETHEUS_REMOTE_WRITE_CONFIG",
+      config: { prometheusRemoteWriteAuthType: authType },
+    });
+    setSubStep("monitoring-remote-write-client-id");
+  };
+
+  const handleGenericRemoteWriteAuthSelect = (item: { value: string }) => {
+    const authType = item.value as RemoteWriteAuthType;
+    setRemoteWriteAuthType(authType);
+
+    if (authType === "none") {
+      saveRemoteWriteConfig("none");
+    } else if (authType === "basic") {
+      setSubStep("monitoring-remote-write-username-secret-ref");
+    } else {
+      setSubStep("monitoring-remote-write-bearer-secret-ref");
+    }
+  };
+
+  const handleRemoteWriteClientIdSubmit = () => {
+    if (!remoteWriteClientId) {
+      setError("Client ID is required");
+      return;
+    }
+
+    if (remoteWriteAuthType === "managed-identity") {
+      saveRemoteWriteConfig("managed-identity", {
+        clientId: remoteWriteClientId,
+      });
+      return;
+    }
+
+    setError(null);
+    setSubStep("monitoring-remote-write-tenant-id");
+  };
+
+  const handleRemoteWriteTenantIdSubmit = () => {
+    if (!remoteWriteTenantId) {
+      setError("Tenant ID is required");
+      return;
+    }
+
+    if (remoteWriteAuthType === "workload-identity") {
+      saveRemoteWriteConfig("workload-identity", {
+        clientId: remoteWriteClientId,
+        tenantId: remoteWriteTenantId,
+      });
+      return;
+    }
+
+    setError(null);
+    setSubStep("monitoring-remote-write-secret-ref");
+  };
+
+  const handleRemoteWriteSecretRefSubmit = () => {
+    if (!remoteWriteSecretRef.includes(":")) {
+      setError("Use secret-name:key format");
+      return;
+    }
+    saveRemoteWriteConfig(remoteWriteAuthType || "oauth", {
+      clientId: remoteWriteClientId,
+      tenantId: remoteWriteTenantId,
+      secretRef: remoteWriteSecretRef,
+    });
+  };
+
+  const handleRemoteWriteUsernameSecretRefSubmit = () => {
+    if (!remoteWriteUsernameSecretRef.includes(":")) {
+      setError("Use secret-name:key format");
+      return;
+    }
+    setError(null);
+    setSubStep("monitoring-remote-write-password-secret-ref");
+  };
+
+  const handleRemoteWritePasswordSecretRefSubmit = () => {
+    if (!remoteWritePasswordSecretRef.includes(":")) {
+      setError("Use secret-name:key format");
+      return;
+    }
+    saveRemoteWriteConfig("basic", {
+      usernameSecretRef: remoteWriteUsernameSecretRef,
+      passwordSecretRef: remoteWritePasswordSecretRef,
+    });
+  };
+
+  const handleRemoteWriteBearerSecretRefSubmit = () => {
+    if (!remoteWriteBearerSecretRef.includes(":")) {
+      setError("Use secret-name:key format");
+      return;
+    }
+    saveRemoteWriteConfig("bearer", {
+      bearerTokenSecretRef: remoteWriteBearerSecretRef,
+    });
   };
 
   // === Logging Configuration ===
@@ -656,7 +1046,123 @@ export function FeatureConfigStep({
       type: "SET_LOGGING_CONFIG",
       config: { loggingBucket: item.value },
     });
+    if (loggingSink === "s3") {
+      setSubStep("logging-s3-role-arn");
+      return;
+    }
+    if (loggingSink === "azure-blob") {
+      setSubStep("logging-azure-container");
+      return;
+    }
+    if (loggingSink === "gcs") {
+      setSubStep("logging-gcp-service-account");
+      return;
+    }
     advanceToNext("logging-bucket");
+  };
+
+  const handleS3RoleArnSubmit = () => {
+    if (!s3RoleArn.startsWith("arn:")) {
+      setError("IAM role ARN is required for S3 IRSA");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_LOGGING_CONFIG",
+      config: {
+        loggingCloudAuthMode: "workload-identity",
+        loggingAwsIamRoleArn: s3RoleArn,
+      },
+    });
+    advanceToNext("logging-s3-role-arn");
+  };
+
+  const handleAzureBlobContainerSubmit = () => {
+    if (!azureBlobContainer) {
+      setError("Azure Blob container name is required");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_LOGGING_CONFIG",
+      config: { loggingAzureBlobContainer: azureBlobContainer },
+    });
+    setSubStep("logging-azure-auth");
+  };
+
+  const handleAzureBlobAuthSelect = (item: { value: string }) => {
+    const authMode = item.value as CloudLoggingAuthMode;
+    setLoggingCloudAuthMode(authMode);
+    dispatch({
+      type: "SET_LOGGING_CONFIG",
+      config: { loggingCloudAuthMode: authMode },
+    });
+    setSubStep(
+      authMode === "workload-identity"
+        ? "logging-azure-client-id"
+        : "logging-azure-connection-string-secret",
+    );
+  };
+
+  const handleAzureBlobClientIdSubmit = () => {
+    if (!azureBlobClientId) {
+      setError("Managed identity client ID is required");
+      return;
+    }
+    setError(null);
+    setSubStep("logging-azure-tenant-id");
+  };
+
+  const handleAzureBlobTenantIdSubmit = () => {
+    if (!azureBlobTenantId) {
+      setError("Azure tenant ID is required");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_LOGGING_CONFIG",
+      config: {
+        loggingCloudAuthMode: "workload-identity",
+        loggingAzureBlobContainer: azureBlobContainer,
+        loggingAzureBlobClientId: azureBlobClientId,
+        loggingAzureBlobTenantId: azureBlobTenantId,
+      },
+    });
+    advanceToNext("logging-azure-tenant-id");
+  };
+
+  const handleAzureBlobConnectionStringSecretSubmit = () => {
+    if (!azureBlobConnectionStringSecretRef.includes(":")) {
+      setError("Use secret-name:key format");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_LOGGING_CONFIG",
+      config: {
+        loggingAzureBlobContainer: azureBlobContainer,
+        loggingCloudAuthMode: "secret",
+        loggingAzureBlobConnectionStringSecretRef:
+          azureBlobConnectionStringSecretRef,
+      },
+    });
+    advanceToNext("logging-azure-connection-string-secret");
+  };
+
+  const handleGcpServiceAccountSubmit = () => {
+    if (!gcpServiceAccountEmail.includes("@")) {
+      setError("Google service account email is required");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_LOGGING_CONFIG",
+      config: {
+        loggingCloudAuthMode: "workload-identity",
+        loggingGcpServiceAccountEmail: gcpServiceAccountEmail,
+      },
+    });
+    advanceToNext("logging-gcp-service-account");
   };
 
   // === Logging Platform Config Handlers ===
@@ -1077,19 +1583,18 @@ export function FeatureConfigStep({
       {/* Monitoring Configuration */}
       {subStep === "monitoring-remote-write-ask" && (
         <Box flexDirection="column" marginY={1}>
-          <Text bold>Prometheus Remote Write</Text>
+          <Text bold>Monitoring Destination</Text>
           <Text color="gray" dimColor>
-            Do you want to send metrics to an external monitoring system?
-          </Text>
-          <Text color="gray" dimColor>
-            (e.g., Datadog, Grafana Cloud, Chronosphere)
+            Choose where Prometheus metrics should be viewed or sent.
           </Text>
           <Box marginTop={1}>
             <SelectInput
-              items={YES_NO_OPTIONS}
+              items={MONITORING_DESTINATIONS}
               onSelect={handleRemoteWriteAsk}
+              indicatorComponent={() => null}
               itemComponent={({ isSelected, label }) => (
                 <Text color={isSelected ? colors.accent : undefined}>
+                  {isSelected ? "❯ " : "  "}
                   {label}
                 </Text>
               )}
@@ -1105,12 +1610,239 @@ export function FeatureConfigStep({
           <Text color="gray" dimColor>
             Prometheus remote_write endpoint URL
           </Text>
+          {remoteWriteDestination === "azure-monitor" && (
+            <Text color="gray" dimColor>
+              Use the ingestion URL from your Azure Monitor workspace/Data
+              Collection Rule.
+            </Text>
+          )}
           <Box marginTop={1}>
             <TextInput
               value={remoteWriteUrl}
               onChange={setRemoteWriteUrl}
               onSubmit={handleRemoteWriteUrlSubmit}
               placeholder="https://metrics.example.com/api/v1/write"
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-aws-region" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>AWS Managed Prometheus Region</Text>
+          <Text color="gray" dimColor>
+            Region used for SigV4 signing.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={remoteWriteAwsRegion}
+              onChange={setRemoteWriteAwsRegion}
+              onSubmit={handleAwsRemoteWriteRegionSubmit}
+              placeholder="us-east-1"
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-aws-role-arn" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Prometheus IRSA Role ARN</Text>
+          <Text color="gray" dimColor>
+            Optional. If provided, the Prometheus service account will be
+            annotated with this role.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={remoteWriteAwsRoleArn}
+              onChange={setRemoteWriteAwsRoleArn}
+              onSubmit={handleAwsRemoteWriteRoleArnSubmit}
+              placeholder="arn:aws:iam::123456789012:role/rulebricks-prometheus"
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-remote-write-destination" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Remote Write Destination</Text>
+          <Text color="gray" dimColor>
+            Select the monitoring backend so required auth fields can be
+            collected.
+          </Text>
+          <Box marginTop={1}>
+            <SelectInput
+              items={REMOTE_WRITE_DESTINATIONS}
+              onSelect={handleRemoteWriteDestinationSelect}
+              indicatorComponent={() => null}
+              itemComponent={({ isSelected, label }) => (
+                <Text color={isSelected ? colors.accent : undefined}>
+                  {isSelected ? "❯ " : "  "}
+                  {label}
+                </Text>
+              )}
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-remote-write-azure-auth" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Azure Monitor Authentication</Text>
+          <Text color="gray" dimColor>
+            Azure Monitor managed Prometheus requires Azure AD authentication.
+          </Text>
+          <Text color="gray" dimColor>
+            Cloud: {remoteWriteAzureCloud}
+          </Text>
+          <Box marginTop={1}>
+            <SelectInput
+              items={AZURE_REMOTE_WRITE_AUTH}
+              onSelect={handleAzureRemoteWriteAuthSelect}
+              indicatorComponent={() => null}
+              itemComponent={({ isSelected, label }) => (
+                <Text color={isSelected ? colors.accent : undefined}>
+                  {isSelected ? "❯ " : "  "}
+                  {label}
+                </Text>
+              )}
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-remote-write-generic-auth" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Generic Remote Write Authentication</Text>
+          <Text color="gray" dimColor>
+            Choose the auth method required by the remote_write endpoint.
+          </Text>
+          <Box marginTop={1}>
+            <SelectInput
+              items={GENERIC_REMOTE_WRITE_AUTH}
+              onSelect={handleGenericRemoteWriteAuthSelect}
+              indicatorComponent={() => null}
+              itemComponent={({ isSelected, label }) => (
+                <Text color={isSelected ? colors.accent : undefined}>
+                  {isSelected ? "❯ " : "  "}
+                  {label}
+                </Text>
+              )}
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-remote-write-client-id" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Azure Client ID</Text>
+          <Text color="gray" dimColor>
+            Use the managed identity, workload identity, or app registration
+            client ID.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={remoteWriteClientId}
+              onChange={setRemoteWriteClientId}
+              onSubmit={handleRemoteWriteClientIdSubmit}
+              placeholder="00000000-0000-0000-0000-000000000000"
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-remote-write-tenant-id" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Azure Tenant ID</Text>
+          <Text color="gray" dimColor>
+            Required for workload identity and OAuth client-secret auth.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={remoteWriteTenantId}
+              onChange={setRemoteWriteTenantId}
+              onSubmit={handleRemoteWriteTenantIdSubmit}
+              placeholder="00000000-0000-0000-0000-000000000000"
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-remote-write-secret-ref" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Client Secret Reference</Text>
+          <Text color="gray" dimColor>
+            Existing Kubernetes Secret key in the format name:key.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={remoteWriteSecretRef}
+              onChange={setRemoteWriteSecretRef}
+              onSubmit={handleRemoteWriteSecretRefSubmit}
+              placeholder="azure-monitor-oauth:client-secret"
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-remote-write-username-secret-ref" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Basic Auth Username Reference</Text>
+          <Text color="gray" dimColor>
+            Existing Kubernetes Secret key in the format name:key. For Grafana
+            Cloud, this is the instance ID.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={remoteWriteUsernameSecretRef}
+              onChange={setRemoteWriteUsernameSecretRef}
+              onSubmit={handleRemoteWriteUsernameSecretRefSubmit}
+              placeholder="prometheus-remote-write:username"
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-remote-write-password-secret-ref" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Basic Auth Password Reference</Text>
+          <Text color="gray" dimColor>
+            Existing Kubernetes Secret key in the format name:key. For Grafana
+            Cloud, this is an API token.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={remoteWritePasswordSecretRef}
+              onChange={setRemoteWritePasswordSecretRef}
+              onSubmit={handleRemoteWritePasswordSecretRefSubmit}
+              placeholder="prometheus-remote-write:password"
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-remote-write-bearer-secret-ref" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Bearer Token Reference</Text>
+          <Text color="gray" dimColor>
+            Existing Kubernetes Secret key in the format name:key.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={remoteWriteBearerSecretRef}
+              onChange={setRemoteWriteBearerSecretRef}
+              onSubmit={handleRemoteWriteBearerSecretRefSubmit}
+              placeholder="prometheus-remote-write:token"
             />
           </Box>
           <ProgressSummary />
@@ -1250,6 +1982,149 @@ export function FeatureConfigStep({
           onRefresh={refreshBuckets}
           colors={colors}
         />
+      )}
+
+      {subStep === "logging-s3-role-arn" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Vector S3 IRSA Role ARN</Text>
+          <Text color="gray" dimColor>
+            IAM role trusted by the Vector Kubernetes service account.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={s3RoleArn}
+              onChange={setS3RoleArn}
+              onSubmit={handleS3RoleArnSubmit}
+              placeholder="arn:aws:iam::123456789012:role/rulebricks-vector"
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Text color={colors.success}>✓ S3 bucket: {loggingBucket}</Text>
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "logging-azure-container" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Azure Blob Container</Text>
+          <Text color="gray" dimColor>
+            Enter the container where Rulebricks decision logs should be
+            written.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={azureBlobContainer}
+              onChange={setAzureBlobContainer}
+              onSubmit={handleAzureBlobContainerSubmit}
+              placeholder="rulebricks-logs"
+            />
+          </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text color={colors.success}>✓ Storage account: {loggingBucket}</Text>
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "logging-azure-auth" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Azure Blob Authentication</Text>
+          <Text color="gray" dimColor>
+            Workload identity is recommended. Connection string Secret is a
+            fallback for clusters without Azure Workload Identity.
+          </Text>
+          <Box marginTop={1}>
+            <SelectInput
+              items={AZURE_LOGGING_AUTH}
+              onSelect={handleAzureBlobAuthSelect}
+              indicatorComponent={() => null}
+              itemComponent={({ isSelected, label }) => (
+                <Text color={isSelected ? colors.accent : undefined}>
+                  {isSelected ? "❯ " : "  "}
+                  {label}
+                </Text>
+              )}
+            />
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "logging-azure-client-id" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Azure Managed Identity Client ID</Text>
+          <Text color="gray" dimColor>
+            Client ID for the identity federated to Vector's service account.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={azureBlobClientId}
+              onChange={setAzureBlobClientId}
+              onSubmit={handleAzureBlobClientIdSubmit}
+              placeholder="00000000-0000-0000-0000-000000000000"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "logging-azure-tenant-id" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Azure Tenant ID</Text>
+          <Text color="gray" dimColor>
+            Tenant ID used by Azure Workload Identity.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={azureBlobTenantId}
+              onChange={setAzureBlobTenantId}
+              onSubmit={handleAzureBlobTenantIdSubmit}
+              placeholder="00000000-0000-0000-0000-000000000000"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "logging-azure-connection-string-secret" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Azure Storage Connection String Secret</Text>
+          <Text color="gray" dimColor>
+            Enter an existing Kubernetes Secret key in the format name:key.
+          </Text>
+          <Text color="gray" dimColor>
+            The key should contain the Azure Storage connection string.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={azureBlobConnectionStringSecretRef}
+              onChange={setAzureBlobConnectionStringSecretRef}
+              onSubmit={handleAzureBlobConnectionStringSecretSubmit}
+              placeholder="azure-blob-logs:connection-string"
+            />
+          </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text color={colors.success}>✓ Storage account: {loggingBucket}</Text>
+            <Text color={colors.success}>✓ Container: {azureBlobContainer}</Text>
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "logging-gcp-service-account" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Google Service Account Email</Text>
+          <Text color="gray" dimColor>
+            GSA bound to the Vector Kubernetes service account through GKE
+            Workload Identity.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={gcpServiceAccountEmail}
+              onChange={setGcpServiceAccountEmail}
+              onSubmit={handleGcpServiceAccountSubmit}
+              placeholder="rulebricks-vector@project.iam.gserviceaccount.com"
+            />
+          </Box>
+          <Box marginTop={1}>
+            <Text color={colors.success}>✓ GCS bucket: {loggingBucket}</Text>
+          </Box>
+        </Box>
       )}
 
       {/* Datadog Configuration */}

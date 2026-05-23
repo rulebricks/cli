@@ -4,6 +4,8 @@ import {
   isSupportedDnsProvider,
   getLoggingDestinationLabel,
   LoggingSink,
+  RemoteWriteConfig,
+  SecretKeyRef,
 } from "../types/index.js";
 import { saveHelmValues, getHelmValuesPath } from "./config.js";
 import fs from "fs/promises";
@@ -54,17 +56,45 @@ function generateVectorSinks(
         break;
 
       case "azure-blob":
-        sinks.azure_blob = {
+        if (!bucket) {
+          throw new Error("Azure Blob logging requires a storage account.");
+        }
+        const azureBlobSink: Record<string, unknown> = {
           type: "azure_blob",
           inputs: ["kafka"],
-          container_name: bucket,
-          storage_account: "rulebrickslogs", // Will be configured via env var
+          account_name: bucket,
+          container_name:
+            config.features.logging.azureBlobContainer || "rulebricks-logs",
           blob_prefix: "rulebricks/logs/%Y/%m/%d/",
           compression: "gzip",
           encoding: {
             codec: "json",
           },
         };
+        if (config.features.logging.cloudAuthMode === "secret") {
+          if (!config.features.logging.azureBlobConnectionStringSecretRef) {
+            throw new Error(
+              "Azure Blob connection string auth requires a secret ref.",
+            );
+          }
+          azureBlobSink.connection_string = "${AZURE_STORAGE_CONNECTION_STRING}";
+        } else {
+          if (
+            !config.features.logging.azureBlobClientId ||
+            !config.features.logging.azureBlobTenantId
+          ) {
+            throw new Error(
+              "Azure Blob workload identity requires client ID and tenant ID.",
+            );
+          }
+          azureBlobSink.auth = {
+            azure_credential_kind: "workload_identity",
+            client_id: config.features.logging.azureBlobClientId,
+            tenant_id: config.features.logging.azureBlobTenantId,
+            token_file_path: "/var/run/secrets/azure/tokens/azure-identity-token",
+          };
+        }
+        sinks.azure_blob = azureBlobSink;
         break;
 
       case "gcs":
@@ -189,6 +219,82 @@ function generateVectorSinks(
   return sinks;
 }
 
+function generateVectorEnv(config: DeploymentConfig): Array<Record<string, unknown>> {
+  const env: Array<Record<string, unknown>> = [
+    {
+      name: "KAFKA_BOOTSTRAP_SERVERS",
+      valueFrom: {
+        configMapKeyRef: {
+          name: "vector-kafka-env",
+          key: "KAFKA_BOOTSTRAP_SERVERS",
+        },
+      },
+    },
+  ];
+
+  const azureBlobSecretRef =
+    config.features.logging.azureBlobConnectionStringSecretRef;
+
+  if (
+    config.features.logging.sink === "azure-blob" &&
+    config.features.logging.cloudAuthMode === "secret" &&
+    azureBlobSecretRef
+  ) {
+    env.push({
+      name: "AZURE_STORAGE_CONNECTION_STRING",
+      valueFrom: {
+        secretKeyRef: secretKeySelector(azureBlobSecretRef),
+      },
+    });
+  }
+
+  return env;
+}
+
+function generateVectorServiceAccount(
+  config: DeploymentConfig,
+): Record<string, unknown> {
+  const annotations: Record<string, string> = {};
+
+  if (config.features.logging.sink === "s3" && config.features.logging.awsIamRoleArn) {
+    annotations["eks.amazonaws.com/role-arn"] =
+      config.features.logging.awsIamRoleArn;
+  }
+
+  if (
+    config.features.logging.sink === "azure-blob" &&
+    config.features.logging.cloudAuthMode !== "secret" &&
+    config.features.logging.azureBlobClientId
+  ) {
+    annotations["azure.workload.identity/client-id"] =
+      config.features.logging.azureBlobClientId;
+  }
+
+  if (config.features.logging.sink === "gcs" && config.features.logging.gcpServiceAccountEmail) {
+    annotations["iam.gke.io/gcp-service-account"] =
+      config.features.logging.gcpServiceAccountEmail;
+  }
+
+  return {
+    create: true,
+    name: "vector",
+    annotations,
+  };
+}
+
+function generateVectorPodLabels(config: DeploymentConfig): Record<string, string> {
+  const labels: Record<string, string> = {};
+
+  if (
+    config.features.logging.sink === "azure-blob" &&
+    config.features.logging.cloudAuthMode !== "secret"
+  ) {
+    labels["azure.workload.identity/use"] = "true";
+  }
+
+  return labels;
+}
+
 /**
  * Maps DNS provider to external-dns provider name
  */
@@ -200,6 +306,193 @@ function getExternalDnsProvider(dnsProvider: string): string {
     azure: "azure",
   };
   return mapping[dnsProvider] || "aws";
+}
+
+function secretKeySelector(ref: SecretKeyRef): Record<string, string> {
+  return {
+    name: ref.name,
+    key: ref.key,
+  };
+}
+
+function generateRemoteWriteSpec(
+  config: DeploymentConfig,
+): Array<Record<string, unknown>> {
+  if (config.features.monitoring.destination === "local-grafana") {
+    return [];
+  }
+
+  const remoteWrite = config.features.monitoring.remoteWrite;
+
+  if (!remoteWrite) {
+    return config.features.monitoring.remoteWriteUrl
+      ? [{ url: config.features.monitoring.remoteWriteUrl }]
+      : [];
+  }
+
+  const base: Record<string, unknown> = {
+    url: remoteWrite.url,
+  };
+
+  switch (remoteWrite.destination) {
+    case "aws-amp":
+      if (!remoteWrite.awsRegion) {
+        throw new Error("AWS Managed Prometheus remote_write requires a region.");
+      }
+      return [
+        {
+          ...base,
+          sigv4: {
+            region: remoteWrite.awsRegion,
+          },
+        },
+      ];
+    case "azure-monitor":
+      return [generateAzureMonitorRemoteWrite(remoteWrite, base)];
+    case "grafana-cloud":
+      return [generateBasicAuthRemoteWrite(remoteWrite, base)];
+    case "generic":
+      return [generateGenericRemoteWrite(remoteWrite, base)];
+    default:
+      return [base];
+  }
+}
+
+function generatePrometheusServiceAccount(
+  config: DeploymentConfig,
+): Record<string, unknown> {
+  const annotations: Record<string, string> = {};
+  const remoteWrite = config.features.monitoring.remoteWrite;
+
+  if (remoteWrite?.destination === "aws-amp" && remoteWrite.awsRoleArn) {
+    annotations["eks.amazonaws.com/role-arn"] = remoteWrite.awsRoleArn;
+  }
+
+  if (
+    remoteWrite?.destination === "azure-monitor" &&
+    remoteWrite.authType === "workload-identity" &&
+    remoteWrite.clientId
+  ) {
+    annotations["azure.workload.identity/client-id"] = remoteWrite.clientId;
+  }
+
+  return {
+    create: true,
+    name: "prometheus",
+    annotations,
+  };
+}
+
+function generatePrometheusPodMetadata(
+  config: DeploymentConfig,
+): Record<string, unknown> {
+  const remoteWrite = config.features.monitoring.remoteWrite;
+
+  if (
+    remoteWrite?.destination === "azure-monitor" &&
+    remoteWrite.authType === "workload-identity"
+  ) {
+    return {
+      labels: {
+        "azure.workload.identity/use": "true",
+      },
+    };
+  }
+
+  return {};
+}
+
+function generateAzureMonitorRemoteWrite(
+  remoteWrite: RemoteWriteConfig,
+  base: Record<string, unknown>,
+): Record<string, unknown> {
+  const azureAd: Record<string, unknown> = {
+    cloud: remoteWrite.azureCloud || "AzurePublic",
+  };
+
+  if (remoteWrite.authType === "oauth") {
+    if (
+      !remoteWrite.clientId ||
+      !remoteWrite.tenantId ||
+      !remoteWrite.clientSecretRef
+    ) {
+      throw new Error(
+        "Azure Monitor remote_write OAuth requires client ID, tenant ID, and client secret ref.",
+      );
+    }
+    azureAd.oauth = {
+      clientId: remoteWrite.clientId,
+      tenantId: remoteWrite.tenantId,
+      clientSecret: secretKeySelector(remoteWrite.clientSecretRef),
+    };
+  } else if (remoteWrite.authType === "workload-identity") {
+    if (!remoteWrite.clientId || !remoteWrite.tenantId) {
+      throw new Error(
+        "Azure Monitor remote_write workload identity requires client ID and tenant ID.",
+      );
+    }
+    azureAd.workloadIdentity = {
+      clientId: remoteWrite.clientId,
+      tenantId: remoteWrite.tenantId,
+    };
+  } else {
+    if (!remoteWrite.clientId) {
+      throw new Error(
+        "Azure Monitor remote_write managed identity requires client ID.",
+      );
+    }
+    azureAd.managedIdentity = {
+      clientId: remoteWrite.clientId,
+    };
+  }
+
+  return {
+    ...base,
+    azureAd,
+  };
+}
+
+function generateBasicAuthRemoteWrite(
+  remoteWrite: RemoteWriteConfig,
+  base: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!remoteWrite.usernameSecretRef || !remoteWrite.passwordSecretRef) {
+    throw new Error(
+      "Basic auth remote_write requires username and password secret refs.",
+    );
+  }
+
+  return {
+    ...base,
+    basicAuth: {
+      username: secretKeySelector(remoteWrite.usernameSecretRef),
+      password: secretKeySelector(remoteWrite.passwordSecretRef),
+    },
+  };
+}
+
+function generateGenericRemoteWrite(
+  remoteWrite: RemoteWriteConfig,
+  base: Record<string, unknown>,
+): Record<string, unknown> {
+  if (remoteWrite.authType === "basic") {
+    return generateBasicAuthRemoteWrite(remoteWrite, base);
+  }
+
+  if (remoteWrite.authType === "bearer") {
+    if (!remoteWrite.bearerTokenSecretRef) {
+      throw new Error("Bearer remote_write requires a token secret ref.");
+    }
+    return {
+      ...base,
+      authorization: {
+        type: "Bearer",
+        credentials: secretKeySelector(remoteWrite.bearerTokenSecretRef),
+      },
+    };
+  }
+
+  return base;
 }
 
 /**
@@ -237,6 +530,8 @@ export async function generateHelmValues(
 ): Promise<void> {
   const tierConfig = TIER_CONFIGS[config.tier];
   const { tlsEnabled = true } = options;
+  const useLocalGrafana =
+    config.features.monitoring.destination === "local-grafana";
 
   // Determine if external-dns should be enabled
   const externalDnsEnabled =
@@ -562,22 +857,14 @@ export async function generateHelmValues(
       replicas: tierConfig.vectorReplicas,
       resources: tierConfig.vectorResources,
       tolerations: arm64Tolerations,
+      serviceAccount: generateVectorServiceAccount(config),
+      podLabels: generateVectorPodLabels(config),
       service: {
         enabled: true,
         ports: [{ name: "api", port: 8686, protocol: "TCP", targetPort: 8686 }],
       },
       // Load KAFKA_BOOTSTRAP_SERVERS from templated ConfigMap
-      env: [
-        {
-          name: "KAFKA_BOOTSTRAP_SERVERS",
-          valueFrom: {
-            configMapKeyRef: {
-              name: "vector-kafka-env",
-              key: "KAFKA_BOOTSTRAP_SERVERS",
-            },
-          },
-        },
-      ],
+      env: generateVectorEnv(config),
       customConfig: {
         sources: {
           kafka: {
@@ -662,12 +949,14 @@ export async function generateHelmValues(
         enabled: false,
       },
       grafana: {
-        enabled: false,
+        enabled: useLocalGrafana,
       },
       prometheus: {
         enabled: config.features.monitoring.enabled,
+        serviceAccount: generatePrometheusServiceAccount(config),
         prometheusSpec: {
           retention: "30d",
+          podMetadata: generatePrometheusPodMetadata(config),
           storageSpec: {
             volumeClaimTemplate: {
               spec: {
@@ -681,13 +970,7 @@ export async function generateHelmValues(
               },
             },
           },
-          ...(config.features.monitoring.remoteWriteUrl
-            ? {
-                remoteWrite: [
-                  { url: config.features.monitoring.remoteWriteUrl },
-                ],
-              }
-            : { remoteWrite: [] }),
+          remoteWrite: generateRemoteWriteSpec(config),
         },
       },
     },

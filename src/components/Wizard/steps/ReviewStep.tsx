@@ -49,7 +49,13 @@ export function ReviewStep({ onComplete, onBack }: ReviewStepProps) {
     setEditingName(false);
   };
   
-  const tierConfig = state.tier ? TIER_CONFIGS[state.tier] : null;
+  const tierConfig = state.infrastructureMode !== 'existing' && state.tier ? TIER_CONFIGS[state.tier] : null;
+  const tierLabel =
+    state.infrastructureMode === 'existing'
+      ? 'Inferred from cluster'
+      : state.tier
+        ? `${state.tier.charAt(0).toUpperCase()}${state.tier.slice(1)}`
+        : 'Not selected';
   const externalDnsEnabled = state.dnsAutoManage && isSupportedDnsProvider(state.dnsProvider);
   
   if (editingName) {
@@ -144,9 +150,12 @@ export function ReviewStep({ onComplete, onBack }: ReviewStepProps) {
             <Text color={colors.muted}>Tier</Text>
           </Box>
           <Text color={colors.accent} bold>
-            {state.tier?.charAt(0).toUpperCase()}{state.tier?.slice(1)}
+            {tierLabel}
           </Text>
           {tierConfig && <Text color={colors.muted}> ({tierConfig.throughput})</Text>}
+          {state.infrastructureMode === 'existing' && (
+            <Text color={colors.muted}> (used for app sizing)</Text>
+          )}
         </Box>
         
         <SectionHeader title="Features" />

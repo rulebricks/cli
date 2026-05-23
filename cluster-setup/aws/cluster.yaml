@@ -1,0 +1,33 @@
+# Minimum eksctl configuration for a Rulebricks EKS cluster.
+# Core knobs: name, region, Kubernetes version, instance type, node count,
+# disk size, and disk type.
+# Nodes must be ARM based. Storage is required; customize Helm storage class
+# values if you use a different CSI driver or StorageClass.
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: rulebricks-cluster
+  region: us-east-1
+  version: "1.34"
+
+managedNodeGroups:
+  - name: standard-nodes
+    instanceType: c8g.large
+    desiredCapacity: 4
+    minSize: 4
+    maxSize: 4
+    volumeSize: 50
+    volumeType: gp3
+    amiFamily: AmazonLinux2023
+    iam:
+      withAddonPolicies:
+        ebs: true
+        albIngress: true
+
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
+  - name: aws-ebs-csi-driver

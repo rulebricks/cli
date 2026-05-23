@@ -1,5 +1,5 @@
 import { execa, ExecaError } from "execa";
-import { DEFAULT_NAMESPACE, CloudProvider } from "../types/index.js";
+import { DEFAULT_NAMESPACE, CloudProvider, PerformanceTier } from "../types/index.js";
 
 /**
  * Extracts meaningful error message from execa error
@@ -185,6 +185,77 @@ export async function getCurrentContext(): Promise<string | null> {
   try {
     const { stdout } = await execa("kubectl", ["config", "current-context"]);
     return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+function parseCpuToCores(cpu: string): number {
+  if (cpu.endsWith("n")) return Number(cpu.slice(0, -1)) / 1_000_000_000;
+  if (cpu.endsWith("u")) return Number(cpu.slice(0, -1)) / 1_000_000;
+  if (cpu.endsWith("m")) return Number(cpu.slice(0, -1)) / 1_000;
+  return Number(cpu);
+}
+
+function parseMemoryToGi(memory: string): number {
+  const match = memory.match(/^(\d+(?:\.\d+)?)([KMGTP]i?|[kMGTPE])?$/);
+  if (!match) return 0;
+
+  const value = Number(match[1]);
+  const unit = match[2] || "";
+  const multipliers: Record<string, number> = {
+    Ki: 1 / 1024 / 1024,
+    Mi: 1 / 1024,
+    Gi: 1,
+    Ti: 1024,
+    Pi: 1024 * 1024,
+    K: 1000 / 1024 / 1024 / 1024,
+    M: 1000 ** 2 / 1024 ** 3,
+    G: 1000 ** 3 / 1024 ** 3,
+    T: 1000 ** 4 / 1024 ** 3,
+    P: 1000 ** 5 / 1024 ** 3,
+  };
+
+  return value * (multipliers[unit] ?? 1 / 1024 ** 3);
+}
+
+/**
+ * Infers the closest internal Rulebricks sizing tier from the current cluster.
+ * This is used only for existing clusters, where the CLI is not responsible for
+ * provisioning node pools but still needs app/Kafka/worker Helm sizing values.
+ */
+export async function inferClusterTier(): Promise<PerformanceTier | null> {
+  try {
+    const { stdout } = await execa("kubectl", ["get", "nodes", "-o", "json"], {
+      timeout: 15000,
+    });
+    const data = JSON.parse(stdout) as {
+      items?: Array<{
+        spec?: { unschedulable?: boolean };
+        status?: {
+          allocatable?: {
+            cpu?: string;
+            memory?: string;
+          };
+        };
+      }>;
+    };
+
+    const schedulableNodes =
+      data.items?.filter((node) => !node.spec?.unschedulable) ?? [];
+
+    let totalCpu = 0;
+    let totalMemoryGi = 0;
+
+    for (const node of schedulableNodes) {
+      totalCpu += parseCpuToCores(node.status?.allocatable?.cpu || "0");
+      totalMemoryGi += parseMemoryToGi(node.status?.allocatable?.memory || "0");
+    }
+
+    if (totalCpu >= 40 && totalMemoryGi >= 80) return "large";
+    if (totalCpu >= 16 && totalMemoryGi >= 32) return "medium";
+    if (totalCpu > 0 && totalMemoryGi > 0) return "small";
+    return null;
   } catch {
     return null;
   }

@@ -33,6 +33,7 @@ import {
   extractProfileFromConfig,
 } from "../lib/config.js";
 import { generateHelmValues } from "../lib/helmValues.js";
+import { inferClusterTier } from "../lib/kubernetes.js";
 import { ProfileConfig } from "../types/index.js";
 
 interface InitWizardProps {
@@ -127,7 +128,10 @@ function WizardStepController({ onSaveComplete }: WizardStepControllerProps) {
       steps.push("database-creds");
     }
 
-    steps.push("tier", "features");
+    if (state.infrastructureMode === "provision") {
+      steps.push("tier");
+    }
+    steps.push("features");
 
     // Feature config only if AI, SSO, monitoring, external logging, or custom emails enabled
     if (
@@ -179,7 +183,11 @@ function WizardStepController({ onSaveComplete }: WizardStepControllerProps) {
   }, []);
 
   const handleSave = useCallback(async () => {
-    const config = toConfig();
+    const inferredTier =
+      state.infrastructureMode === "existing"
+        ? (await inferClusterTier()) || state.tier || "small"
+        : state.tier || undefined;
+    const config = toConfig({ tier: inferredTier });
     if (!config) {
       setError("Invalid configuration - please check all required fields");
       return;

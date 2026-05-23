@@ -132,7 +132,12 @@ export function CloudProviderStep({
 
     return providers.map((p) => ({
       ...p,
-      disabled: !p.status.installed || !p.status.authenticated,
+      // Existing clusters only need a selectable provider so we can record
+      // kubeconfig refresh details. Strict auth/quota checks are only required
+      // when the CLI will provision infrastructure.
+      disabled: needsTerraform
+        ? !p.status.installed || !p.status.authenticated
+        : !p.status.installed,
     }));
   };
 
@@ -428,7 +433,7 @@ export function CloudProviderStep({
         <Box flexDirection="column" marginY={1}>
           <Text>Enter your Azure Resource Group name:</Text>
           <Text color="gray" dimColor>
-            This resource group will contain all Rulebricks resources
+            This should be the resource group containing your AKS cluster
           </Text>
           <Box marginTop={1}>
             <Text color={colors.accent}>❯ </Text>
