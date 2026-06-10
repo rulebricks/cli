@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useCallback, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import {
   BorderBox,
@@ -13,27 +13,22 @@ import {
   loadDeploymentState,
   deleteDeployment,
   deploymentExists,
+  updateDeploymentStatus,
 } from "../lib/config.js";
 import { uninstallChart, getInstalledVersion } from "../lib/helm.js";
-import { terraformDestroy, hasTerraformState } from "../lib/terraform.js";
 import {
+  cleanupNamespaceAPIServices,
   deleteNamespace,
   deletePVCs,
   isClusterAccessible,
   namespaceExists,
   removeKedaFinalizers,
 } from "../lib/kubernetes.js";
-import {
-  DeploymentConfig,
-  DeploymentState,
-  getNamespace,
-  getReleaseName,
-} from "../types/index.js";
+import { DeploymentState, getNamespace, getReleaseName } from "../types/index.js";
 
 interface DestroyCommandProps {
   name: string;
-  cluster?: boolean; // Also destroy cloud infrastructure
-  config?: boolean; // Also delete local config files
+  config?: boolean;
   force?: boolean;
 }
 
@@ -43,48 +38,33 @@ interface StepStatus {
   helm: "pending" | "running" | "success" | "error" | "skipped";
   pvc: "pending" | "running" | "success" | "error" | "skipped";
   namespace: "pending" | "running" | "success" | "error" | "skipped";
-  infrastructure: "pending" | "running" | "success" | "error" | "skipped";
   cleanup: "pending" | "running" | "success" | "error" | "skipped";
 }
 
-// Determine what was actually deployed based on cluster state
 interface DeploymentScope {
   hasLocalFiles: boolean;
-  hasHelmRelease: boolean; // Helm release exists in cluster (checked via helm list)
-  hasNamespace: boolean; // Namespace exists in cluster
-  hasInfrastructure: boolean; // Terraform infra was provisioned
-  clusterAccessible: boolean; // Can we reach the cluster?
+  hasHelmRelease: boolean;
+  hasNamespace: boolean;
+  clusterAccessible: boolean;
 }
 
-function DestroyCommandInner({
-  name,
-  cluster,
-  config,
-  force,
-}: DestroyCommandProps) {
+function DestroyCommandInner({ name, config, force }: DestroyCommandProps) {
   const { exit } = useApp();
   const { colors } = useTheme();
   const [step, setStep] = useState<DestroyStep>("loading");
-  const [deploymentConfig, setDeploymentConfig] =
-    useState<DeploymentConfig | null>(null);
   const [state, setState] = useState<DeploymentState | null>(null);
   const [scope, setScope] = useState<DeploymentScope | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirmText, setConfirmText] = useState("");
-  const [infraError, setInfraError] = useState<string | null>(null);
   const [status, setStatus] = useState<StepStatus>({
     helm: "pending",
     pvc: "pending",
     namespace: "pending",
-    infrastructure: "pending",
     cleanup: "pending",
   });
 
-  // Load config and determine scope on mount
   React.useEffect(() => {
     (async () => {
       try {
-        // Check if deployment exists
         const exists = await deploymentExists(name);
         if (!exists) {
           setError(`Deployment "${name}" not found`);
@@ -92,26 +72,21 @@ function DestroyCommandInner({
           return;
         }
 
-        // Load config (may throw if corrupted)
-        let cfg: DeploymentConfig | null = null;
         try {
-          cfg = await loadDeploymentConfig(name);
-          setDeploymentConfig(cfg);
+          await loadDeploymentConfig(name);
         } catch {
-          // Config might be corrupted or missing, that's OK for destroy
+          // Config might be corrupted or missing; cluster cleanup can still use state/name.
         }
 
-        // Load state
         const st = await loadDeploymentState(name);
         setState(st);
 
-        // Determine what was actually deployed
-        const deploymentScope = await determineScope(name, cfg, st);
+        const deploymentScope = await determineScope(name, st);
         setScope(deploymentScope);
 
         if (force) {
           setStep("destroying");
-          runDestroy(cfg, st, deploymentScope);
+          runDestroy(st, deploymentScope);
         } else {
           setStep("confirm");
         }
@@ -127,89 +102,64 @@ function DestroyCommandInner({
   useInput((input, key) => {
     if (step === "confirm") {
       if (key.return) {
-        if (cluster && scope?.hasInfrastructure) {
-          if (confirmText === "destroy-all") {
-            setStep("destroying");
-            runDestroy(deploymentConfig, state, scope!);
-          }
-        } else {
-          setStep("destroying");
-          runDestroy(deploymentConfig, state, scope!);
-        }
+        setStep("destroying");
+        runDestroy(state, scope!);
       } else if (key.escape) {
         exit();
-      } else if (key.backspace || key.delete) {
-        setConfirmText((t) => t.slice(0, -1));
-      } else if (input && !key.ctrl && !key.meta) {
-        setConfirmText((t) => t + input);
       }
-    } else if (step === "error") {
-      if (key.escape || key.return) {
-        exit();
-      }
+    } else if (step === "error" && (key.escape || key.return)) {
+      exit();
     }
   });
 
   const runDestroy = useCallback(
-    async (
-      cfg: DeploymentConfig | null,
-      st: DeploymentState | null,
-      deploymentScope: DeploymentScope,
-    ) => {
+    async (st: DeploymentState | null, deploymentScope: DeploymentScope) => {
       try {
-        // Use namespace from state if available (backwards compat), otherwise compute from deployment name
         const namespace = st?.application?.namespace || getNamespace(name);
         const releaseName = getReleaseName(name);
 
-        // Run cluster cleanup if cluster is accessible
         if (deploymentScope.clusterAccessible) {
-          // Step 1: Uninstall Helm release (only if namespace exists - helm data is stored there)
           if (deploymentScope.hasHelmRelease && deploymentScope.hasNamespace) {
             setStatus((s) => ({ ...s, helm: "running" }));
             try {
               await uninstallChart(releaseName, namespace, { wait: false });
               setStatus((s) => ({ ...s, helm: "success" }));
             } catch {
-              // Helm release might already be gone, continue anyway
               setStatus((s) => ({ ...s, helm: "error" }));
             }
           } else {
-            // Skip if no helm release OR namespace is already gone
             setStatus((s) => ({ ...s, helm: "skipped" }));
           }
 
-          // Step 2: Delete all PVCs in the namespace
           if (deploymentScope.hasNamespace) {
             setStatus((s) => ({ ...s, pvc: "running" }));
             try {
               await deletePVCs(namespace);
               setStatus((s) => ({ ...s, pvc: "success" }));
             } catch {
-              // PVCs might not exist, continue anyway
               setStatus((s) => ({ ...s, pvc: "error" }));
             }
-          } else {
-            setStatus((s) => ({ ...s, pvc: "skipped" }));
-          }
 
-          // Step 3: Delete namespace
-          if (deploymentScope.hasNamespace) {
             setStatus((s) => ({ ...s, namespace: "running" }));
             try {
-              // Remove KEDA finalizers first to prevent namespace deletion from hanging
-              // KEDA finalizers wait for KEDA controller, but it's being deleted too
+              // Clear teardown deadlocks BEFORE deleting the namespace:
+              //  - KEDA ScaledObject finalizers wait on a controller that's
+              //    being removed with the namespace.
+              //  - Aggregated APIServices backed by this namespace's services
+              //    (KEDA external.metrics, metrics adapters, etc.) go
+              //    Unavailable as the namespace tears down and break the
+              //    namespace controller's discovery, wedging it in Terminating.
               await removeKedaFinalizers(namespace);
+              await cleanupNamespaceAPIServices(namespace);
               await deleteNamespace(namespace);
               setStatus((s) => ({ ...s, namespace: "success" }));
             } catch {
-              // Namespace might already be gone
               setStatus((s) => ({ ...s, namespace: "error" }));
             }
           } else {
-            setStatus((s) => ({ ...s, namespace: "skipped" }));
+            setStatus((s) => ({ ...s, pvc: "skipped", namespace: "skipped" }));
           }
         } else {
-          // Cluster not accessible - skip all cluster operations
           setStatus((s) => ({
             ...s,
             helm: "skipped",
@@ -218,28 +168,6 @@ function DestroyCommandInner({
           }));
         }
 
-        // Destroy infrastructure if requested and it exists
-        if (cluster && deploymentScope.hasInfrastructure) {
-          setStatus((s) => ({ ...s, infrastructure: "running" }));
-          try {
-            const cloudContext = cfg?.infrastructure.provider && cfg?.infrastructure.region
-              ? {
-                  provider: cfg.infrastructure.provider,
-                  clusterName: cfg.infrastructure.clusterName || `${name}-cluster`,
-                  region: cfg.infrastructure.region,
-                }
-              : undefined;
-            await terraformDestroy(name, cloudContext);
-            setStatus((s) => ({ ...s, infrastructure: "success" }));
-          } catch (infraErr) {
-            setInfraError(infraErr instanceof Error ? infraErr.message : "Infrastructure destroy failed");
-            setStatus((s) => ({ ...s, infrastructure: "error" }));
-          }
-        } else {
-          setStatus((s) => ({ ...s, infrastructure: "skipped" }));
-        }
-
-        // Clean up local files (only if --config flag is passed)
         if (config && deploymentScope.hasLocalFiles) {
           setStatus((s) => ({ ...s, cleanup: "running" }));
           try {
@@ -252,6 +180,10 @@ function DestroyCommandInner({
           setStatus((s) => ({ ...s, cleanup: "skipped" }));
         }
 
+        if (!config && deploymentScope.clusterAccessible) {
+          await updateDeploymentStatus(name, "destroyed");
+        }
+
         setStep("complete");
         setTimeout(() => exit(), 3000);
       } catch (err) {
@@ -259,10 +191,9 @@ function DestroyCommandInner({
         setStep("error");
       }
     },
-    [name, cluster, config, exit],
+    [name, config, exit],
   );
 
-  // Loading screen
   if (step === "loading") {
     return (
       <BorderBox title={`Destroying ${name}`}>
@@ -273,7 +204,6 @@ function DestroyCommandInner({
     );
   }
 
-  // Error screen
   if (step === "error") {
     return (
       <BorderBox title="Destruction Failed">
@@ -292,39 +222,26 @@ function DestroyCommandInner({
     );
   }
 
-  // Complete screen
   if (step === "complete") {
     const cleanedItems: string[] = [];
     if (status.helm === "success") cleanedItems.push("Helm release");
     if (status.pvc === "success") cleanedItems.push("Persistent volume claims");
     if (status.namespace === "success")
       cleanedItems.push("Kubernetes namespace");
-    if (status.infrastructure === "success")
-      cleanedItems.push("Cloud infrastructure");
     if (status.cleanup === "success")
       cleanedItems.push("Local configuration files");
 
-    // Check if nothing was cleaned in cluster (no helm, no pvc, no namespace)
     const noClusterCleanup =
       status.helm === "skipped" &&
       status.pvc === "skipped" &&
       status.namespace === "skipped";
 
-    const hasInfraFailure = status.infrastructure === "error";
-    const title = hasInfraFailure ? "Destruction Partially Complete" : "Destruction Complete";
-
     return (
-      <BorderBox title={title}>
+      <BorderBox title="Destruction Complete">
         <Box flexDirection="column" marginY={1}>
-          {hasInfraFailure ? (
-            <Text color={colors.warning} bold>
-              ⚠ Deployment "{name}" was partially destroyed
-            </Text>
-          ) : (
-            <Text color={colors.success} bold>
-              ✓ Deployment "{name}" has been destroyed
-            </Text>
-          )}
+          <Text color={colors.success} bold>
+            ✓ Deployment "{name}" has been destroyed
+          </Text>
 
           {cleanedItems.length > 0 && (
             <Box marginTop={1} flexDirection="column">
@@ -338,22 +255,7 @@ function DestroyCommandInner({
             </Box>
           )}
 
-          {hasInfraFailure && (
-            <Box marginTop={1} flexDirection="column">
-              <Text color={colors.error} bold>
-                ✗ Infrastructure destroy failed
-              </Text>
-              <Text color={colors.error}>{infraError}</Text>
-              <Box marginTop={1}>
-                <Text color={colors.muted}>
-                  Cloud resources may still exist. Run `rulebricks destroy {name}{" "}
-                  --cluster` to retry.
-                </Text>
-              </Box>
-            </Box>
-          )}
-
-          {noClusterCleanup && status.cleanup === "success" && !hasInfraFailure && (
+          {noClusterCleanup && status.cleanup === "success" && (
             <Box marginTop={1}>
               <Text color={colors.muted} dimColor>
                 Note: No cluster resources found, only local files were cleaned
@@ -375,16 +277,11 @@ function DestroyCommandInner({
     );
   }
 
-  // Destroying screen
   if (step === "destroying") {
-    // Show cluster operations if cluster is accessible
-    const showClusterOps = scope?.clusterAccessible;
-    const showInfra = cluster && scope?.hasInfrastructure;
-
     return (
       <BorderBox title={`Destroying ${name}`}>
         <Box flexDirection="column" marginY={1}>
-          {showClusterOps && (
+          {scope?.clusterAccessible && (
             <>
               <StatusLine
                 status={status.helm}
@@ -399,12 +296,6 @@ function DestroyCommandInner({
                 label="Deleting namespace"
               />
             </>
-          )}
-          {showInfra && (
-            <StatusLine
-              status={status.infrastructure}
-              label="Destroying infrastructure"
-            />
           )}
           {config && (
             <StatusLine
@@ -429,24 +320,16 @@ function DestroyCommandInner({
     );
   }
 
-  // Confirmation screen
-  // Check if there's nothing in the cluster to clean up
   const hasClusterResources = scope?.hasHelmRelease || scope?.hasNamespace;
-  const onlyLocalFiles = !hasClusterResources && !scope?.hasInfrastructure;
-  const needsInfraConfirm = cluster && scope?.hasInfrastructure;
+  const onlyLocalFiles = !hasClusterResources;
   const willDeleteConfig = config && scope?.hasLocalFiles;
 
-  // Nothing to do if only local files exist but --config not passed
   if (onlyLocalFiles && !config) {
     return (
       <BorderBox title="Nothing to Destroy">
         <Box flexDirection="column" marginY={1}>
-          <Text color={colors.muted}>
-            No cluster resources found to clean up.
-          </Text>
-          <Text color={colors.muted}>
-            Local configuration files will be preserved.
-          </Text>
+          <Text color={colors.muted}>No cluster resources found to clean up.</Text>
+          <Text color={colors.muted}>Local configuration files will be preserved.</Text>
           <Box marginTop={1}>
             <Text color={colors.muted} dimColor>
               Use <Text color={colors.accent}>--config</Text> to also remove
@@ -467,110 +350,57 @@ function DestroyCommandInner({
     <BorderBox title="Confirm Destruction">
       <Box flexDirection="column" marginY={1}>
         {onlyLocalFiles && config ? (
-          // Only cleaning local files (with --config)
           <>
             <Text color={colors.warning} bold>
-              ℹ Local Cleanup
+              Local Cleanup
             </Text>
             <Box marginY={1} flexDirection="column">
               <Text>No cluster resources found to clean up.</Text>
               <Text>This will delete local configuration files.</Text>
             </Box>
-            <Box marginTop={1}>
-              <Text color={colors.warning}>
-                Press Enter to confirm, Esc to cancel
-              </Text>
-            </Box>
           </>
         ) : (
-          // Full destruction
           <>
             <Text color={colors.accent} bold>
-              ⚠ WARNING
+              WARNING
             </Text>
-
             <Box marginY={1} flexDirection="column">
               <Text color={colors.muted}>This will permanently delete:</Text>
               {(scope?.hasHelmRelease || scope?.hasNamespace) && (
                 <>
                   <Text color={colors.muted}> • Rulebricks application</Text>
-                  <Text color={colors.muted}>
-                    {" "}
-                    • All databases and stored data
-                  </Text>
+                  <Text color={colors.muted}> • All databases and stored data</Text>
                   <Text color={colors.muted}> • All persistent volumes</Text>
                   <Text color={colors.muted}> • Monitoring stack</Text>
                   <Text color={colors.muted}> • Kubernetes namespace</Text>
                 </>
               )}
-              {needsInfraConfirm && (
-                <>
-                  <Text color={colors.accent}> • Kubernetes cluster</Text>
-                  <Text color={colors.accent}> • All cloud infrastructure</Text>
-                </>
-              )}
               {willDeleteConfig && (
                 <Text color={colors.muted}> • Local configuration files</Text>
               )}
-
-              {!cluster && scope?.hasInfrastructure && (
-                <Box marginTop={1}>
-                  <Text color={colors.muted} dimColor>
-                    Cloud infrastructure will be preserved. Use --cluster to
-                    remove it.
-                  </Text>
-                </Box>
-              )}
-              {cluster && !scope?.hasInfrastructure && (
-                <Box marginTop={1}>
-                  <Text color={colors.muted} dimColor>
-                    No CLI managed infrastructure found for this deployment.
-                  </Text>
-                </Box>
-              )}
               {!willDeleteConfig && (
-                <Box marginTop={!needsInfraConfirm && !cluster ? 0 : 1}>
+                <Box marginTop={1}>
                   <Text color={colors.muted} dimColor>
                     Local config files will be preserved. Use --config to remove
                     them.
                   </Text>
                 </Box>
               )}
-
               {!scope?.clusterAccessible && (
                 <Box marginTop={1}>
                   <Text color={colors.warning} dimColor>
-                    ⚠ Cluster is not accessible. Some cluster resources may need
+                    Cluster is not accessible. Some cluster resources may need
                     manual cleanup.
                   </Text>
                 </Box>
               )}
             </Box>
-
-            {needsInfraConfirm ? (
-              <Box flexDirection="column">
-                <Text>
-                  Type{" "}
-                  <Text color={colors.accent} bold>
-                    destroy-all
-                  </Text>{" "}
-                  to confirm:
-                </Text>
-                <Box marginTop={1}>
-                  <Text color={colors.accent}>❯ </Text>
-                  <Text>{confirmText}</Text>
-                  <Text color={colors.muted}>█</Text>
-                </Box>
-              </Box>
-            ) : (
-              <Box marginTop={1}>
-                <Text color={colors.warning}>
-                  Press Enter to confirm, Esc to cancel
-                </Text>
-              </Box>
-            )}
           </>
         )}
+
+        <Box marginTop={1}>
+          <Text color={colors.warning}>Press Enter to confirm, Esc to cancel</Text>
+        </Box>
       </Box>
     </BorderBox>
   );
@@ -585,26 +415,14 @@ export function DestroyCommand(props: DestroyCommandProps) {
   );
 }
 
-/**
- * Determines what actually exists by checking cluster state directly.
- * This ensures cleanup works even if local state is out of sync.
- */
 async function determineScope(
   name: string,
-  config: DeploymentConfig | null,
   state: DeploymentState | null,
 ): Promise<DeploymentScope> {
-  // Check if we have local files (we do, since we loaded the deployment)
   const hasLocalFiles = true;
-
-  // Check if infrastructure was provisioned (from local terraform state)
-  const hasInfrastructure = await hasTerraformState(name);
-
-  // Use namespace from state if available (backwards compat), otherwise compute from deployment name
   const namespace = state?.application?.namespace || getNamespace(name);
   const releaseName = getReleaseName(name);
 
-  // Check if cluster is accessible
   let clusterAccessible = false;
   try {
     clusterAccessible = await isClusterAccessible();
@@ -612,23 +430,17 @@ async function determineScope(
     clusterAccessible = false;
   }
 
-  // If cluster is accessible, check what actually exists in the cluster
   let hasHelmRelease = false;
   let hasNamespace = false;
 
   if (clusterAccessible) {
-    // Check if Helm release actually exists in the cluster
     try {
-      const installedVersion = await getInstalledVersion(
-        releaseName,
-        namespace,
-      );
+      const installedVersion = await getInstalledVersion(releaseName, namespace);
       hasHelmRelease = installedVersion !== null;
     } catch {
       hasHelmRelease = false;
     }
 
-    // Check if namespace exists
     try {
       hasNamespace = await namespaceExists(namespace);
     } catch {
@@ -640,7 +452,6 @@ async function determineScope(
     hasLocalFiles,
     hasHelmRelease,
     hasNamespace,
-    hasInfrastructure,
     clusterAccessible,
   };
 }

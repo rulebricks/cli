@@ -1,5 +1,10 @@
 import { execa, ExecaError } from "execa";
-import { DEFAULT_NAMESPACE, CloudProvider, PerformanceTier } from "../types/index.js";
+import {
+  DEFAULT_NAMESPACE,
+  NodeArchitecture,
+  PerformanceTier,
+  TIER_CONFIGS,
+} from "../types/index.js";
 
 /**
  * Extracts meaningful error message from execa error
@@ -219,23 +224,223 @@ function parseMemoryToGi(memory: string): number {
   return value * (multipliers[unit] ?? 1 / 1024 ** 3);
 }
 
+function roundUpForEligibility(value: number): number {
+  return Math.ceil(value);
+}
+
 /**
- * Infers the closest internal Rulebricks sizing tier from the current cluster.
- * This is used only for existing clusters, where the CLI is not responsible for
- * provisioning node pools but still needs app/Kafka/worker Helm sizing values.
+ * Inferred resource and scheduling capabilities for the current cluster.
  */
-export async function inferClusterTier(): Promise<PerformanceTier | null> {
+export interface ClusterStorageClass {
+  name: string;
+  provisioner: string;
+  isDefault: boolean;
+  volumeBindingMode?: string;
+  allowVolumeExpansion?: boolean;
+}
+
+export interface ClusterCapabilities {
+  tier: PerformanceTier | null;
+  feasibleTiers: PerformanceTier[];
+  recommendedTier: PerformanceTier | null;
+  nodeArchitecture: NodeArchitecture;
+  arm64TolerationRequired: boolean;
+  schedulableNodeCount: number;
+  totalCpuCores: number;
+  totalMemoryGi: number;
+  eligibleCpuCores: number;
+  eligibleMemoryGi: number;
+  totalPersistentStorageGi?: number;
+  storageClasses: ClusterStorageClass[];
+  defaultStorageClass?: ClusterStorageClass;
+  storageClass?: string;
+  storageProvisioner?: string;
+}
+
+function inferTierFromResources(
+  totalCpu: number,
+  totalMemoryGi: number,
+  totalPersistentStorageGi?: number,
+): PerformanceTier | null {
+  const eligibleCpuCores = roundUpForEligibility(totalCpu);
+  const eligibleMemoryGi = roundUpForEligibility(totalMemoryGi);
+
+  if (
+    eligibleCpuCores >= TIER_CONFIGS.large.requirements.cpuCores &&
+    eligibleMemoryGi >= TIER_CONFIGS.large.requirements.memoryGi &&
+    hasEnoughPersistentStorage("large", totalPersistentStorageGi)
+  ) {
+    return "large";
+  }
+  if (
+    eligibleCpuCores >= TIER_CONFIGS.medium.requirements.cpuCores &&
+    eligibleMemoryGi >= TIER_CONFIGS.medium.requirements.memoryGi &&
+    hasEnoughPersistentStorage("medium", totalPersistentStorageGi)
+  ) {
+    return "medium";
+  }
+  if (
+    eligibleCpuCores >= TIER_CONFIGS.small.requirements.cpuCores &&
+    eligibleMemoryGi >= TIER_CONFIGS.small.requirements.memoryGi &&
+    hasEnoughPersistentStorage("small", totalPersistentStorageGi)
+  ) {
+    return "small";
+  }
+  return null;
+}
+
+function hasEnoughPersistentStorage(
+  tier: PerformanceTier,
+  totalPersistentStorageGi?: number,
+): boolean {
+  if (totalPersistentStorageGi === undefined) return true;
+  return (
+    totalPersistentStorageGi >=
+    TIER_CONFIGS[tier].requirements.persistentStorageGi
+  );
+}
+
+export function getFeasibleTiers(
+  capabilities: Pick<
+    ClusterCapabilities,
+    | "totalCpuCores"
+    | "totalMemoryGi"
+    | "totalPersistentStorageGi"
+    | "storageClasses"
+  >,
+): PerformanceTier[] {
+  const hasUsableStorageClass = capabilities.storageClasses.length > 0;
+  if (!hasUsableStorageClass) return [];
+
+  const eligibleCpuCores = roundUpForEligibility(capabilities.totalCpuCores);
+  const eligibleMemoryGi = roundUpForEligibility(capabilities.totalMemoryGi);
+
+  return (Object.keys(TIER_CONFIGS) as PerformanceTier[]).filter((tier) => {
+    const requirements = TIER_CONFIGS[tier].requirements;
+    return (
+      eligibleCpuCores >= requirements.cpuCores &&
+      eligibleMemoryGi >= requirements.memoryGi &&
+      hasEnoughPersistentStorage(tier, capabilities.totalPersistentStorageGi)
+    );
+  });
+}
+
+function normalizeNodeArchitecture(architecture?: string): "amd64" | "arm64" | null {
+  if (architecture === "amd64" || architecture === "x86_64") return "amd64";
+  if (architecture === "arm64" || architecture === "aarch64") return "arm64";
+  return null;
+}
+
+function summarizeNodeArchitecture(
+  architectures: Set<"amd64" | "arm64">,
+): NodeArchitecture {
+  if (architectures.size === 0) return "unknown";
+  if (architectures.size > 1) return "mixed";
+  return architectures.has("arm64") ? "arm64" : "amd64";
+}
+
+async function getStorageClasses(): Promise<ClusterStorageClass[]> {
+  try {
+    const { stdout } = await execa(
+      "kubectl",
+      ["get", "storageclass", "-o", "json"],
+      { timeout: 15000 },
+    );
+    const data = JSON.parse(stdout) as {
+      items?: Array<{
+        metadata?: {
+          name?: string;
+          annotations?: Record<string, string | undefined>;
+        };
+        provisioner?: string;
+        volumeBindingMode?: string;
+        allowVolumeExpansion?: boolean;
+      }>;
+    };
+
+    return (data.items ?? [])
+      .map((storageClass) => {
+        const annotations = storageClass.metadata?.annotations ?? {};
+        return {
+          name: storageClass.metadata?.name || "",
+          provisioner: storageClass.provisioner || "",
+          isDefault:
+            annotations["storageclass.kubernetes.io/is-default-class"] ===
+              "true" ||
+            annotations["storageclass.beta.kubernetes.io/is-default-class"] ===
+              "true",
+          volumeBindingMode: storageClass.volumeBindingMode,
+          allowVolumeExpansion: storageClass.allowVolumeExpansion,
+        };
+      })
+      .filter((storageClass) => storageClass.name);
+  } catch {
+    return [];
+  }
+}
+
+async function getPersistentStorageCapacityGi(
+  storageClassName?: string,
+): Promise<number | undefined> {
+  if (!storageClassName) return undefined;
+
+  try {
+    const { stdout } = await execa(
+      "kubectl",
+      ["get", "csistoragecapacity", "-A", "-o", "json"],
+      { timeout: 15000 },
+    );
+    const data = JSON.parse(stdout) as {
+      items?: Array<{
+        storageClassName?: string;
+        capacity?: string;
+      }>;
+    };
+
+    const capacities =
+      data.items
+        ?.filter((item) => item.storageClassName === storageClassName)
+        .map((item) => parseMemoryToGi(item.capacity || "0"))
+        .filter((capacity) => capacity > 0) ?? [];
+
+    if (capacities.length === 0) return undefined;
+
+    return capacities.reduce((sum, capacity) => sum + capacity, 0);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Infers the closest internal Rulebricks sizing tier and node architecture from
+ * the current cluster. The CLI uses this to keep Helm values compatible with
+ * the Kubernetes resources the user has already made available.
+ */
+export async function inferClusterCapabilities(): Promise<ClusterCapabilities | null> {
   try {
     const { stdout } = await execa("kubectl", ["get", "nodes", "-o", "json"], {
       timeout: 15000,
     });
     const data = JSON.parse(stdout) as {
       items?: Array<{
-        spec?: { unschedulable?: boolean };
+        metadata?: {
+          labels?: Record<string, string | undefined>;
+        };
+        spec?: {
+          unschedulable?: boolean;
+          taints?: Array<{
+            key?: string;
+            value?: string;
+            effect?: string;
+          }>;
+        };
         status?: {
           allocatable?: {
             cpu?: string;
             memory?: string;
+          };
+          nodeInfo?: {
+            architecture?: string;
           };
         };
       }>;
@@ -246,19 +451,82 @@ export async function inferClusterTier(): Promise<PerformanceTier | null> {
 
     let totalCpu = 0;
     let totalMemoryGi = 0;
+    let arm64TolerationRequired = false;
+    const architectures = new Set<"amd64" | "arm64">();
 
     for (const node of schedulableNodes) {
       totalCpu += parseCpuToCores(node.status?.allocatable?.cpu || "0");
       totalMemoryGi += parseMemoryToGi(node.status?.allocatable?.memory || "0");
+
+      const architecture = normalizeNodeArchitecture(
+        node.status?.nodeInfo?.architecture ||
+          node.metadata?.labels?.["kubernetes.io/arch"] ||
+          node.metadata?.labels?.["beta.kubernetes.io/arch"],
+      );
+      if (architecture) {
+        architectures.add(architecture);
+      }
+
+      if (
+        architecture === "arm64" &&
+        node.spec?.taints?.some(
+          (taint) =>
+            taint.key === "kubernetes.io/arch" &&
+            taint.value === "arm64" &&
+            taint.effect === "NoSchedule",
+        )
+      ) {
+        arm64TolerationRequired = true;
+      }
     }
 
-    if (totalCpu >= 40 && totalMemoryGi >= 80) return "large";
-    if (totalCpu >= 16 && totalMemoryGi >= 32) return "medium";
-    if (totalCpu > 0 && totalMemoryGi > 0) return "small";
-    return null;
+    const storageClasses = await getStorageClasses();
+    const defaultStorageClass =
+      storageClasses.find((storageClass) => storageClass.isDefault) ??
+      storageClasses[0];
+    const totalPersistentStorageGi = await getPersistentStorageCapacityGi(
+      defaultStorageClass?.name,
+    );
+    const baseCapabilities = {
+      totalCpuCores: totalCpu,
+      totalMemoryGi,
+      totalPersistentStorageGi,
+      storageClasses,
+    };
+    const feasibleTiers = getFeasibleTiers(baseCapabilities);
+    const recommendedTier =
+      feasibleTiers.length > 0
+        ? inferTierFromResources(totalCpu, totalMemoryGi, totalPersistentStorageGi)
+        : null;
+
+    return {
+      tier: recommendedTier,
+      feasibleTiers,
+      recommendedTier,
+      nodeArchitecture: summarizeNodeArchitecture(architectures),
+      arm64TolerationRequired,
+      schedulableNodeCount: schedulableNodes.length,
+      totalCpuCores: totalCpu,
+      totalMemoryGi,
+      eligibleCpuCores: roundUpForEligibility(totalCpu),
+      eligibleMemoryGi: roundUpForEligibility(totalMemoryGi),
+      totalPersistentStorageGi,
+      storageClasses,
+      defaultStorageClass,
+      storageClass: defaultStorageClass?.name,
+      storageProvisioner: defaultStorageClass?.provisioner,
+    };
   } catch {
     return null;
   }
+}
+
+/**
+ * Infers the closest internal Rulebricks sizing tier from the current cluster.
+ * Kept as a compatibility wrapper for call sites that only need tier sizing.
+ */
+export async function inferClusterTier(): Promise<PerformanceTier | null> {
+  return (await inferClusterCapabilities())?.tier ?? null;
 }
 
 /**
@@ -626,6 +894,275 @@ export async function streamLogs(
   await execa("kubectl", args, { stdio: "inherit" });
 }
 
+export async function execInPod(
+  namespace: string,
+  podName: string,
+  container: string | undefined,
+  args: string[],
+): Promise<string> {
+  const kubectlArgs = ["exec", "-n", namespace, podName];
+  if (container) {
+    kubectlArgs.push("-c", container);
+  }
+  kubectlArgs.push("--", ...args);
+
+  try {
+    const { stdout } = await execa("kubectl", kubectlArgs);
+    return stdout;
+  } catch (error) {
+    throw new Error(`Failed to exec into pod ${podName}:\n${getErrorMessage(error)}`);
+  }
+}
+
+export interface EphemeralJobOptions {
+  name: string;
+  namespace: string;
+  serviceAccountName: string;
+  image: string;
+  command: string[];
+  env?: Array<Record<string, unknown>>;
+  volumeMounts?: Array<Record<string, unknown>>;
+  volumes?: Array<Record<string, unknown>>;
+  // Optional init containers (run to completion before the main container),
+  // e.g. an rclone download that hands off to a postgres pg_restore via a shared
+  // emptyDir. Each entry is a raw container spec.
+  initContainers?: Array<Record<string, unknown>>;
+  labels?: Record<string, string>;
+  backoffLimit?: number;
+  timeoutSeconds?: number;
+}
+
+export interface EphemeralJobResult {
+  jobName: string;
+  logs: string;
+}
+
+export async function runEphemeralJob(
+  options: EphemeralJobOptions,
+): Promise<EphemeralJobResult> {
+  const {
+    name,
+    namespace,
+    serviceAccountName,
+    image,
+    command,
+    env = [],
+    volumeMounts = [],
+    volumes = [],
+    initContainers = [],
+    labels = {},
+    backoffLimit = 0,
+    timeoutSeconds = 3600,
+  } = options;
+
+  const podSpec: Record<string, unknown> = {
+    restartPolicy: "Never",
+    serviceAccountName,
+    containers: [
+      {
+        name: "job",
+        image,
+        imagePullPolicy: "IfNotPresent",
+        command,
+        env,
+        volumeMounts,
+      },
+    ],
+    volumes,
+  };
+  if (initContainers.length > 0) {
+    podSpec.initContainers = initContainers;
+  }
+
+  const manifest = {
+    apiVersion: "batch/v1",
+    kind: "Job",
+    metadata: {
+      name,
+      namespace,
+      labels,
+    },
+    spec: {
+      backoffLimit,
+      template: {
+        metadata: {
+          labels,
+        },
+        spec: podSpec,
+      },
+    },
+  };
+
+  try {
+    await execa("kubectl", [
+      "delete",
+      "job",
+      name,
+      "-n",
+      namespace,
+      "--ignore-not-found=true",
+    ]);
+    await execa("kubectl", ["apply", "-f", "-"], {
+      input: JSON.stringify(manifest),
+    });
+    await execa("kubectl", [
+      "wait",
+      "--for=condition=complete",
+      `job/${name}`,
+      "-n",
+      namespace,
+      `--timeout=${timeoutSeconds}s`,
+    ]);
+
+    const logs = await getJobLogs(name, namespace);
+    return { jobName: name, logs };
+  } catch (error) {
+    const logs = await getJobLogs(name, namespace).catch(() => "");
+    const failed = await isJobFailed(name, namespace).catch(() => false);
+    if (failed) {
+      throw new Error(`Job ${name} failed:\n${logs || getErrorMessage(error)}`);
+    }
+    throw new Error(`Job ${name} did not complete:\n${logs || getErrorMessage(error)}`);
+  }
+}
+
+export async function createJobFromCronJob(
+  namespace: string,
+  cronJobName: string,
+  jobName: string,
+): Promise<void> {
+  try {
+    await execa("kubectl", [
+      "delete",
+      "job",
+      jobName,
+      "-n",
+      namespace,
+      "--ignore-not-found=true",
+    ]);
+    await execa("kubectl", [
+      "create",
+      "job",
+      jobName,
+      "-n",
+      namespace,
+      `--from=cronjob/${cronJobName}`,
+    ]);
+  } catch (error) {
+    throw new Error(`Failed to create backup job:\n${getErrorMessage(error)}`);
+  }
+}
+
+export async function waitForJobComplete(
+  namespace: string,
+  jobName: string,
+  timeoutSeconds = 3600,
+): Promise<string> {
+  try {
+    await execa("kubectl", [
+      "wait",
+      "--for=condition=complete",
+      `job/${jobName}`,
+      "-n",
+      namespace,
+      `--timeout=${timeoutSeconds}s`,
+    ]);
+    return await getJobLogs(jobName, namespace);
+  } catch (error) {
+    const logs = await getJobLogs(jobName, namespace).catch(() => "");
+    const failed = await isJobFailed(jobName, namespace).catch(() => false);
+    if (failed) {
+      throw new Error(`Job ${jobName} failed:\n${logs || getErrorMessage(error)}`);
+    }
+    throw new Error(`Timed out waiting for job ${jobName}:\n${logs || getErrorMessage(error)}`);
+  }
+}
+
+export async function getJobLogs(
+  jobName: string,
+  namespace: string,
+): Promise<string> {
+  const { stdout } = await execa("kubectl", [
+    "logs",
+    `job/${jobName}`,
+    "-n",
+    namespace,
+    "--all-containers=true",
+  ]);
+  return stdout;
+}
+
+async function isJobFailed(jobName: string, namespace: string): Promise<boolean> {
+  const { stdout } = await execa("kubectl", [
+    "get",
+    "job",
+    jobName,
+    "-n",
+    namespace,
+    "-o",
+    "jsonpath={.status.failed}",
+  ]);
+  return Number.parseInt(stdout || "0", 10) > 0;
+}
+
+export async function scaleDeployment(
+  namespace: string,
+  name: string,
+  replicas: number,
+): Promise<void> {
+  try {
+    await execa("kubectl", [
+      "scale",
+      "deployment",
+      name,
+      "-n",
+      namespace,
+      `--replicas=${replicas}`,
+    ]);
+  } catch (error) {
+    throw new Error(`Failed to scale deployment ${name}:\n${getErrorMessage(error)}`);
+  }
+}
+
+export async function waitForDeploymentReady(
+  namespace: string,
+  name: string,
+  timeoutSeconds = 600,
+): Promise<void> {
+  try {
+    await execa("kubectl", [
+      "rollout",
+      "status",
+      `deployment/${name}`,
+      "-n",
+      namespace,
+      `--timeout=${timeoutSeconds}s`,
+    ]);
+  } catch (error) {
+    throw new Error(`Deployment ${name} is not ready:\n${getErrorMessage(error)}`);
+  }
+}
+
+export async function getDeploymentReplicas(
+  namespace: string,
+  name: string,
+): Promise<number | null> {
+  try {
+    const { stdout } = await execa("kubectl", [
+      "get",
+      "deployment",
+      name,
+      "-n",
+      namespace,
+      "-o",
+      "jsonpath={.spec.replicas}",
+    ]);
+    return Number.parseInt(stdout || "0", 10);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Colors for multi-pod log prefixes
  */
@@ -980,6 +1517,67 @@ export async function removeKedaFinalizers(namespace: string): Promise<void> {
 }
 
 /**
+ * Deletes aggregated APIServices (apiregistration.k8s.io) whose backing service
+ * lives in the given namespace.
+ *
+ * Why this matters for teardown: an aggregated API (e.g. KEDA's
+ * v1beta1.external.metrics.k8s.io, prometheus-adapter's custom.metrics.k8s.io,
+ * etc.) is served by an in-namespace Service. When the namespace is torn down
+ * that Service disappears and the (cluster-scoped) APIService goes Unavailable
+ * with ServiceNotFound. The namespace controller must enumerate every API group
+ * to delete a namespace's contents, so a single broken APIService makes its
+ * discovery step fail and wedges the namespace in Terminating forever
+ * (NamespaceDeletionDiscoveryFailure) - which then rejects any reinstall into
+ * that namespace ("being terminated").
+ *
+ * Deleting these APIServices up front (they are going away with the namespace
+ * anyway) keeps discovery healthy so the namespace can finalize. This is
+ * generalized to ALL APIServices backed by the target namespace, not just KEDA,
+ * and is safe: cluster APIs backed by other namespaces (e.g. metrics-server in
+ * kube-system) are never matched. Listing APIService objects is served directly
+ * by kube-apiserver, so this also works to rescue an already-stuck namespace.
+ *
+ * Returns the names of the APIServices that were deleted.
+ */
+export async function cleanupNamespaceAPIServices(
+  namespace: string,
+): Promise<string[]> {
+  const deleted: string[] = [];
+  try {
+    const { stdout } = await execa(
+      "kubectl",
+      ["get", "apiservices", "-o", "json"],
+      { timeout: 30000 },
+    );
+    const parsed = JSON.parse(stdout) as {
+      items?: Array<{
+        metadata?: { name?: string };
+        spec?: { service?: { namespace?: string } | null };
+      }>;
+    };
+    for (const item of parsed.items ?? []) {
+      const name = item.metadata?.name;
+      if (!name) continue;
+      if (item.spec?.service?.namespace === namespace) {
+        try {
+          await execa(
+            "kubectl",
+            ["delete", "apiservice", name, "--ignore-not-found"],
+            { timeout: 30000 },
+          );
+          deleted.push(name);
+        } catch {
+          // Best-effort: a single failure should not block teardown.
+        }
+      }
+    }
+  } catch {
+    // Best-effort: if APIServices can't be listed, don't block the destroy.
+  }
+  return deleted;
+}
+
+/**
  * Checks if a namespace exists
  */
 export async function namespaceExists(namespace: string): Promise<boolean> {
@@ -992,130 +1590,99 @@ export async function namespaceExists(namespace: string): Promise<boolean> {
 }
 
 /**
- * Waits for cluster to be accessible with retries.
- * EKS IAM authentication can take time to propagate after cluster creation.
- */
-export async function waitForClusterAccess(
-  maxRetries: number = 30,
-  delayMs: number = 10000,
-): Promise<void> {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      await execa("kubectl", ["cluster-info"]);
-      return; // Success
-    } catch (error) {
-      if (attempt === maxRetries) {
-        throw new Error(
-          `Cluster not accessible after ${maxRetries} attempts. ` +
-            `EKS IAM authentication may not have propagated yet. ` +
-            `Please wait a few minutes and try again.\n${getErrorMessage(error)}`,
-        );
-      }
-      // Wait before next retry
-      await sleep(delayMs);
-    }
-  }
-}
-
-/**
- * Creates default StorageClass for the cloud provider.
- * Should be called after kubeconfig is configured and cluster is accessible.
- */
-export async function createDefaultStorageClass(
-  provider: CloudProvider,
-): Promise<void> {
-  // First wait for cluster to be accessible
-  await waitForClusterAccess();
-
-  let storageClassYaml: string;
-
-  switch (provider) {
-    case "aws":
-      storageClassYaml = `
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: gp3
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "true"
-provisioner: ebs.csi.aws.com
-reclaimPolicy: Delete
-volumeBindingMode: WaitForFirstConsumer
-parameters:
-  type: gp3
-  encrypted: "true"
-`;
-      break;
-
-    case "gcp":
-      storageClassYaml = `
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: pd-ssd
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "true"
-provisioner: pd.csi.storage.gke.io
-reclaimPolicy: Delete
-volumeBindingMode: WaitForFirstConsumer
-parameters:
-  type: pd-ssd
-`;
-      break;
-
-    case "azure":
-      storageClassYaml = `
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: managed-premium
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "true"
-provisioner: disk.csi.azure.com
-reclaimPolicy: Delete
-volumeBindingMode: WaitForFirstConsumer
-parameters:
-  skuName: Premium_LRS
-`;
-      break;
-
-    default:
-      throw new Error(`Unsupported cloud provider: ${provider}`);
-  }
-
-  try {
-    await execa("kubectl", ["apply", "-f", "-"], {
-      input: storageClassYaml,
-    });
-  } catch (error) {
-    throw new Error(
-      `Failed to create StorageClass:\n${getErrorMessage(error)}`,
-    );
-  }
-}
-
-/**
  * Deployed image versions from Kubernetes
  */
 export interface DeployedVersions {
   appVersion: string | null;
   hpsVersion: string | null;
+  hpsWorkerVersion: string | null;
+  appDigest: string | null;
+  hpsDigests: string[];
+  hpsWorkerDigests: string[];
 }
 
 /**
  * Extracts the version tag from a Docker image string.
  * E.g., "rulebricks/rulebricks:v1.5.8" -> "v1.5.8"
  */
-function extractImageTag(image: string): string | null {
+export function extractImageTag(image: string): string | null {
   if (!image) return null;
   const parts = image.split(":");
   if (parts.length < 2) return null;
   return parts[parts.length - 1];
 }
 
+export function extractImageDigest(imageId: string): string | null {
+  const digest = imageId.split("@").pop();
+  return digest?.startsWith("sha256:") ? digest : null;
+}
+
+async function getWorkloadImage(
+  workloadType: "deployment" | "statefulset",
+  name: string,
+  namespace: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await execa("kubectl", [
+      "get",
+      workloadType,
+      name,
+      "-n",
+      namespace,
+      "-o",
+      "jsonpath={.spec.template.spec.containers[0].image}",
+    ]);
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getPodImageDigests(
+  releaseName: string,
+  workloadName: string,
+  namespace: string,
+  containerName: string,
+): Promise<string[]> {
+  try {
+    const { stdout } = await execa("kubectl", [
+      "get",
+      "pods",
+      "-n",
+      namespace,
+      "-l",
+      `app.kubernetes.io/name=${workloadName},app.kubernetes.io/instance=${releaseName}`,
+      "-o",
+      "json",
+    ]);
+    const data = JSON.parse(stdout) as {
+      items?: Array<{
+        status?: {
+          containerStatuses?: Array<{
+            name: string;
+            imageID?: string;
+          }>;
+        };
+      }>;
+    };
+
+    return Array.from(
+      new Set(
+        (data.items || [])
+          .flatMap((pod) => pod.status?.containerStatuses || [])
+          .filter((status) => status.name === containerName)
+          .map((status) => extractImageDigest(status.imageID || ""))
+          .filter((digest): digest is string => Boolean(digest)),
+      ),
+    );
+  } catch {
+    return [];
+  }
+}
+
 /**
- * Gets the actual deployed image versions from Kubernetes deployments.
- * Queries the app and HPS deployments to get their current image tags.
+ * Gets actual deployed image tags and running image digests from Kubernetes.
+ * HPS runs as StatefulSets, so digest checks inspect the pods behind those sets.
  *
  * @param releaseName - The Helm release name (e.g., "rulebricks")
  * @param namespace - The Kubernetes namespace
@@ -1128,39 +1695,37 @@ export async function getDeployedImageVersions(
   const result: DeployedVersions = {
     appVersion: null,
     hpsVersion: null,
+    hpsWorkerVersion: null,
+    appDigest: null,
+    hpsDigests: [],
+    hpsWorkerDigests: [],
   };
 
-  // Get app deployment image
-  try {
-    const { stdout: appImage } = await execa("kubectl", [
-      "get",
-      "deployment",
-      `${releaseName}-app`,
-      "-n",
-      namespace,
-      "-o",
-      "jsonpath={.spec.template.spec.containers[0].image}",
-    ]);
-    result.appVersion = extractImageTag(appImage.trim());
-  } catch {
-    // Deployment may not exist or cluster not accessible
-  }
+  const appName = `${releaseName}-app`;
+  const hpsName = `${releaseName}-hps`;
+  const hpsWorkerName = `${releaseName}-hps-worker`;
 
-  // Get HPS deployment image
-  try {
-    const { stdout: hpsImage } = await execa("kubectl", [
-      "get",
-      "deployment",
-      `${releaseName}-hps`,
-      "-n",
-      namespace,
-      "-o",
-      "jsonpath={.spec.template.spec.containers[0].image}",
-    ]);
-    result.hpsVersion = extractImageTag(hpsImage.trim());
-  } catch {
-    // Deployment may not exist or cluster not accessible
-  }
+  const [appImage, hpsImage, hpsWorkerImage] = await Promise.all([
+    getWorkloadImage("deployment", appName, namespace),
+    getWorkloadImage("statefulset", hpsName, namespace),
+    getWorkloadImage("statefulset", hpsWorkerName, namespace),
+  ]);
+
+  result.appVersion = appImage ? extractImageTag(appImage) : null;
+  result.hpsVersion = hpsImage ? extractImageTag(hpsImage) : null;
+  result.hpsWorkerVersion = hpsWorkerImage
+    ? extractImageTag(hpsWorkerImage)?.replace(/^worker-/, "") || null
+    : null;
+
+  const [appDigests, hpsDigests, hpsWorkerDigests] = await Promise.all([
+    getPodImageDigests(releaseName, appName, namespace, "app"),
+    getPodImageDigests(releaseName, hpsName, namespace, "hps"),
+    getPodImageDigests(releaseName, hpsWorkerName, namespace, "hps-worker"),
+  ]);
+
+  result.appDigest = appDigests[0] || null;
+  result.hpsDigests = hpsDigests;
+  result.hpsWorkerDigests = hpsWorkerDigests;
 
   return result;
 }

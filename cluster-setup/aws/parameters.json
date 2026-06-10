@@ -1,0 +1,10 @@
+[
+  { "ParameterKey": "ClusterName", "ParameterValue": "rulebricks-cluster" },
+  { "ParameterKey": "KubernetesVersion", "ParameterValue": "1.34" },
+  { "ParameterKey": "NodeInstanceType", "ParameterValue": "c7i.xlarge" },
+  { "ParameterKey": "NodeDesiredCapacity", "ParameterValue": "2" },
+  { "ParameterKey": "NodeMinSize", "ParameterValue": "2" },
+  { "ParameterKey": "NodeMaxSize", "ParameterValue": "4" },
+  { "ParameterKey": "NodeVolumeSizeGiB", "ParameterValue": "50" },
+  { "ParameterKey": "VpcCidr", "ParameterValue": "10.0.0.0/16" }
+]

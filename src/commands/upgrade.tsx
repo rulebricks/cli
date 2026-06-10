@@ -14,13 +14,16 @@ import {
   updateDeploymentStatus,
   getHelmValuesPath,
 } from "../lib/config.js";
-import { upgradeChart, dryRunUpgrade } from "../lib/helm.js";
 import {
-  fetchAppVersions,
-  formatVersion,
+  upgradeChart,
+  dryRunUpgrade,
+  getInstalledChartVersion,
+} from "../lib/helm.js";
+import {
   formatDate,
   AppVersionInfo,
   getAppVersionInfo,
+  hasRegistryDigestMismatch,
 } from "../lib/versions.js";
 import { formatVersionDisplay, normalizeVersion } from "../lib/dockerHub.js";
 import {
@@ -30,7 +33,11 @@ import {
   getNamespace,
   getReleaseName,
 } from "../types/index.js";
-import { getDeployedImageVersions, rolloutRestart } from "../lib/kubernetes.js";
+import {
+  getDeployedImageVersions,
+  rolloutRestart,
+  type DeployedVersions,
+} from "../lib/kubernetes.js";
 import fs from "fs/promises";
 import YAML from "yaml";
 
@@ -38,6 +45,36 @@ interface UpgradeCommandProps {
   name: string;
   targetVersion?: string;
   dryRun?: boolean;
+}
+
+function hasSameVersionHpsPatch(
+  version: AppVersion,
+  deployedVersions: DeployedVersions | null,
+): boolean {
+  if (!deployedVersions) {
+    return false;
+  }
+
+  const hpsVersionMatches =
+    deployedVersions.hpsVersion &&
+    normalizeVersion(deployedVersions.hpsVersion) ===
+      normalizeVersion(version.version);
+  const workerVersionMatches =
+    deployedVersions.hpsWorkerVersion &&
+    normalizeVersion(deployedVersions.hpsWorkerVersion) ===
+      normalizeVersion(version.version);
+
+  if (!hpsVersionMatches && !workerVersionMatches) {
+    return false;
+  }
+
+  return (
+    hasRegistryDigestMismatch(deployedVersions.hpsDigests, version.hpsDigests) ||
+    hasRegistryDigestMismatch(
+      deployedVersions.hpsWorkerDigests,
+      version.hpsWorkerDigests,
+    )
+  );
 }
 
 type UpgradeStep =
@@ -67,6 +104,21 @@ function UpgradeCommandInner({
   const [deployedHpsVersion, setDeployedHpsVersion] = useState<string | null>(
     null,
   );
+  const [deployedVersions, setDeployedVersions] =
+    useState<DeployedVersions | null>(null);
+
+  async function resolvePinnedChartVersion(
+    namespace: string,
+    releaseName: string,
+  ): Promise<string | undefined> {
+    const state = await loadDeploymentState(name);
+    const stateChartVersion = state?.application?.chartVersion;
+    if (stateChartVersion && stateChartVersion !== "latest") {
+      return stateChartVersion;
+    }
+
+    return (await getInstalledChartVersion(releaseName, namespace)) || undefined;
+  }
 
   useEffect(() => {
     loadVersions();
@@ -86,17 +138,18 @@ function UpgradeCommandInner({
         releaseName,
         namespace,
       );
+      setDeployedVersions(deployedVersions);
 
       // Use deployed version from K8s, fall back to state file if K8s query fails
-      const currentAppVersion =
-        deployedVersions.appVersion || state?.application?.appVersion || null;
+      const currentVersion =
+        deployedVersions.appVersion ||
+        state?.application?.version ||
+        null;
 
       // Store actual deployed HPS version for display
-      setDeployedHpsVersion(
-        deployedVersions.hpsVersion || state?.application?.hpsVersion || null,
-      );
+      setDeployedHpsVersion(deployedVersions.hpsVersion || null);
 
-      const info = await getAppVersionInfo(cfg.licenseKey, currentAppVersion);
+      const info = await getAppVersionInfo(cfg.licenseKey, currentVersion);
       setVersionInfo(info);
 
       if (targetVersion) {
@@ -126,7 +179,7 @@ function UpgradeCommandInner({
 
   async function performDryRun(version: AppVersion) {
     try {
-      // Update helm values with new image tags before dry run
+      // Update Helm values with the unified product version before dry run
       await updateHelmValuesWithVersion(version);
 
       const state = await loadDeploymentState(name);
@@ -134,7 +187,13 @@ function UpgradeCommandInner({
       const namespace = state?.application?.namespace || getNamespace(name);
       const releaseName = getReleaseName(name);
 
-      const output = await dryRunUpgrade(name, { releaseName, namespace });
+      const chartVersion = await resolvePinnedChartVersion(namespace, releaseName);
+
+      const output = await dryRunUpgrade(name, {
+        releaseName,
+        namespace,
+        version: chartVersion,
+      });
       setDryRunOutput(output);
       setStep("complete");
     } catch (err) {
@@ -150,32 +209,10 @@ function UpgradeCommandInner({
       const content = await fs.readFile(valuesPath, "utf8");
       const values = YAML.parse(content) as Record<string, unknown>;
 
-      // Update image tags
-      if (!values.rulebricks) {
-        values.rulebricks = {};
+      if (!values.global) {
+        values.global = {};
       }
-      const rulebricks = values.rulebricks as Record<string, unknown>;
-
-      // Update app image tag
-      if (!rulebricks.app) {
-        rulebricks.app = {};
-      }
-      const app = rulebricks.app as Record<string, unknown>;
-      if (!app.image) {
-        app.image = {};
-      }
-      (app.image as Record<string, unknown>).tag = version.version;
-
-      // Update HPS image tag
-      if (!rulebricks.hps) {
-        rulebricks.hps = {};
-      }
-      const hps = rulebricks.hps as Record<string, unknown>;
-      if (!hps.image) {
-        hps.image = {};
-      }
-      (hps.image as Record<string, unknown>).tag =
-        version.hpsVersion || version.version;
+      (values.global as Record<string, unknown>).version = version.version;
 
       // Save updated values
       await fs.writeFile(valuesPath, YAML.stringify(values), "utf8");
@@ -189,7 +226,7 @@ function UpgradeCommandInner({
 
     setStep("upgrading");
     try {
-      // Update helm values with new image tags
+      // Update Helm values with the unified product version
       await updateHelmValuesWithVersion(selectedVersion);
 
       const state = await loadDeploymentState(name);
@@ -198,7 +235,14 @@ function UpgradeCommandInner({
       const releaseName = getReleaseName(name);
 
       // Perform the upgrade
-      await upgradeChart(name, { releaseName, namespace, wait: true });
+      const chartVersion = await resolvePinnedChartVersion(namespace, releaseName);
+
+      await upgradeChart(name, {
+        releaseName,
+        namespace,
+        version: chartVersion,
+        wait: true,
+      });
 
       // Force restart HPS statefulsets to ensure fresh images are pulled
       // (pullPolicy: Always only pulls on pod restart, not on unchanged spec)
@@ -212,8 +256,8 @@ function UpgradeCommandInner({
       // Update deployment state
       await updateDeploymentStatus(name, "running", {
         application: {
-          appVersion: selectedVersion.version,
-          hpsVersion: selectedVersion.hpsVersion || selectedVersion.version,
+          version: selectedVersion.version,
+          chartVersion: chartVersion || state?.application?.chartVersion,
           namespace,
           url: `https://${config.domain}`,
         },
@@ -298,11 +342,6 @@ function UpgradeCommandInner({
           <Text color={colors.success} bold>
             ✓ Upgraded to {formatVersionDisplay(selectedVersion?.version || "")}
           </Text>
-          {selectedVersion?.hpsVersion && (
-            <Text color={colors.muted}>
-              HPS version: {formatVersionDisplay(selectedVersion.hpsVersion)}
-            </Text>
-          )}
           <Box marginTop={1}>
             <Text>Run `rulebricks status {name}` to verify the deployment</Text>
           </Box>
@@ -334,24 +373,12 @@ function UpgradeCommandInner({
                 ? formatVersionDisplay(versionInfo.current.version)
                 : "Not installed"}
             </Text>
-            {deployedHpsVersion && (
-              <Text color={colors.muted}>
-                {" "}
-                (Solver: {formatVersionDisplay(deployedHpsVersion)})
-              </Text>
-            )}
           </Text>
           <Text>
             Target:{" "}
             <Text color={colors.success}>
               {formatVersionDisplay(selectedVersion?.version || "")}
             </Text>
-            {selectedVersion?.hpsVersion && (
-              <Text color={colors.muted}>
-                {" "}
-                (Solver: {formatVersionDisplay(selectedVersion.hpsVersion)})
-              </Text>
-            )}
           </Text>
 
           <Box marginTop={1} flexDirection="column">
@@ -378,15 +405,14 @@ function UpgradeCommandInner({
     versionInfo?.available.map((v) => ({
       label: formatVersionDisplay(v.version),
       value: v.version,
-      hpsVersion: v.hpsVersion,
       date: v.releaseDate,
-      // Only mark as "current" if both app AND HPS versions match what's deployed
+      hasSameVersionPatch: hasSameVersionHpsPatch(v, deployedVersions),
+      // Only mark as "current" if app and HPS versions match what's deployed
       isCurrent:
         versionInfo.current?.version === v.version &&
         (!deployedHpsVersion ||
-          !v.hpsVersion ||
-          normalizeVersion(deployedHpsVersion) ===
-            normalizeVersion(v.hpsVersion)),
+          normalizeVersion(deployedHpsVersion) === normalizeVersion(v.version)) &&
+        !hasSameVersionHpsPatch(v, deployedVersions),
       isLatest: versionInfo.latest?.version === v.version,
     })) || [];
 
@@ -396,12 +422,17 @@ function UpgradeCommandInner({
         {/* Current/Latest status */}
         {(() => {
           // Check if HPS has an update available (even if app version is current)
-          const latestHps = versionInfo?.latest?.hpsVersion;
+          const hasHpsDigestUpdate = versionInfo?.latest
+            ? hasSameVersionHpsPatch(versionInfo.latest, deployedVersions)
+            : false;
           const hasHpsUpdate =
-            deployedHpsVersion &&
-            latestHps &&
-            normalizeVersion(deployedHpsVersion) !==
-              normalizeVersion(latestHps);
+            hasHpsDigestUpdate ||
+            !!(
+              deployedHpsVersion &&
+              versionInfo?.latest &&
+              normalizeVersion(deployedHpsVersion) !==
+                normalizeVersion(versionInfo.latest.version)
+            );
           const hasAnyUpdate = versionInfo?.hasUpdate || hasHpsUpdate;
 
           return (
@@ -413,12 +444,6 @@ function UpgradeCommandInner({
                     ? formatVersionDisplay(versionInfo.current.version)
                     : "Not installed"}
                 </Text>
-                {deployedHpsVersion && (
-                  <Text color={hasHpsUpdate ? colors.accent : colors.muted}>
-                    {" "}
-                    (Solver: {formatVersionDisplay(deployedHpsVersion)})
-                  </Text>
-                )}
               </Text>
               <Text>
                 Latest:{" "}
@@ -427,17 +452,12 @@ function UpgradeCommandInner({
                     ? formatVersionDisplay(versionInfo.latest.version)
                     : "Unknown"}
                 </Text>
-                {versionInfo?.latest?.hpsVersion && (
-                  <Text color={hasHpsUpdate ? colors.success : colors.muted}>
-                    {" "}
-                    (Solver:{" "}
-                    {formatVersionDisplay(versionInfo.latest.hpsVersion)})
-                  </Text>
-                )}
               </Text>
               {hasAnyUpdate && (
                 <Text color={colors.muted} dimColor>
-                  Update available
+                  {hasHpsDigestUpdate
+                    ? "HPS patch available for the installed version"
+                    : "Update available"}
                 </Text>
               )}
             </Box>
@@ -459,7 +479,7 @@ function UpgradeCommandInner({
         </Box>
 
         {/* Version selector */}
-        <Text bold>Select app version to install:</Text>
+        <Text bold>Select Rulebricks version to install:</Text>
         <Box marginTop={1}>
           <SelectInput
             items={versionItems}
@@ -480,16 +500,11 @@ function UpgradeCommandInner({
               return (
                 <Box>
                   <Text color={labelColor}>{label}</Text>
-                  {vItem.hpsVersion && (
-                    <Text
-                      color={isLatestWithUpdate ? colors.success : colors.muted}
-                    >
-                      {" "}
-                      (Solver: {formatVersionDisplay(vItem.hpsVersion)})
-                    </Text>
-                  )}
                   {vItem.isCurrent && (
                     <Text color={colors.warning}> current</Text>
+                  )}
+                  {vItem.hasSameVersionPatch && (
+                    <Text color={colors.success}> patch available</Text>
                   )}
                   <Text color={colors.muted}> {formatDate(vItem.date)}</Text>
                 </Box>

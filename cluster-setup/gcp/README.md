@@ -1,6 +1,6 @@
 # GCP Cluster Setup
 
-Use these commands to create a minimum GKE cluster that can run Rulebricks without using the Rulebricks CLI Terraform flow. GCP does not have an `eksctl`-style cluster YAML or a concise Bicep equivalent; the most familiar native interface is `gcloud`.
+Use these commands to create a compact GKE cluster that can run Rulebricks before installing with the Rulebricks CLI. GCP does not have an `eksctl`-style cluster YAML or a concise Bicep equivalent; the most familiar native interface is `gcloud`.
 
 ## Files
 
@@ -11,10 +11,11 @@ Use these commands to create a minimum GKE cluster that can run Rulebricks witho
 - Cluster name: `rulebricks-cluster` (`Core cluster parameters` block -> `CLUSTER_NAME`)
 - Region / zone: `us-central1` / `us-central1-a` (`Core cluster parameters` block -> `REGION` / `ZONE`)
 - Kubernetes version: `1.34` (`Core cluster parameters` block -> `KUBERNETES_VERSION`)
-- Node count: `4` (`Core cluster parameters` block -> `NODE_COUNT`)
-- Machine type: `c4a-standard-2` (`Core cluster parameters` block -> `MACHINE_TYPE`)
+- Initial node count: `2` (`Core cluster parameters` block -> `NODE_COUNT`)
+- Autoscaling range: `2-4` nodes (`Core cluster parameters` block -> `NODE_COUNT` / `MAX_NODE_COUNT`)
+- Machine type: `n2-standard-4` (`Core cluster parameters` block -> `MACHINE_TYPE`)
 - Disk size (GB): `20` (`Core cluster parameters` block -> `DISK_SIZE`)
-- Disk type: `hyperdisk-balanced` (`Core cluster parameters` block -> `DISK_TYPE`)
+- Disk type: `pd-balanced` (`Core cluster parameters` block -> `DISK_TYPE`)
 
 ## Check Access
 
@@ -29,7 +30,7 @@ If API warnings appear, run the suggested `gcloud services enable` commands and 
 
 ## Create The Cluster
 
-Set the core cluster parameters. The default example uses `us-central1-a` because it supports C4A ARM64 nodes.
+Set the core cluster parameters.
 
 ```bash
 PROJECT_ID="$(gcloud config get-value project)"
@@ -37,10 +38,11 @@ CLUSTER_NAME=rulebricks-cluster
 REGION=us-central1
 ZONE=us-central1-a
 KUBERNETES_VERSION="1.34"
-NODE_COUNT=4
-MACHINE_TYPE=c4a-standard-2
+NODE_COUNT=2
+MAX_NODE_COUNT=4
+MACHINE_TYPE=n2-standard-4
 DISK_SIZE=20
-DISK_TYPE=hyperdisk-balanced
+DISK_TYPE=pd-balanced
 ```
 
 Enable required APIs:
@@ -54,7 +56,7 @@ gcloud services enable \
   --project "$PROJECT_ID"
 ```
 
-Create the VPC, subnet, NAT, and internal firewall rule:
+Create the VPC, subnet, NAT, and firewall rules:
 
 ```bash
 gcloud compute networks create "${CLUSTER_NAME}-vpc" \
@@ -87,6 +89,13 @@ gcloud compute firewall-rules create "${CLUSTER_NAME}-allow-internal" \
   --allow tcp:0-65535,udp:0-65535,icmp \
   --source-ranges 10.0.0.0/16,10.1.0.0/16,10.2.0.0/16 \
   --target-tags "gke-${CLUSTER_NAME}"
+
+gcloud compute firewall-rules create "${CLUSTER_NAME}-allow-web" \
+  --project "$PROJECT_ID" \
+  --network "${CLUSTER_NAME}-vpc" \
+  --allow tcp:80,tcp:443 \
+  --source-ranges 0.0.0.0/0 \
+  --target-tags "gke-${CLUSTER_NAME}"
 ```
 
 Create the GKE cluster:
@@ -113,13 +122,15 @@ gcloud container clusters create "$CLUSTER_NAME" \
   --node-pool rulebricks-nodes \
   --machine-type "$MACHINE_TYPE" \
   --num-nodes "$NODE_COUNT" \
+  --enable-autoscaling \
+  --min-nodes "$NODE_COUNT" \
+  --max-nodes "$MAX_NODE_COUNT" \
   --disk-type "$DISK_TYPE" \
   --disk-size "$DISK_SIZE" \
   --scopes cloud-platform \
   --workload-metadata GKE_METADATA \
   --enable-autorepair \
   --enable-autoupgrade \
-  --node-labels environment=rulebricks \
   --tags "gke-${CLUSTER_NAME}"
 ```
 
@@ -131,42 +142,48 @@ gcloud container clusters get-credentials "$CLUSTER_NAME" \
   --project "$PROJECT_ID"
 ```
 
-Use `rulebricks init` with **Use existing Kubernetes cluster** after kubeconfig works.
+Use `rulebricks init` after kubeconfig works, then select this cluster from the GCP cluster list.
 
-## Optional Identity Setup
+## Multi-Node Scheduling
 
-If you use GCS decision-log export, bind the `vector` Kubernetes service account to a Google service account that can write to the bucket:
+The default configuration starts with two 4-vCPU nodes for a simple standalone deployment and can scale out to four nodes. Splitting the baseline across two nodes provides more Kubernetes pod slots than a single large node while keeping the initial 8-vCPU footprint. Rulebricks worker pods use soft scheduling preferences so Kubernetes can place them away from the rest of the deployment when extra nodes are available. No node labels or taints are required.
+
+## Identity Setup (one service account, one bucket)
+
+All Rulebricks data lives in a single GCS bucket; decision logs and database
+backups are key prefixes (`decision-logs/`, `db-backups/`) within it. Create one
+Google service account and the bucket — this is deployment-independent:
 
 ```bash
-NAMESPACE=rulebricks-demo
 PROJECT_ID="$(gcloud config get-value project)"
-GSA=rulebricks-vector@"$PROJECT_ID".iam.gserviceaccount.com
+CLUSTER_NAME=rulebricks-cluster
+GSA=rulebricks@"$PROJECT_ID".iam.gserviceaccount.com
+BUCKET="$CLUSTER_NAME-data"
 
-gcloud iam service-accounts create rulebricks-vector \
-  --project "$PROJECT_ID"
+gcloud iam service-accounts create rulebricks --project "$PROJECT_ID"
 
-gcloud storage buckets add-iam-policy-binding gs://<bucket-name> \
+# Create the single data bucket and grant read/write/delete (delete is needed so
+# the backup job can prune backups older than the retention window).
+gcloud storage buckets create "gs://$BUCKET" --project "$PROJECT_ID" --location "$REGION"
+gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
   --member "serviceAccount:$GSA" \
-  --role roles/storage.objectCreator
+  --role roles/storage.objectAdmin
 
-gcloud iam service-accounts add-iam-policy-binding "$GSA" \
-  --project "$PROJECT_ID" \
-  --role roles/iam.workloadIdentityUser \
-  --member "serviceAccount:$PROJECT_ID.svc.id.goog[$NAMESPACE/vector]"
+# Prometheus remote write to Google Managed Prometheus (skip if unused).
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:$GSA" \
+  --role roles/monitoring.metricWriter
 ```
 
-Annotate the service account after the Rulebricks namespace exists:
-
-```bash
-kubectl annotate serviceaccount vector \
-  --namespace "$NAMESPACE" \
-  iam.gke.io/gcp-service-account="$GSA"
-```
-
-Enter the Google service account email when prompted by the CLI.
+The per-namespace `roles/iam.workloadIdentityUser` bindings (for `vector`,
+`<release>-backup`, and `prometheus`) are **created by the Rulebricks CLI at
+`rulebricks deploy` time**, since they're namespace-scoped — so this setup stays
+generic and one cluster can host many deployments. Enter the Google service
+account email (`$GSA`) and the `$BUCKET` name when prompted by the CLI.
 
 ## Notes
 
-- The example creates four `c4a-standard-2` ARM64 nodes with `hyperdisk-balanced`, matching the minimum CLI Terraform defaults.
-- C4A availability varies by region and zone. If you change `REGION`, choose a `ZONE` where C4A is available.
+- The example creates two `n2-standard-4` nodes initially and enables autoscaling up to four nodes. The initial nodes provide 8 vCPU total for the compact Rulebricks cluster shape while avoiding single-node pod density limits.
+- If you change `REGION`, choose a `ZONE` where the selected machine type is available.
 - Regional GKE clusters can multiply node counts across node locations. This example pins one node location to keep the minimum cluster shape predictable.
+- The public web firewall rule allows HTTP and HTTPS to the node pool so Kubernetes LoadBalancer services and cert-manager HTTP-01 validation can receive internet traffic.

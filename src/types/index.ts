@@ -4,6 +4,7 @@ import { z } from "zod";
 export type CloudProvider = "aws" | "gcp" | "azure";
 export type DatabaseType = "self-hosted" | "supabase-cloud";
 export type PerformanceTier = "small" | "medium" | "large";
+export type NodeArchitecture = "amd64" | "arm64" | "mixed" | "unknown";
 export type SSOProvider =
   | "azure"
   | "google"
@@ -11,6 +12,23 @@ export type SSOProvider =
   | "keycloak"
   | "ory"
   | "other";
+
+// External managed Kafka presets. Drives per-cloud auth defaults and whether the
+// Vector bridge sidecar is required (token mechanisms can't be spoken by Vector).
+export type KafkaPreset =
+  | "aws-msk-iam"
+  | "azure-event-hubs"
+  | "gcp-managed"
+  | "custom";
+
+// Kafka SASL mechanisms. "" means no SASL (plaintext / SSL-only).
+export type KafkaSaslMechanism =
+  | ""
+  | "aws-iam"
+  | "oauthbearer"
+  | "scram-sha-256"
+  | "scram-sha-512"
+  | "plain";
 
 // DNS Provider types - for External DNS feature
 // 'other' means the user's DNS is not on a supported provider (Squarespace, GoDaddy, etc.)
@@ -29,15 +47,13 @@ export const SUPPORTED_DNS_PROVIDERS: DnsProvider[] = [
   "azure",
 ];
 
-// Logging sink types for Vector
-// 'pending' means external logging is enabled but destination not yet selected
+// Logging sink types for Vector. Decision logs always go to the configured
+// object storage (config.storage); this selects an *additional* external
+// logging platform. 'pending' means external logging is enabled but the
+// destination has not been selected yet.
 export type LoggingSink =
   | "console" // Default - console only
   | "pending" // External logging enabled but not configured yet
-  // Cloud Storage
-  | "s3" // AWS S3
-  | "azure-blob" // Azure Blob Storage
-  | "gcs" // Google Cloud Storage
   // Logging Platforms
   | "datadog" // Datadog Logs
   | "splunk" // Splunk HEC
@@ -45,9 +61,6 @@ export type LoggingSink =
   | "loki" // Grafana Loki
   | "newrelic" // New Relic Logs
   | "axiom"; // Axiom
-
-// Logging sink categories
-export type LoggingSinkCategory = "cloud-storage" | "logging-platform";
 
 // Prometheus remote_write destination and auth configuration.
 export type MonitoringDestination =
@@ -92,27 +105,12 @@ export interface RemoteWriteConfig {
 }
 
 export type CloudLoggingAuthMode = "workload-identity" | "secret";
-
-// Sink category mappings
-export const LOGGING_SINK_CATEGORIES: Record<
-  Exclude<LoggingSink, "console" | "pending">,
-  LoggingSinkCategory
-> = {
-  s3: "cloud-storage",
-  "azure-blob": "cloud-storage",
-  gcs: "cloud-storage",
-  datadog: "logging-platform",
-  splunk: "logging-platform",
-  elasticsearch: "logging-platform",
-  loki: "logging-platform",
-  newrelic: "logging-platform",
-  axiom: "logging-platform",
-};
+export type ObjectStorageProvider = "s3" | "azure-blob" | "gcs";
 
 // Region mappings
 export const CLOUD_REGIONS: Record<CloudProvider, string[]> = {
   aws: [
-    // US regions (c8g Graviton4 available)
+    // US regions
     "us-east-1",
     "us-east-2",
     "us-west-1",
@@ -120,7 +118,7 @@ export const CLOUD_REGIONS: Record<CloudProvider, string[]> = {
     // Canada
     "ca-central-1",
     "ca-west-1",
-    // Europe (c8g available)
+    // Europe
     "eu-west-1",
     "eu-west-2",
     "eu-west-3",
@@ -129,7 +127,7 @@ export const CLOUD_REGIONS: Record<CloudProvider, string[]> = {
     "eu-north-1",
     "eu-south-1",
     "eu-south-2",
-    // Asia Pacific (c8g available)
+    // Asia Pacific
     "ap-northeast-1",
     "ap-northeast-2",
     "ap-northeast-3",
@@ -151,31 +149,30 @@ export const CLOUD_REGIONS: Record<CloudProvider, string[]> = {
     "il-central-1",
   ],
   gcp: [
-    // Tier 1: Full C4A (Google Axion ARM64) availability - 3+ zones confirmed
     // US regions
-    "us-central1", // C4A in zones a, b, c, f (best availability)
-    "us-east1", // C4A in zones b, c, d
-    "us-east4", // C4A in zones a, b, c
-    "us-west1", // C4A in zones a, b, c
-    "us-west4", // C4A in zones a, b, c
+    "us-central1",
+    "us-east1",
+    "us-east4",
+    "us-west1",
+    "us-west4",
     // North America
-    "northamerica-south1", // C4A in zones a, b, c (Mexico)
+    "northamerica-south1",
     // Europe
-    "europe-west1", // C4A in zones b, c, d
-    "europe-west2", // C4A in zones a, b, c
-    "europe-west3", // C4A in zones a, b, c
-    "europe-west4", // C4A in zones a, b, c
-    "europe-north1", // C4A in zones a, b
+    "europe-west1",
+    "europe-west2",
+    "europe-west3",
+    "europe-west4",
+    "europe-north1",
     // Asia Pacific
-    "asia-east1", // C4A in zones a, b, c
-    "asia-northeast1", // C4A in zones b, c
-    "asia-south1", // C4A in zones a, b, c
-    "asia-southeast1", // C4A in zones a, b, c
+    "asia-east1",
+    "asia-northeast1",
+    "asia-south1",
+    "asia-southeast1",
     // Australia
-    "australia-southeast2", // C4A in zones a, b, c
+    "australia-southeast2",
   ],
   azure: [
-    // US regions (Dpsv5 ARM64 available)
+    // US regions
     "eastus",
     "eastus2",
     "westus",
@@ -190,7 +187,7 @@ export const CLOUD_REGIONS: Record<CloudProvider, string[]> = {
     "canadaeast",
     // South America
     "brazilsouth",
-    // Europe (Dpsv5 available)
+    // Europe
     "northeurope",
     "westeurope",
     "uksouth",
@@ -235,7 +232,8 @@ export const TIER_CONFIGS: Record<PerformanceTier, TierConfig> = {
     description: "Development & Testing",
     throughput: "<1,000 rules/sec",
     nodes: { min: 4, max: 4 },
-    resources: "2 vCPU, 4GB RAM each",
+    resources: "8 vCPU and 16GB RAM total",
+    requirements: { cpuCores: 8, memoryGi: 16, persistentStorageGi: 24 },
     // HPS
     hpsReplicas: 2,
     hpsWorkerReplicas: { min: 4, max: 8 },
@@ -284,7 +282,8 @@ export const TIER_CONFIGS: Record<PerformanceTier, TierConfig> = {
     description: "Production",
     throughput: "1,000-10,000 rules/sec",
     nodes: { min: 4, max: 8 },
-    resources: "2-4 vCPU, 4-8GB RAM each",
+    resources: "16+ vCPU and 32GB+ RAM total",
+    requirements: { cpuCores: 16, memoryGi: 32, persistentStorageGi: 108 },
     // HPS
     hpsReplicas: 3,
     hpsWorkerReplicas: { min: 10, max: 24 },
@@ -333,7 +332,8 @@ export const TIER_CONFIGS: Record<PerformanceTier, TierConfig> = {
     description: "High Performance",
     throughput: ">10,000 rules/sec",
     nodes: { min: 5, max: 16 },
-    resources: "2-4 vCPU, 4-8GB RAM each",
+    resources: "40+ vCPU and 80GB+ RAM total",
+    requirements: { cpuCores: 40, memoryGi: 80, persistentStorageGi: 216 },
     // HPS
     hpsReplicas: 4,
     hpsWorkerReplicas: { min: 10, max: 48 },
@@ -391,6 +391,11 @@ export interface TierConfig {
   throughput: string;
   nodes: { min: number; max: number };
   resources: string;
+  requirements: {
+    cpuCores: number;
+    memoryGi: number;
+    persistentStorageGi: number;
+  };
   // HPS configuration
   hpsReplicas: number;
   hpsWorkerReplicas: { min: number; max: number };
@@ -476,6 +481,14 @@ export const DNS_PROVIDER_NAMES: Record<DnsProvider, string> = {
   other: "Other / Not sure",
 };
 
+// Cloud provider display names with proper casing for UI labels. Acronyms stay
+// uppercase; Azure is title-cased (so it doesn't render as "AZURE").
+export const CLOUD_PROVIDER_NAMES: Record<CloudProvider, string> = {
+  aws: "AWS",
+  gcp: "GCP",
+  azure: "Azure",
+};
+
 // Logging sink display info
 export const LOGGING_SINK_INFO: Record<
   LoggingSink,
@@ -488,19 +501,6 @@ export const LOGGING_SINK_INFO: Record<
   pending: {
     name: "External (not configured)",
     description: "External logging enabled but destination not selected",
-  },
-  // Cloud Storage
-  s3: {
-    name: "AWS S3",
-    description: "Store logs in an S3 bucket",
-  },
-  "azure-blob": {
-    name: "Azure Blob Storage",
-    description: "Store logs in Azure Blob container",
-  },
-  gcs: {
-    name: "Google Cloud Storage",
-    description: "Store logs in a GCS bucket",
   },
   // Logging Platforms
   datadog: {
@@ -529,56 +529,129 @@ export const LOGGING_SINK_INFO: Record<
   },
 };
 
-// Logging destination labels for UI display (shown in the Rulebricks app)
-export const LOGGING_DESTINATION_LABELS: Record<LoggingSink, string> = {
-  console: "Console (stdout)",
-  pending: "External (configuring...)",
-  s3: "AWS S3",
-  "azure-blob": "Azure Blob Storage",
-  gcs: "Google Cloud Storage",
-  datadog: "Datadog",
-  splunk: "Splunk",
-  elasticsearch: "Elasticsearch",
-  loki: "Grafana Loki",
-  newrelic: "New Relic",
-  axiom: "Axiom",
-};
-
-// Helper to get logging destination label for Helm values
-export function getLoggingDestinationLabel(sink: LoggingSink): string {
-  return LOGGING_DESTINATION_LABELS[sink] || "Console (stdout)";
-}
-
 const SecretKeyRefSchema = z.object({
   name: z.string().min(1),
   key: z.string().min(1),
 });
 
-const RemoteWriteConfigSchema = z.object({
-  destination: z.enum(["aws-amp", "azure-monitor", "grafana-cloud", "generic"]),
-  url: z.string().url(),
-  authType: z
-    .enum([
-      "none",
-      "managed-identity",
-      "workload-identity",
-      "oauth",
-      "basic",
-      "bearer",
-    ])
-    .optional(),
-  awsRegion: z.string().optional(),
-  awsRoleArn: z.string().optional(),
-  azureCloud: z
-    .enum(["AzurePublic", "AzureChina", "AzureGovernment"])
-    .optional(),
-  clientId: z.string().optional(),
-  tenantId: z.string().optional(),
-  clientSecretRef: SecretKeyRefSchema.optional(),
-  usernameSecretRef: SecretKeyRefSchema.optional(),
-  passwordSecretRef: SecretKeyRefSchema.optional(),
-  bearerTokenSecretRef: SecretKeyRefSchema.optional(),
-});
+/**
+ * Validates a Prometheus remote_write config the same way buildHelmValues and
+ * the Helm chart do, returning human-readable errors. Centralized so the wizard
+ * gate, the Zod schema (load time), and Helm value generation all enforce the
+ * exact same per-destination/auth requirements. This is what prevents the CLI
+ * from ever persisting a monitoring config that throws at deploy time (e.g.
+ * "Azure Monitor remote_write managed identity requires client ID").
+ */
+export function validateRemoteWriteConfig(rw: RemoteWriteConfig): string[] {
+  const errors: string[] = [];
+  switch (rw.destination) {
+    case "aws-amp":
+      if (!rw.awsRegion) {
+        errors.push("AWS Managed Prometheus remote write requires a region.");
+      }
+      break;
+    case "azure-monitor": {
+      // The remote_write URL must be the full DCE metrics-ingestion path, not the
+      // bare DCE host. Azure Monitor expects:
+      //   https://<dce>.<region>.metrics.ingest.monitor.azure.com/dataCollectionRules/<dcrImmutableId>/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24
+      // A bare host silently 404s, so catch the common copy-paste mistake here.
+      if (
+        rw.url &&
+        !(
+          rw.url.includes("/dataCollectionRules/") &&
+          rw.url.includes("/streams/") &&
+          rw.url.includes("/api/v1/write")
+        )
+      ) {
+        errors.push(
+          "Azure Monitor remote write URL must be the full DCE metrics-ingestion path " +
+            "(https://<dce>.<region>.metrics.ingest.monitor.azure.com/dataCollectionRules/<dcrImmutableId>/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24), " +
+            "not just the data collection endpoint host.",
+        );
+      }
+      // An unset authType is treated as managed identity (the chart default).
+      const authType = rw.authType ?? "managed-identity";
+      if (authType === "oauth") {
+        if (!rw.clientId || !rw.tenantId || !rw.clientSecretRef) {
+          errors.push(
+            "Azure Monitor remote write (OAuth) requires a client ID, tenant ID, and client secret reference.",
+          );
+        }
+      } else if (authType === "workload-identity") {
+        if (!rw.clientId || !rw.tenantId) {
+          errors.push(
+            "Azure Monitor remote write (workload identity) requires a client ID and tenant ID.",
+          );
+        }
+      } else if (!rw.clientId) {
+        errors.push(
+          "Azure Monitor remote write (managed identity) requires a client ID.",
+        );
+      }
+      break;
+    }
+    case "grafana-cloud":
+      if (!rw.usernameSecretRef || !rw.passwordSecretRef) {
+        errors.push(
+          "Grafana Cloud remote write requires username and password secret references.",
+        );
+      }
+      break;
+    case "generic":
+      if (
+        rw.authType === "basic" &&
+        (!rw.usernameSecretRef || !rw.passwordSecretRef)
+      ) {
+        errors.push(
+          "Basic-auth remote write requires username and password secret references.",
+        );
+      }
+      if (rw.authType === "bearer" && !rw.bearerTokenSecretRef) {
+        errors.push(
+          "Bearer-token remote write requires a token secret reference.",
+        );
+      }
+      break;
+  }
+  return errors;
+}
+
+const RemoteWriteConfigSchema = z
+  .object({
+    destination: z.enum([
+      "aws-amp",
+      "azure-monitor",
+      "grafana-cloud",
+      "generic",
+    ]),
+    url: z.string().url(),
+    authType: z
+      .enum([
+        "none",
+        "managed-identity",
+        "workload-identity",
+        "oauth",
+        "basic",
+        "bearer",
+      ])
+      .optional(),
+    awsRegion: z.string().optional(),
+    awsRoleArn: z.string().optional(),
+    azureCloud: z
+      .enum(["AzurePublic", "AzureChina", "AzureGovernment"])
+      .optional(),
+    clientId: z.string().optional(),
+    tenantId: z.string().optional(),
+    clientSecretRef: SecretKeyRefSchema.optional(),
+    usernameSecretRef: SecretKeyRefSchema.optional(),
+    passwordSecretRef: SecretKeyRefSchema.optional(),
+    bearerTokenSecretRef: SecretKeyRefSchema.optional(),
+  })
+  .superRefine((rw, ctx) => {
+    for (const message of validateRemoteWriteConfig(rw as RemoteWriteConfig)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+    }
+  });
 
 const MonitoringDestinationSchema = z.enum([
   "local-grafana",
@@ -598,12 +671,24 @@ export const DeploymentConfigSchema = z.object({
 
   // Infrastructure
   infrastructure: z.object({
-    mode: z.enum(["existing", "provision"]),
+    mode: z.literal("existing"),
     provider: z.enum(["aws", "gcp", "azure"]).optional(),
     region: z.string().optional(),
     clusterName: z.string().optional(),
     gcpProjectId: z.string().optional(),
     azureResourceGroup: z.string().optional(),
+    nodeArchitecture: z
+      .enum(["amd64", "arm64", "mixed", "unknown"])
+      .optional(),
+    arm64TolerationRequired: z.boolean().optional(),
+    storageClass: z.string().optional(),
+    storageProvisioner: z.string().optional(),
+    schedulableNodeCount: z.number().optional(),
+    totalCpuCores: z.number().optional(),
+    totalMemoryGi: z.number().optional(),
+    eligibleCpuCores: z.number().optional(),
+    eligibleMemoryGi: z.number().optional(),
+    totalPersistentStorageGi: z.number().optional(),
   }),
 
   // Domain & TLS
@@ -617,8 +702,6 @@ export const DeploymentConfigSchema = z.object({
     provider: z.enum(["route53", "cloudflare", "google", "azure", "other"]),
     // Should we auto-manage DNS records? (only applicable for supported providers)
     autoManage: z.boolean(),
-    // For existing clusters: does external-dns already exist cluster-wide?
-    existingExternalDns: z.boolean().optional(),
   }),
 
   // SMTP Configuration
@@ -650,6 +733,120 @@ export const DeploymentConfigSchema = z.object({
   // Performance
   tier: z.enum(["small", "medium", "large"]),
 
+  // Shared object storage: one provider, one identity, one bucket/container.
+  // Decision logs and DB backups are just key prefixes within it.
+  storage: z
+    .object({
+      provider: z.enum(["s3", "azure-blob", "gcs"]),
+      cloudAuthMode: z.enum(["workload-identity", "secret"]).optional(),
+      // Single bucket (S3/GCS) or storage account (azure-blob) + its region.
+      bucket: z.string().min(1),
+      region: z.string().min(1),
+      awsIamRoleArn: z.string().optional(),
+      azureBlobClientId: z.string().optional(),
+      azureBlobTenantId: z.string().optional(),
+      azureBlobConnectionStringSecretRef: SecretKeyRefSchema.optional(),
+      // Single blob container (azure-blob only) holding all prefixes.
+      azureBlobContainer: z.string().optional(),
+      gcpServiceAccountEmail: z.string().optional(),
+      // Per-purpose key prefixes within the single bucket/container.
+      paths: z
+        .object({
+          decisionLogs: z.string().optional(),
+          dbBackups: z.string().optional(),
+        })
+        .optional(),
+    })
+    .optional(),
+
+  // External/managed Redis and Kafka (for large deployments that prefer managed
+  // services over the in-cluster defaults). Omitted/embedded means the chart
+  // deploys these in-cluster as usual.
+  externalServices: z
+    .object({
+      redis: z
+        .object({
+          mode: z.enum(["embedded", "external"]),
+          external: z
+            .object({
+              host: z.string().optional(),
+              port: z.number().int().min(1).max(65535).optional(),
+              password: z.string().optional(),
+              existingSecret: z.string().optional(),
+              existingSecretKey: z.string().optional(),
+              tls: z.boolean().optional(),
+              httpApi: z
+                .object({
+                  enabled: z.boolean(),
+                  url: z.string().optional(),
+                  token: z.string().optional(),
+                })
+                .optional(),
+            })
+            .optional(),
+        })
+        .optional(),
+      kafka: z
+        .object({
+          mode: z.enum(["embedded", "external"]),
+          external: z
+            .object({
+              // Preset drives per-cloud auth defaults and whether the Vector
+              // bridge sidecar is required.
+              preset: z
+                .enum([
+                  "aws-msk-iam",
+                  "azure-event-hubs",
+                  "gcp-managed",
+                  "custom",
+                ])
+                .optional(),
+              brokers: z.string().optional(),
+              topic: z.string().optional(),
+              // Prefix namespacing all Kafka topics (e.g. "com.rulebricks.").
+              topicPrefix: z.string().optional(),
+              ssl: z.boolean().optional(),
+              sasl: z
+                .object({
+                  // "" means no SASL (plaintext/SSL-only).
+                  mechanism: z.enum([
+                    "",
+                    "aws-iam",
+                    "oauthbearer",
+                    "scram-sha-256",
+                    "scram-sha-512",
+                    "plain",
+                  ]),
+                  region: z.string().optional(),
+                  username: z.string().optional(),
+                  password: z.string().optional(),
+                  existingSecret: z.string().optional(),
+                })
+                .optional(),
+              // Cloud workload identity for token mechanisms (MSK IAM / GCP
+              // OAUTHBEARER). Applied to the HPS and Vector service accounts.
+              identity: z
+                .object({
+                  awsRoleArn: z.string().optional(),
+                  gcpServiceAccountEmail: z.string().optional(),
+                  azureClientId: z.string().optional(),
+                })
+                .optional(),
+            })
+            .optional(),
+        })
+        .optional(),
+    })
+    .optional(),
+
+  backup: z
+    .object({
+      enabled: z.boolean(),
+      schedule: z.string().min(1),
+      retentionDays: z.number().int().min(1),
+    })
+    .optional(),
+
   // Optional features
   features: z.object({
     ai: z.object({
@@ -673,14 +870,12 @@ export const DeploymentConfigSchema = z.object({
       remoteWrite: RemoteWriteConfigSchema.optional(),
     }),
     logging: z.object({
-      // Logging always happens to console by default
-      // This configures additional external sinks
+      // Console logging is always on. This selects an additional external
+      // logging platform. Cloud object storage for decision logs is configured
+      // separately under `storage`.
       sink: z.enum([
         "console",
         "pending",
-        "s3",
-        "azure-blob",
-        "gcs",
         "datadog",
         "splunk",
         "elasticsearch",
@@ -688,18 +883,10 @@ export const DeploymentConfigSchema = z.object({
         "newrelic",
         "axiom",
       ]),
-      // Sink-specific configuration
-      // For cloud storage: bucket name and region
-      // For platforms: repurposed for credentials (API key) and extra config
+      // For platforms, bucket/region are repurposed to carry the credential
+      // (API key/token) and endpoint/site.
       bucket: z.string().optional(),
       region: z.string().optional(),
-      cloudAuthMode: z.enum(["workload-identity", "secret"]).optional(),
-      awsIamRoleArn: z.string().optional(),
-      azureBlobContainer: z.string().optional(),
-      azureBlobClientId: z.string().optional(),
-      azureBlobTenantId: z.string().optional(),
-      azureBlobConnectionStringSecretRef: SecretKeyRefSchema.optional(),
-      gcpServiceAccountEmail: z.string().optional(),
     }),
     customEmails: z
       .object({
@@ -727,9 +914,8 @@ export const DeploymentConfigSchema = z.object({
   // Credentials
   licenseKey: z.string().min(1),
 
-  // Version - app and HPS image versions
-  appVersion: z.string().optional(),
-  hpsVersion: z.string().optional(),
+  // Product version used for app, HPS, and HPS worker images
+  version: z.string().min(1),
 
   // Legacy chart version (deprecated, kept for backwards compatibility)
   chartVersion: z.string().optional(),
@@ -757,10 +943,8 @@ export interface DeploymentState {
     clusterEndpoint?: string;
   };
   application?: {
-    /** App image version */
-    appVersion: string;
-    /** HPS image version */
-    hpsVersion: string;
+    /** Unified Rulebricks product version */
+    version: string;
     /** Legacy chart version (deprecated) */
     chartVersion?: string;
     namespace: string;
@@ -783,78 +967,19 @@ export interface ChartVersion {
   digest: string;
 }
 
-// App version with matched HPS version
+// Rulebricks product version with registry metadata
 export interface AppVersion {
-  /** App image version (e.g., "1.5.0") */
+  /** Product image version (e.g., "1.5.0") */
   version: string;
   /** Release date ISO string */
   releaseDate: string;
-  /** Matched HPS version (latest HPS released on or before app release) */
-  hpsVersion: string | null;
   /** Image digest */
   digest: string;
+  /** HPS server image digests for this version */
+  hpsDigests?: string[];
+  /** HPS worker image digests for this version */
+  hpsWorkerDigests?: string[];
 }
-
-// Wizard step types
-export interface WizardStep {
-  id: string;
-  title: string;
-  description: string;
-}
-
-export const WIZARD_STEPS: WizardStep[] = [
-  { id: "mode", title: "Deployment Mode", description: "Choose how to deploy" },
-  {
-    id: "cloud",
-    title: "Cloud Provider",
-    description: "Select your cloud provider",
-  },
-  {
-    id: "domain",
-    title: "Domain & DNS",
-    description: "Configure your domain and DNS",
-  },
-  {
-    id: "smtp",
-    title: "Email (SMTP)",
-    description: "Configure email delivery",
-  },
-  {
-    id: "database",
-    title: "Database",
-    description: "Choose your database setup",
-  },
-  {
-    id: "database-creds",
-    title: "Database Credentials",
-    description: "Configure database access",
-  },
-  {
-    id: "tier",
-    title: "Performance Tier",
-    description: "Select your deployment size",
-  },
-  {
-    id: "features",
-    title: "Optional Features",
-    description: "Enable additional features",
-  },
-  {
-    id: "feature-config",
-    title: "Feature Settings",
-    description: "Configure enabled features",
-  },
-  {
-    id: "credentials",
-    title: "License & Version",
-    description: "Enter license and select version",
-  },
-  {
-    id: "review",
-    title: "Review & Save",
-    description: "Review your configuration",
-  },
-];
 
 // DNS Record type for tracking
 export interface DNSRecord {
@@ -900,7 +1025,26 @@ export const ProfileConfigSchema = z.object({
   // Preferences
   tier: z.enum(["small", "medium", "large"]).optional(),
   databaseType: z.enum(["self-hosted", "supabase-cloud"]).optional(),
-  infrastructureMode: z.enum(["existing", "provision"]).optional(),
+  storage: z
+    .object({
+      provider: z.enum(["s3", "azure-blob", "gcs"]),
+      cloudAuthMode: z.enum(["workload-identity", "secret"]).optional(),
+      bucket: z.string().optional(),
+      region: z.string().optional(),
+      awsIamRoleArn: z.string().optional(),
+      azureBlobClientId: z.string().optional(),
+      azureBlobTenantId: z.string().optional(),
+      azureBlobConnectionStringSecretRef: SecretKeyRefSchema.optional(),
+      azureBlobContainer: z.string().optional(),
+      gcpServiceAccountEmail: z.string().optional(),
+      paths: z
+        .object({
+          decisionLogs: z.string().optional(),
+          dbBackups: z.string().optional(),
+        })
+        .optional(),
+    })
+    .optional(),
 
   // SSO (optional)
   ssoProvider: z

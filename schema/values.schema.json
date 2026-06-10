@@ -1,0 +1,1257 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Rulebricks Chart Values",
+  "description": "Configuration values for the Rulebricks umbrella chart.",
+  "type": "object",
+  "required": ["global"],
+  "properties": {
+    "global": {
+      "type": "object",
+      "required": ["domain", "email"],
+      "properties": {
+        "domain": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Base domain for the deployment (e.g., rb.example.com)"
+        },
+        "email": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Admin email (required for TLS certificates)"
+        },
+        "licenseKey": {
+          "type": "string",
+          "description": "Rulebricks license key"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^$|^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$",
+          "description": "Rulebricks product version used by app, HPS, HPS worker, and migration images"
+        },
+        "tlsEnabled": {
+          "type": "boolean",
+          "description": "Enable TLS/HTTPS"
+        },
+        "externalDnsEnabled": {
+          "type": "boolean",
+          "description": "Enable external-dns integration for automatic DNS record management"
+        },
+        "storage": {
+          "type": "object",
+          "description": "Shared object storage: one provider, one identity, and one bucket/container with per-purpose path prefixes",
+          "properties": {
+            "provider": { "type": "string", "enum": ["s3", "azure-blob", "gcs"], "default": "s3" },
+            "bucket": { "type": "string", "description": "Single bucket (S3/GCS) or storage account (azure-blob) holding all Rulebricks data" },
+            "region": { "type": "string" },
+            "s3": {
+              "type": "object",
+              "properties": {
+                "iamRoleArn": { "type": "string" },
+                "existingSecret": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" }
+                  }
+                }
+              }
+            },
+            "azure": {
+              "type": "object",
+              "properties": {
+                "authMode": { "type": "string", "enum": ["workload-identity", "connection-string"], "default": "workload-identity" },
+                "clientId": { "type": "string" },
+                "tenantId": { "type": "string" },
+                "container": { "type": "string", "description": "Single blob container holding all path prefixes" },
+                "connectionStringSecretRef": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" },
+                    "key": { "type": "string" }
+                  }
+                }
+              }
+            },
+            "gcp": {
+              "type": "object",
+              "properties": {
+                "serviceAccountEmail": { "type": "string" }
+              }
+            },
+            "paths": {
+              "type": "object",
+              "description": "Per-purpose key prefixes within the single bucket/container",
+              "properties": {
+                "decisionLogs": { "type": "string" },
+                "dbBackups": { "type": "string" }
+              }
+            }
+          }
+        },
+        "smtp": {
+          "type": "object",
+          "description": "SMTP Configuration",
+          "properties": {
+            "host": { "type": "string" },
+            "port": { "type": "integer" },
+            "user": { "type": "string" },
+            "pass": { "type": "string" },
+            "from": { "type": "string" },
+            "fromName": { "type": "string" }
+          }
+        },
+        "supabase": {
+          "type": "object",
+          "description": "Auth/Database Configuration",
+          "properties": {
+            "anonKey": { "type": "string" },
+            "serviceKey": { "type": "string" },
+            "url": { "type": "string" },
+            "projectRef": { "type": "string" },
+            "accessToken": { "type": "string" },
+            "jwtSecret": { "type": "string" },
+            "emails": {
+              "type": "object",
+              "properties": {
+                "subjects": { "type": "object" },
+                "templates": { "type": "object" }
+              }
+            }
+          }
+        },
+        "ai": {
+          "type": "object",
+          "description": "AI Features Configuration",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "openaiApiKey": { "type": "string" }
+          }
+        },
+        "secrets": {
+          "type": "object",
+          "description": "Secrets Configuration",
+          "properties": {
+            "secretRef": { "type": "string" },
+            "secretRefKeys": { "type": "object" }
+          }
+        },
+        "sso": {
+          "type": "object",
+          "description": "Enterprise SSO Configuration",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "provider": { 
+              "type": "string",
+              "enum": ["azure", "google", "okta", "keycloak", "ory", "other", ""]
+            },
+            "url": { "type": "string" },
+            "clientId": { "type": "string" },
+            "clientSecret": { "type": "string" }
+          }
+        },
+        "externalAuth": {
+          "type": "object",
+          "description": "External Authentication / Token Passthrough for proxy-gated deployments",
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "header": { "type": "string", "default": "Authorization" },
+            "claims": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string", "default": "sub" },
+                "email": { "type": "string", "default": "email" },
+                "name": { "type": "string", "default": "name" }
+              }
+            },
+            "publicPaths": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "URL-path prefixes that bypass the token check"
+            }
+          }
+        },
+        "labels": {
+          "type": "object",
+          "description": "Global labels applied to all resources",
+          "additionalProperties": { "type": "string" }
+        },
+        "annotations": {
+          "type": "object",
+          "description": "Global annotations applied to all resources",
+          "additionalProperties": { "type": "string" }
+        },
+        "podLabels": {
+          "type": "object",
+          "description": "Labels applied to all pod templates",
+          "additionalProperties": { "type": "string" }
+        },
+        "podAnnotations": {
+          "type": "object",
+          "description": "Annotations applied to all pod templates",
+          "additionalProperties": { "type": "string" }
+        },
+        "scheduling": {
+          "type": "object",
+          "description": "Opt-in scheduling defaults for Rulebricks workloads and migration jobs; dependency subcharts may require their own scheduling values",
+          "properties": {
+            "nodeSelector": {
+              "type": "object",
+              "description": "Node selector applied to workloads that inherit global scheduling",
+              "additionalProperties": { "type": "string" }
+            },
+            "tolerations": {
+              "type": "array",
+              "description": "Tolerations applied to workloads that inherit global scheduling",
+              "items": { "$ref": "#/definitions/toleration" }
+            },
+            "affinity": {
+              "type": "object",
+              "description": "Affinity rules applied to workloads that inherit global scheduling; prefer soft rules unless your platform requires hard placement"
+            }
+          }
+        }
+      }
+    },
+    "backup": {
+      "type": "object",
+      "description": "Periodic self-hosted Supabase Postgres backups to shared object storage",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "schedule": { "type": "string", "default": "0 2 * * *" },
+        "retentionDays": { "type": "integer", "minimum": 1, "default": 30 },
+        "superuser": {
+          "type": "string",
+          "default": "supabase_admin",
+          "description": "Postgres superuser role used for logical dumps/restores so it can read schemas owned by supabase_admin (auth, storage, realtime, etc.)"
+        },
+        "ttlSecondsAfterFinished": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 2592000,
+          "description": "Time to keep completed backup jobs and their pod logs (seconds)"
+        },
+        "serverName": { "type": "string", "default": "supabase" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "resources": { "$ref": "#/definitions/resources" },
+        "jobHistory": {
+          "type": "object",
+          "properties": {
+            "successful": { "type": "integer", "minimum": 0, "default": 30 },
+            "failed": { "type": "integer", "minimum": 0, "default": 30 }
+          }
+        }
+      }
+    },
+    "externalSecrets": {
+      "type": "object",
+      "description": "Overlay-facing External Secrets metadata (not rendered directly by this chart)",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "secretStoreRef": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "kind": { "type": "string", "enum": ["SecretStore", "ClusterSecretStore"] }
+          }
+        },
+        "refreshInterval": { "type": "string", "default": "1h" },
+        "remoteRefs": {
+          "type": "object",
+          "description": "Map local keys to remote secret paths",
+          "additionalProperties": { "type": "string" }
+        },
+        "targetSecretName": { "type": "string" }
+      }
+    },
+    "rulebricks": {
+      "type": "object",
+      "properties": {
+        "metrics": {
+          "type": "object",
+          "description": "Prometheus metrics scraping for the app and HPS",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "serviceMonitor": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "interval": { "type": "string" },
+                "scrapeTimeout": { "type": "string" }
+              }
+            },
+            "app": {
+              "type": "object",
+              "properties": { "path": { "type": "string" } }
+            },
+            "hps": {
+              "type": "object",
+              "properties": { "path": { "type": "string" } }
+            }
+          }
+        },
+        "app": {
+          "type": "object",
+          "properties": {
+            "image": {
+              "type": "object",
+              "properties": {
+                "repository": { "type": "string" },
+                "tag": { "type": "string" },
+                "pullPolicy": { "type": "string" }
+              }
+            },
+            "replicas": { "type": "integer", "minimum": 0 },
+            "resources": { "$ref": "#/definitions/resources" },
+            "podLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "nodeSelector": {
+              "type": "object",
+              "description": "Node selector for Rulebricks app pods",
+              "additionalProperties": { "type": "string" }
+            },
+            "tolerations": {
+              "type": "array",
+              "description": "Tolerations for Rulebricks app pods",
+              "items": { "$ref": "#/definitions/toleration" }
+            },
+            "affinity": {
+              "type": "object",
+              "description": "Affinity for Rulebricks app pods. Prefer soft rules unless your platform requires hard placement."
+            },
+            "logging": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "kafkaBrokers": { "type": "string" },
+                "kafkaTopic": { "type": "string" },
+                "kafkaTopicPrefix": {
+                  "type": "string",
+                  "description": "Prefix namespacing all Kafka topic names (e.g. com.rulebricks.). Empty string disables prefixing."
+                },
+                "kafkaSsl": { "type": "boolean" },
+                "kafkaSasl": {
+                  "type": "object",
+                  "properties": {
+                    "mechanism": {
+                      "type": "string",
+                      "enum": ["aws-iam", "oauthbearer", "scram-sha-256", "scram-sha-512", "plain", ""]
+                    },
+                    "region": { "type": "string" },
+                    "username": { "type": "string" },
+                    "password": { "type": "string" },
+                    "existingSecret": { "type": "string" },
+                    "existingSecretUsernameKey": { "type": "string" },
+                    "existingSecretPasswordKey": { "type": "string" }
+                  }
+                }
+              }
+            },
+            "serviceAccount": {
+              "type": "object",
+              "properties": {
+                "create": { "type": "boolean" },
+                "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+                "automount": { "type": "boolean" },
+                "name": { "type": "string" }
+              }
+            },
+            "podDisruptionBudget": {
+              "$ref": "#/definitions/podDisruptionBudget"
+            }
+          }
+        },
+        "hps": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "image": {
+              "type": "object",
+              "properties": {
+                "repository": { "type": "string" },
+                "tag": { "type": "string" },
+                "pullPolicy": { "type": "string" }
+              }
+            },
+            "replicas": { "type": "integer", "minimum": 0 },
+            "resources": { "$ref": "#/definitions/resources" },
+            "podLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "nodeSelector": {
+              "type": "object",
+              "description": "Node selector for HPS pods",
+              "additionalProperties": { "type": "string" }
+            },
+            "tolerations": {
+              "type": "array",
+              "description": "Tolerations for HPS pods",
+              "items": { "$ref": "#/definitions/toleration" }
+            },
+            "affinity": {
+              "type": "object",
+              "description": "Affinity for HPS pods. Prefer soft rules unless your platform requires hard placement."
+            },
+            "topologySpreadConstraints": {
+              "type": "array",
+              "description": "Optional custom topology spread constraints for HPS pods. Unset by default so HPS can prefer non-infrastructure nodes.",
+              "items": { "type": "object" }
+            },
+            "serviceAccount": {
+              "type": "object",
+              "properties": {
+                "create": { "type": "boolean" },
+                "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+                "automount": { "type": "boolean" },
+                "name": { "type": "string" }
+              }
+            },
+            "podDisruptionBudget": {
+              "$ref": "#/definitions/podDisruptionBudget"
+            },
+            "workers": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "replicas": { "type": "integer", "minimum": 0 },
+                "resources": { "$ref": "#/definitions/resources" },
+                "podLabels": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                },
+                "keda": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "minReplicaCount": { "type": "integer", "minimum": 0 },
+                    "maxReplicaCount": { "type": "integer", "minimum": 0 },
+                    "pollingInterval": { "type": "integer", "minimum": 1 },
+                    "cooldownPeriod": { "type": "integer", "minimum": 0 },
+                    "lagThreshold": { "type": ["integer", "string"] },
+                    "cpuThreshold": { "type": ["integer", "string"] }
+                  }
+                },
+                "nodeSelector": {
+                  "type": "object",
+                  "description": "Node selector for HPS worker pods",
+                  "additionalProperties": { "type": "string" }
+                },
+                "tolerations": {
+                  "type": "array",
+                  "description": "Tolerations for HPS worker pods",
+                  "items": { "$ref": "#/definitions/toleration" }
+                },
+                "affinity": {
+                  "type": "object",
+                  "description": "Affinity for HPS worker pods. Prefer soft rules unless your platform requires hard placement."
+                },
+                "topologySpreadConstraints": {
+                  "type": "array",
+                  "description": "Optional custom topology spread constraints for HPS worker pods. Unset by default so workers can prefer non-infrastructure nodes.",
+                  "items": { "type": "object" }
+                },
+                "serviceAccount": {
+                  "type": "object",
+                  "properties": {
+                    "create": { "type": "boolean" },
+                    "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "automount": { "type": "boolean" },
+                    "name": { "type": "string" }
+                  }
+                },
+                "podDisruptionBudget": {
+                  "$ref": "#/definitions/podDisruptionBudget"
+                }
+              }
+            }
+          }
+        },
+        "ingress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "className": { "type": "string" },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": { "type": "string" },
+                  "pathType": { "type": "string" }
+                }
+              }
+            },
+            "app": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" }
+              }
+            }
+          }
+        },
+        "redis": {
+          "type": "object",
+          "description": "Redis configuration. Set enabled: false to use an external/managed Redis instance.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "tag": { "type": "string" },
+            "podLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "resources": { "$ref": "#/definitions/resources" },
+            "persistence": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "size": { "type": "string" },
+                "storageClass": { "type": "string" }
+              }
+            },
+            "external": {
+              "type": "object",
+              "description": "External Redis connection settings (used when redis.enabled is false).",
+              "properties": {
+                "host": { "type": "string" },
+                "port": { "type": ["integer", "string"], "default": 6379 },
+                "password": { "type": "string", "description": "Inline password. Prefer existingSecret for production." },
+                "existingSecret": { "type": "string", "description": "Name of an existing secret holding the Redis password." },
+                "existingSecretKey": { "type": "string", "default": "redis-password" },
+                "tls": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean", "default": false }
+                  }
+                },
+                "httpApi": {
+                  "type": "object",
+                  "description": "Upstash-compatible HTTP API. When enabled, the in-cluster serverless-redis-http bridge is bypassed.",
+                  "properties": {
+                    "enabled": { "type": "boolean", "default": false },
+                    "url": { "type": "string" },
+                    "token": { "type": "string" },
+                    "existingSecret": { "type": "string" },
+                    "existingSecretUrlKey": { "type": "string", "default": "redis-url" },
+                    "existingSecretTokenKey": { "type": "string", "default": "redis-token" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "supabase": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "externalDatabase": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "host": { "type": "string" },
+            "port": { "type": ["integer", "string"] },
+            "secretRef": { "type": "string" },
+            "secretRefKey": {
+              "type": "object",
+              "properties": {
+                "username": { "type": "string" },
+                "password": { "type": "string" },
+                "database": { "type": "string" }
+              }
+            }
+          }
+        },
+        "studio": {
+          "type": "object",
+          "properties": {
+            "ingress": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "type": { "type": "string", "enum": ["ingress", "gateway-api"] },
+                "className": { "type": "string" },
+                "hostname": { "type": "string" },
+                "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": { "type": "string" },
+                      "pathType": { "type": "string" }
+                    }
+                  }
+                },
+                "gatewayApi": {
+                  "type": "object",
+                  "properties": {
+                    "gatewayName": { "type": "string" },
+                    "gatewayNamespace": { "type": "string" },
+                    "sectionName": { "type": "string" }
+                  }
+                },
+                "tls": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": ["boolean", "string"] }
+                  }
+                }
+              }
+            },
+            "podDisruptionBudget": {
+              "$ref": "#/definitions/podDisruptionBudget"
+            }
+          }
+        }
+      }
+    },
+    "kafka": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "kafkaBridge": {
+      "type": "object",
+      "description": "Vector Kafka bridge sidecar for token-auth managed Kafka (AWS MSK IAM / GCP OAUTHBEARER) that Vector cannot speak natively.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "provider": { "type": "string", "enum": ["aws", "gcp", ""] },
+        "region": { "type": "string" },
+        "brokers": { "type": "string" },
+        "localPort": { "type": ["integer", "string"], "default": 19092 },
+        "image": { "type": "string" },
+        "awsRoleArn": { "type": "string" },
+        "gcpServiceAccountEmail": { "type": "string" }
+      }
+    },
+    "clickhouse": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "queryLimits": {
+          "type": "object",
+          "properties": {
+            "maxMemoryUsage": { "type": "integer", "minimum": 1, "default": 1073741824 },
+            "maxThreads": { "type": "integer", "minimum": 1, "default": 4 },
+            "maxExecutionTime": { "type": "integer", "minimum": 1, "default": 60 }
+          }
+        }
+      }
+    },
+    "external-dns": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "migrations": {
+      "type": "object",
+      "description": "Configuration for database migration jobs",
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["hook", "deployment", "manual"],
+          "default": "hook",
+          "description": "Migration job execution strategy"
+        },
+        "ttlSecondsAfterFinished": {
+          "type": "integer",
+          "default": 2592000,
+          "description": "Time to keep completed jobs and their pod logs (seconds)"
+        },
+        "backoffLimit": {
+          "type": "integer",
+          "default": 3,
+          "description": "Number of retries before marking job as failed"
+        },
+        "restartPolicy": {
+          "type": "string",
+          "enum": ["OnFailure", "Never"],
+          "default": "OnFailure"
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "tolerations": {
+          "type": "array",
+          "description": "Tolerations for migration job pods. Defaults are empty; add ARM64 tolerations only for clusters that taint ARM64 nodes.",
+          "items": { "$ref": "#/definitions/toleration" }
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "externalDb": {
+          "type": "object",
+          "description": "External database configuration",
+          "properties": {
+            "host": { "type": "string" },
+            "port": { "type": "string", "default": "5432" },
+            "existingSecret": { "type": "string" },
+            "existingSecretKey": { "type": "string", "default": "password" }
+          }
+        }
+      }
+    },
+    "monitoring": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "kube-prometheus-stack": {
+      "type": "object",
+      "description": "kube-prometheus-stack passthrough. Only remote_write Azure AD auth is validated here; the rest is owned by the subchart.",
+      "properties": {
+        "prometheus": {
+          "type": "object",
+          "properties": {
+            "prometheusSpec": {
+              "type": "object",
+              "properties": {
+                "remoteWrite": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "url": { "type": "string" },
+                      "azureAd": {
+                        "type": "object",
+                        "description": "Azure Monitor managed Prometheus auth. The active identity block must carry a non-empty client ID.",
+                        "allOf": [
+                          {
+                            "if": { "required": ["managedIdentity"] },
+                            "then": {
+                              "properties": {
+                                "managedIdentity": {
+                                  "type": "object",
+                                  "required": ["clientId"],
+                                  "properties": {
+                                    "clientId": { "type": "string", "minLength": 1 }
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          {
+                            "if": { "required": ["workloadIdentity"] },
+                            "then": {
+                              "properties": {
+                                "workloadIdentity": {
+                                  "type": "object",
+                                  "required": ["clientId", "tenantId"],
+                                  "properties": {
+                                    "clientId": { "type": "string", "minLength": 1 },
+                                    "tenantId": { "type": "string", "minLength": 1 }
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          {
+                            "if": { "required": ["oauth"] },
+                            "then": {
+                              "properties": {
+                                "oauth": {
+                                  "type": "object",
+                                  "required": ["clientId", "tenantId", "clientSecret"],
+                                  "properties": {
+                                    "clientId": { "type": "string", "minLength": 1 },
+                                    "tenantId": { "type": "string", "minLength": 1 }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "title": "Managed Supabase Validation",
+      "description": "If Supabase subchart is disabled (managed mode), URL and Access Token are required and must not be empty.",
+      "if": {
+        "properties": {
+          "supabase": {
+            "type": "object",
+            "properties": {
+              "enabled": { "const": false }
+            },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["supabase"]
+      },
+      "then": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "supabase": {
+                "type": "object",
+                "required": ["url", "accessToken"],
+                "properties": {
+                  "url": { "type": "string", "minLength": 1 },
+                  "accessToken": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "Self-hosted Supabase Validation",
+      "description": "If Supabase subchart is enabled (self-hosted mode), JWT Secret is required and must not be empty.",
+      "if": {
+        "properties": {
+          "supabase": {
+            "type": "object",
+            "properties": {
+              "enabled": { "const": true }
+            },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["supabase"]
+      },
+      "then": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "supabase": {
+                "type": "object",
+                "required": ["jwtSecret"],
+                "properties": {
+                  "jwtSecret": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "External Kafka Validation",
+      "description": "If Kafka subchart is disabled, external brokers must be specified in rulebricks.app.logging.kafkaBrokers and must not be empty.",
+      "if": {
+        "properties": {
+          "kafka": {
+            "type": "object",
+            "properties": {
+              "enabled": { "const": false }
+            },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["kafka"]
+      },
+      "then": {
+        "properties": {
+          "rulebricks": {
+            "type": "object",
+            "required": ["app"],
+            "properties": {
+              "app": {
+                "type": "object",
+                "required": ["logging"],
+                "properties": {
+                  "logging": {
+                    "type": "object",
+                    "required": ["kafkaBrokers"],
+                    "properties": {
+                      "kafkaBrokers": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "External Redis Validation",
+      "description": "If in-cluster Redis is disabled, an external Redis host must be specified in rulebricks.redis.external.host and must not be empty.",
+      "if": {
+        "properties": {
+          "rulebricks": {
+            "type": "object",
+            "properties": {
+              "redis": {
+                "type": "object",
+                "properties": {
+                  "enabled": { "const": false }
+                },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["redis"]
+          }
+        },
+        "required": ["rulebricks"]
+      },
+      "then": {
+        "properties": {
+          "rulebricks": {
+            "type": "object",
+            "required": ["redis"],
+            "properties": {
+              "redis": {
+                "type": "object",
+                "required": ["external"],
+                "properties": {
+                  "external": {
+                    "type": "object",
+                    "required": ["host"],
+                    "properties": {
+                      "host": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "AI Feature Validation",
+      "description": "If AI is enabled, OpenAI API Key is required and must not be empty.",
+      "if": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "ai": {
+                "type": "object",
+                "properties": {
+                  "enabled": { "const": true }
+                },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["ai"]
+          }
+        },
+        "required": ["global"]
+      },
+      "then": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "ai": {
+                "type": "object",
+                "required": ["openaiApiKey"],
+                "properties": {
+                  "openaiApiKey": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "Inline Secrets Validation",
+      "description": "If no external secretRef is provided (empty string), sensitive values must be provided inline.",
+      "if": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "secrets": {
+                "type": "object",
+                "properties": {
+                  "secretRef": { "const": "" }
+                },
+                "required": ["secretRef"]
+              }
+            },
+            "required": ["secrets"]
+          }
+        },
+        "required": ["global"]
+      },
+      "then": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "required": ["licenseKey"],
+            "properties": {
+              "licenseKey": { "type": "string", "minLength": 1 },
+              "smtp": {
+                "type": "object",
+                "required": ["user", "pass"],
+                "properties": {
+                  "user": { "type": "string", "minLength": 1 },
+                  "pass": { "type": "string", "minLength": 1 }
+                }
+              },
+              "supabase": {
+                "type": "object",
+                "required": ["anonKey", "serviceKey"],
+                "properties": {
+                  "anonKey": { "type": "string", "minLength": 1 },
+                  "serviceKey": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "External DNS Consistency",
+      "description": "If external-dns subchart is enabled, global.externalDnsEnabled must also be true.",
+      "if": {
+        "properties": {
+          "external-dns": {
+            "type": "object",
+            "properties": {
+              "enabled": { "const": true }
+            },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["external-dns"]
+      },
+      "then": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "externalDnsEnabled": { "const": true }
+            },
+            "required": ["externalDnsEnabled"]
+          }
+        }
+      }
+    },
+    {
+      "title": "External Auth Validation",
+      "description": "If externalAuth is enabled, a Supabase JWT secret is required (sourced from global.supabase.jwtSecret).",
+      "if": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "externalAuth": {
+                "type": "object",
+                "properties": {
+                  "enabled": { "const": true }
+                },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["externalAuth"]
+          }
+        },
+        "required": ["global"]
+      },
+      "then": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "supabase": {
+                "type": "object",
+                "required": ["jwtSecret"],
+                "properties": {
+                  "jwtSecret": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "required": ["supabase"]
+          }
+        }
+      }
+    },
+    {
+      "title": "SSO Validation",
+      "description": "If SSO is enabled, provider, clientId, and clientSecret are required.",
+      "if": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "sso": {
+                "type": "object",
+                "properties": {
+                  "enabled": { "const": true }
+                },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["sso"]
+          }
+        },
+        "required": ["global"]
+      },
+      "then": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "sso": {
+                "type": "object",
+                "required": ["provider", "clientId", "clientSecret"],
+                "properties": {
+                  "provider": { "type": "string", "minLength": 1 },
+                  "clientId": { "type": "string", "minLength": 1 },
+                  "clientSecret": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "Decision Log Query Storage Validation",
+      "description": "Decision log query requires shared object storage to be configured.",
+      "if": {
+        "properties": {
+          "clickhouse": {
+            "type": "object",
+            "properties": {
+              "enabled": { "const": true }
+            },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["clickhouse"]
+      },
+      "then": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "required": ["storage"],
+            "properties": {
+              "storage": {
+                "type": "object",
+                "required": ["provider", "bucket"],
+                "properties": {
+                  "provider": { "type": "string", "enum": ["s3", "azure-blob", "gcs"] },
+                  "bucket": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "Database Backup Storage Validation",
+      "description": "Database backups require self-hosted Supabase and shared object storage to be configured.",
+      "if": {
+        "properties": {
+          "backup": {
+            "type": "object",
+            "properties": {
+              "enabled": { "const": true }
+            },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["backup"]
+      },
+      "then": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "required": ["storage"],
+            "properties": {
+              "storage": {
+                "type": "object",
+                "required": ["provider", "bucket"],
+                "properties": {
+                  "provider": { "type": "string", "enum": ["s3", "azure-blob", "gcs"] },
+                  "bucket": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          },
+          "supabase": {
+            "type": "object",
+            "required": ["enabled", "db"],
+            "properties": {
+              "enabled": { "const": true },
+              "db": {
+                "type": "object",
+                "required": ["enabled"],
+                "properties": {
+                  "enabled": { "const": true }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "toleration": {
+      "type": "object",
+      "description": "Kubernetes toleration",
+      "properties": {
+        "key": { "type": "string" },
+        "operator": { "type": "string", "enum": ["Exists", "Equal"] },
+        "value": { "type": "string" },
+        "effect": { "type": "string", "enum": ["NoSchedule", "PreferNoSchedule", "NoExecute"] },
+        "tolerationSeconds": { "type": "integer" }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "description": "Kubernetes PodDisruptionBudget configuration",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": ["integer", "string"] },
+        "maxUnavailable": { "type": ["integer", "string"] }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "description": "Kubernetes resource requests/limits",
+      "properties": {
+        "requests": {
+          "type": "object",
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

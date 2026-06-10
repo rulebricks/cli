@@ -13,11 +13,10 @@ import {
 import {
   deploymentExists,
   getDeploymentDir,
-  getTerraformDir,
   getHelmValuesPath,
 } from "../lib/config.js";
 
-type OpenTarget = "all" | "config" | "values" | "terraform";
+type OpenTarget = "all" | "config" | "values";
 
 interface OpenCommandProps {
   name: string;
@@ -101,9 +100,6 @@ function OpenCommandInner({ name, target }: OpenCommandProps) {
           case "values":
             targetPath = getHelmValuesPath(name);
             break;
-          case "terraform":
-            targetPath = getTerraformDir(name);
-            break;
           case "all":
           default:
             targetPath = deployDir;
@@ -114,11 +110,7 @@ function OpenCommandInner({ name, target }: OpenCommandProps) {
         try {
           await fs.access(targetPath);
         } catch {
-          if (target === "terraform") {
-            setError(
-              `Terraform directory not found. Run "rulebricks deploy ${name}" first to create infrastructure files.`,
-            );
-          } else if (target === "values") {
+          if (target === "values") {
             setError(
               `values.yaml not found. Run "rulebricks init" or "rulebricks deploy ${name}" first.`,
             );
@@ -196,9 +188,7 @@ function OpenCommandInner({ name, target }: OpenCommandProps) {
       ? "deployment directory"
       : target === "config"
         ? "config.yaml"
-        : target === "values"
-          ? "values.yaml"
-          : "terraform directory";
+        : "values.yaml";
 
   return (
     <BorderBox title="Opened">
@@ -221,10 +211,6 @@ function OpenCommandInner({ name, target }: OpenCommandProps) {
               • config.yaml - Deployment configuration
             </Text>
             <Text color={colors.muted}> • values.yaml - Helm chart values</Text>
-            <Text color={colors.muted}>
-              {" "}
-              • terraform/ - Infrastructure files
-            </Text>
           </Box>
         )}
 

@@ -18,8 +18,12 @@ export interface ImageTag {
   lastUpdated: Date;
   /** Image digest */
   digest: string;
+  /** Manifest/image digests reported for this tag */
+  imageDigests: string[];
   /** Full image size in bytes */
   fullSize: number;
+  /** Architectures available in the tag's manifest list */
+  architectures: string[];
 }
 
 /**
@@ -101,7 +105,8 @@ export async function authenticateDockerHub(licenseKey: string): Promise<string>
 export async function fetchImageTags(
   repo: string,
   token: string,
-  pageSize: number = 100
+  pageSize: number = 100,
+  tagFilter: (tag: string) => boolean = isValidVersionTag,
 ): Promise<ImageTag[]> {
   const allTags: ImageTag[] = [];
   let url: string | null = `${DOCKER_HUB_API}/repositories/${repo}/tags?page_size=${pageSize}`;
@@ -123,21 +128,36 @@ export async function fetchImageTags(
     const data = await response.json() as DockerHubTagsResponse;
     
     for (const tag of data.results) {
-      // Skip non-semver tags like "latest", "dev", etc.
-      if (!isValidVersionTag(tag.name)) {
+      if (!tagFilter(tag.name)) {
         continue;
       }
+
+      const imageDigests = Array.from(
+        new Set(
+          [
+            tag.digest,
+            ...(tag.images || []).map((image) => image.digest),
+          ].filter(Boolean),
+        ),
+      );
       
       allTags.push({
         name: tag.name,
         lastUpdated: new Date(tag.last_updated),
         digest: tag.digest,
+        imageDigests,
         fullSize: tag.full_size,
+        architectures: Array.from(
+          new Set(
+            (tag.images || [])
+              .map((image) => image.architecture)
+              .filter(Boolean),
+          ),
+        ),
       });
     }
 
-    // Get next page if available (limit to reasonable number of versions)
-    url = data.next && allTags.length < 50 ? data.next : null;
+    url = data.next;
   }
 
   // Sort by last updated, newest first
@@ -150,7 +170,7 @@ export async function fetchImageTags(
  * Checks if a tag looks like a valid semantic version
  * Excludes "latest" and other non-numeric tags
  */
-function isValidVersionTag(tag: string): boolean {
+export function isValidVersionTag(tag: string): boolean {
   // Exclude "latest" and similar non-versioned tags
   if (tag === 'latest' || tag === 'dev' || tag === 'main' || tag === 'master') {
     return false;
@@ -159,6 +179,10 @@ function isValidVersionTag(tag: string): boolean {
   // Match patterns like "1.2.3", "v1.2.3", "1.2.3-beta.1"
   const versionPattern = /^v?\d+\.\d+\.\d+(-[\w.]+)?$/;
   return versionPattern.test(tag);
+}
+
+export function isValidWorkerVersionTag(tag: string): boolean {
+  return /^worker-\d+\.\d+\.\d+(-[\w.]+)?$/.test(tag);
 }
 
 /**
@@ -170,15 +194,17 @@ function isValidVersionTag(tag: string): boolean {
 export async function fetchAllImageTags(licenseKey: string): Promise<{
   appTags: ImageTag[];
   hpsTags: ImageTag[];
+  hpsWorkerTags: ImageTag[];
 }> {
   const token = await authenticateDockerHub(licenseKey);
   
-  const [appTags, hpsTags] = await Promise.all([
+  const [appTags, hpsTags, hpsWorkerTags] = await Promise.all([
     fetchImageTags('rulebricks/app', token),
     fetchImageTags('rulebricks/hps', token),
+    fetchImageTags('rulebricks/hps', token, 100, isValidWorkerVersionTag),
   ]);
 
-  return { appTags, hpsTags };
+  return { appTags, hpsTags, hpsWorkerTags };
 }
 
 /**

@@ -13,7 +13,7 @@ interface DomainStepProps {
   onBack: () => void;
 }
 
-type SubStep = 'domain' | 'validating' | 'admin-email' | 'tls-email' | 'dns-provider' | 'dns-auto-manage';
+type SubStep = 'domain' | 'validating' | 'admin-email' | 'dns-provider' | 'dns-auto-manage';
 
 const DNS_PROVIDER_OPTIONS: Array<{ label: string; value: DnsProvider }> = [
   { label: 'Other / Not sure (manual DNS)', value: 'other' },
@@ -34,7 +34,6 @@ export function DomainStep({ onComplete, onBack }: DomainStepProps) {
   const [subStep, setSubStep] = useState<SubStep>('domain');
   const [domain, setDomain] = useState(state.domain || '');
   const [adminEmail, setAdminEmail] = useState(state.adminEmail || '');
-  const [tlsEmail, setTlsEmail] = useState(state.tlsEmail || '');
   const [error, setError] = useState<string | null>(null);
   
   useInput((input, key) => {
@@ -44,10 +43,8 @@ export function DomainStep({ onComplete, onBack }: DomainStepProps) {
         onBack();
       } else if (subStep === 'admin-email') {
         setSubStep('domain');
-      } else if (subStep === 'tls-email') {
-        setSubStep('admin-email');
       } else if (subStep === 'dns-provider') {
-        setSubStep('tls-email');
+        setSubStep('admin-email');
       } else if (subStep === 'dns-auto-manage') {
         setSubStep('dns-provider');
       }
@@ -99,28 +96,8 @@ export function DomainStep({ onComplete, onBack }: DomainStepProps) {
     
     setError(null);
     dispatch({ type: 'SET_ADMIN_EMAIL', email: adminEmail });
-    
-    // Default TLS email to admin email if not set
-    if (!tlsEmail) {
-      setTlsEmail(adminEmail);
-    }
-    
-    setSubStep('tls-email');
-  };
-  
-  const handleTlsEmailSubmit = () => {
-    if (!tlsEmail) {
-      setError('TLS email is required');
-      return;
-    }
-    
-    if (!isValidEmail(tlsEmail)) {
-      setError('Invalid email format');
-      return;
-    }
-    
-    setError(null);
-    dispatch({ type: 'SET_TLS_EMAIL', email: tlsEmail });
+    // The TLS (Let's Encrypt) email defaults to the admin email in toConfig;
+    // advanced users can override `tlsEmail` in config.yaml.
     setSubStep('dns-provider');
   };
   
@@ -155,12 +132,6 @@ export function DomainStep({ onComplete, onBack }: DomainStepProps) {
         <Box>
           <Text color="green">✓</Text>
           <Text color="gray"> Admin: {adminEmail}</Text>
-        </Box>
-      )}
-      {tlsEmail && subStep !== 'tls-email' && subStep !== 'admin-email' && (
-        <Box>
-          <Text color="green">✓</Text>
-          <Text color="gray"> TLS email: {tlsEmail}</Text>
         </Box>
       )}
     </Box>
@@ -200,7 +171,8 @@ export function DomainStep({ onComplete, onBack }: DomainStepProps) {
         <Box flexDirection="column" marginY={1}>
           <Text>Enter the admin email address:</Text>
           <Text color="gray" dimColor>
-            This email will be used for Rulebricks administration and notifications
+            Used for Rulebricks administration, notifications, and TLS
+            certificate (Let's Encrypt) notices
           </Text>
           <Box marginTop={1}>
             <TextInput
@@ -208,29 +180,6 @@ export function DomainStep({ onComplete, onBack }: DomainStepProps) {
               onChange={setAdminEmail}
               onSubmit={handleAdminEmailSubmit}
               placeholder="admin@example.com"
-            />
-          </Box>
-          <ProgressSummary />
-          {error && (
-            <Box marginTop={1}>
-              <Text color="red">✗ {error}</Text>
-            </Box>
-          )}
-        </Box>
-      )}
-      
-      {subStep === 'tls-email' && (
-        <Box flexDirection="column" marginY={1}>
-          <Text>Enter the email for TLS certificates:</Text>
-          <Text color="gray" dimColor>
-            Let's Encrypt will send certificate expiration notices here
-          </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={tlsEmail}
-              onChange={setTlsEmail}
-              onSubmit={handleTlsEmailSubmit}
-              placeholder={adminEmail || 'admin@example.com'}
             />
           </Box>
           <ProgressSummary />
@@ -289,13 +238,11 @@ export function DomainStep({ onComplete, onBack }: DomainStepProps) {
             <Text color="gray"> DNS Provider: {DNS_PROVIDER_NAMES[state.dnsProvider]}</Text>
           </Box>
           
-          {state.infrastructureMode === 'existing' && (
-            <Box marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1}>
-              <Text color="yellow">
-                Note: Auto-DNS requires external-dns with proper IAM credentials in your cluster.
-              </Text>
-            </Box>
-          )}
+          <Box marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1}>
+            <Text color="yellow">
+              Note: Auto-DNS requires external-dns with proper IAM credentials in your cluster.
+            </Text>
+          </Box>
         </Box>
       )}
       

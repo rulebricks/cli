@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import React, { useCallback, useEffect, useState } from "react";
+import { Box, Text, useApp } from "ink";
 import { platform } from "os";
 import {
   BorderBox,
@@ -13,38 +13,23 @@ import { DNSWaitScreen } from "../components/DNSWaitScreen.js";
 import {
   loadDeploymentConfig,
   loadDeploymentState,
+  loadHelmValues,
   saveDeploymentState,
   updateDeploymentStatus,
-  saveTerraformVars,
 } from "../lib/config.js";
-import {
-  setupTerraformWorkspace,
-  terraformInit,
-  terraformPlan,
-  terraformApply,
-  terraformDestroy,
-  cleanupOrphanedResources,
-  updateKubeconfig,
-  hasTerraformState,
-  isTerraformInstalled,
-  generateTerraformVars,
-} from "../lib/terraform.js";
-import {
-  checkGcpApplicationDefaultCredentials,
-  checkAzureResourceProviders,
-  checkAzureVmQuota,
-  AZURE_TIER_CORES,
-} from "../lib/cloudCli.js";
 import {
   installOrUpgradeChart,
   upgradeChart,
   isHelmInstalled,
 } from "../lib/helm.js";
+import { assertValidHelmValues } from "../lib/validateValues.js";
 import {
   isKubectlInstalled,
   checkClusterAccessible,
   waitForCertificatesReady,
 } from "../lib/kubernetes.js";
+import { updateKubeconfig } from "../lib/cloudCli.js";
+import { ensureWorkloadIdentityFederation } from "../lib/workloadIdentity.js";
 import {
   generateHelmValues,
   updateHelmValuesForTLS,
@@ -59,32 +44,31 @@ import {
 
 interface DeployCommandProps {
   name: string;
-  skipInfra?: boolean;
   skipDns?: boolean;
   version?: string;
+  regenerateValues?: boolean;
+  assumeDnsConfigured?: boolean;
+}
+
+function getConfigProductVersion(config: DeploymentConfig): string {
+  return config.version;
 }
 
 type DeployStep =
   | "loading"
   | "preflight"
-  | "infra-setup"
-  | "infra-init"
-  | "infra-plan"
-  | "infra-apply"
+  | "federation"
   | "kubeconfig"
-  | "helm-install" // Single-phase (External DNS) or Phase 1 (manual DNS)
-  | "cert-check" // TLS certificate verification after Helm install/upgrade
-  | "dns-wait" // Only for manual DNS
-  | "helm-upgrade-tls" // Only for manual DNS
+  | "helm-install"
+  | "cert-check"
+  | "dns-wait"
+  | "helm-upgrade-tls"
   | "complete"
-  | "error"
-  | "cleanup-prompt" // Ask user if they want to clean up failed infra
-  | "cleanup-running" // Running terraform destroy
-  | "cleanup-complete"; // Cleanup finished
+  | "error";
 
 interface StepStatus {
   preflight: "pending" | "running" | "success" | "error" | "skipped";
-  infrastructure: "pending" | "running" | "success" | "error" | "skipped";
+  federation: "pending" | "running" | "success" | "error" | "skipped";
   kubeconfig: "pending" | "running" | "success" | "error" | "skipped";
   helmInstall: "pending" | "running" | "success" | "error" | "skipped";
   certCheck: "pending" | "running" | "success" | "error" | "skipped";
@@ -94,9 +78,10 @@ interface StepStatus {
 
 function DeployCommandInner({
   name,
-  skipInfra,
   skipDns,
   version,
+  regenerateValues = true,
+  assumeDnsConfigured = false,
 }: DeployCommandProps) {
   const { exit } = useApp();
   const { colors } = useTheme();
@@ -104,12 +89,10 @@ function DeployCommandInner({
   const [config, setConfig] = useState<DeploymentConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [useExternalDns, setUseExternalDns] = useState(false);
-  const infraStartedRef = useRef(false); // Track if we started infra provisioning (ref for sync access)
-  const [cleanupError, setCleanupError] = useState<string | null>(null);
   const [tlsWarning, setTlsWarning] = useState<string | null>(null);
   const [status, setStatus] = useState<StepStatus>({
     preflight: "pending",
-    infrastructure: "pending",
+    federation: "pending",
     kubeconfig: "pending",
     helmInstall: "pending",
     certCheck: "pending",
@@ -117,47 +100,18 @@ function DeployCommandInner({
     helmUpgradeTls: "pending",
   });
 
-  // Handle cleanup prompt responses
-  const handleCleanup = useCallback(async () => {
-    setStep("cleanup-running");
-    try {
-      const cloudContext = config?.infrastructure.provider && config?.infrastructure.region
-        ? {
-            provider: config.infrastructure.provider,
-            clusterName: config.infrastructure.clusterName || `${name}-cluster`,
-            region: config.infrastructure.region,
-          }
-        : undefined;
-      await terraformDestroy(name, cloudContext);
-      setStep("cleanup-complete");
-      setTimeout(() => exit(), 3000);
-    } catch (err) {
-      setCleanupError(err instanceof Error ? err.message : "Cleanup failed");
-      setStep("cleanup-complete");
-      setTimeout(() => exit(), 5000);
-    }
-  }, [name, config, exit]);
-
-  const skipCleanup = useCallback(() => {
-    setStep("error");
+  useEffect(() => {
+    runDeployment();
   }, []);
 
-  useInput((input, key) => {
-    if (step === "cleanup-prompt") {
-      if (input === "y" || input === "Y") {
-        handleCleanup();
-      } else if (input === "n" || input === "N" || key.escape) {
-        skipCleanup();
-      }
-    } else if (
-      key.escape &&
-      (step === "error" || step === "cleanup-complete")
-    ) {
-      exit();
-    }
-  });
+  const markRunning = (key: keyof StepStatus) => {
+    setStatus((s) => ({ ...s, [key]: "running" }));
+  };
 
-  // Resume after DNS wait (manual DNS flow)
+  const markSuccess = (key: keyof StepStatus) => {
+    setStatus((s) => ({ ...s, [key]: "success" }));
+  };
+
   const handleDnsComplete = useCallback(async () => {
     if (!config) return;
 
@@ -169,52 +123,25 @@ function DeployCommandInner({
         helmUpgradeTls: "running",
       }));
 
-      // Update helm values to enable TLS
       await updateHelmValuesForTLS(name, true);
 
       const namespace = getNamespace(config.name);
       const releaseName = getReleaseName(config.name);
 
-      // Upgrade the chart with TLS enabled
       await upgradeChart(name, { releaseName, namespace, version, wait: true });
 
       setStatus((s) => ({ ...s, helmUpgradeTls: "success", certCheck: "running" }));
-
       setStep("cert-check");
-      try {
-        await waitForCertificatesReady(namespace);
-        setStatus((s) => ({ ...s, certCheck: "success" }));
-      } catch (certErr) {
-        setStatus((s) => ({ ...s, certCheck: "error" }));
-        setTlsWarning(
-          "TLS certificates are still being issued. " +
-            "HTTPS may not be available yet.",
-        );
-      }
+      await verifyCertificates(namespace);
 
-      // Update state
-      await updateDeploymentStatus(name, "running", {
-        application: {
-          appVersion: config.appVersion || "latest",
-          hpsVersion: config.hpsVersion || config.appVersion || "latest",
-          chartVersion: version || "latest",
-          namespace,
-          url: `https://${config.domain}`,
-        },
-      });
-
+      await markRunningState(config, namespace);
       setStep("complete");
       setTimeout(() => exit(), 5000);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "TLS upgrade failed";
-      setError(message);
-      setStep("error");
-      setStatus((s) => ({ ...s, helmUpgradeTls: "error" }));
-      await updateDeploymentStatus(name, "failed");
+      await failDeployment(err, "TLS upgrade failed");
     }
   }, [config, name, version, exit]);
 
-  // Skip DNS validation (manual DNS flow)
   const handleDnsSkip = useCallback(async () => {
     if (!config) return;
 
@@ -226,12 +153,10 @@ function DeployCommandInner({
     }));
 
     const namespace = getNamespace(config.name);
-
-    // Mark as running without TLS upgrade
-    await updateDeploymentStatus(name, "running", {
+    const productVersion = getConfigProductVersion(config);
+    await updateDeploymentStatus(name, "waiting-dns", {
       application: {
-        appVersion: config.appVersion || "latest",
-        hpsVersion: config.hpsVersion || config.appVersion || "latest",
+        version: productVersion,
         chartVersion: version || "latest",
         namespace,
         url: `https://${config.domain}`,
@@ -242,23 +167,15 @@ function DeployCommandInner({
     setTimeout(() => exit(), 5000);
   }, [config, name, version, exit]);
 
-  useEffect(() => {
-    runDeployment();
-  }, []);
-
   async function runDeployment() {
     try {
-      // Load configuration
       const cfg = await loadDeploymentConfig(name);
       setConfig(cfg);
 
-      // Determine if External DNS is enabled
-      // External DNS = supported provider + auto-manage enabled
       const externalDnsEnabled =
         cfg.dns.autoManage && isSupportedDnsProvider(cfg.dns.provider);
       setUseExternalDns(externalDnsEnabled);
 
-      // Initialize deployment state
       const existingState = await loadDeploymentState(name);
       const state: DeploymentState = existingState || {
         name,
@@ -270,93 +187,33 @@ function DeployCommandInner({
 
       await saveDeploymentState(name, { ...state, status: "deploying" });
 
-      // Preflight checks
       setStep("preflight");
-      setStatus((s) => ({ ...s, preflight: "running" }));
-
+      markRunning("preflight");
       await runPreflightChecks(cfg);
-      setStatus((s) => ({ ...s, preflight: "success" }));
+      markSuccess("preflight");
 
-      // Infrastructure provisioning
-      const needsInfra = cfg.infrastructure.mode === "provision" && !skipInfra;
+      // Ensure the per-namespace workload-identity trust exists. cluster-setup
+      // creates the deployment-independent identity; this wires it to this
+      // deployment's ServiceAccounts so one cluster can host many deployments.
+      setStep("federation");
+      markRunning("federation");
+      const federation = await ensureWorkloadIdentityFederation(cfg);
+      setStatus((s) => ({
+        ...s,
+        federation: federation.skipped ? "skipped" : "success",
+      }));
 
-      if (needsInfra) {
-        setStatus((s) => ({ ...s, infrastructure: "running" }));
-        infraStartedRef.current = true; // Mark that we're doing infrastructure work
-
-        // Check if already provisioned
-        const hasState = await hasTerraformState(name);
-        if (!hasState) {
-          setStep("infra-setup");
-          await setupTerraformWorkspace(name, cfg.infrastructure.provider!);
-        }
-
-        // Generate and save terraform variables (always do this before plan,
-        // even if state exists, in case config changed)
-        const terraformVars = generateTerraformVars(cfg);
-        await saveTerraformVars(name, terraformVars);
-
-        setStep("infra-init");
-        await terraformInit(name);
-
-        setStep("infra-plan");
-        await terraformPlan(name);
-
-        // Clean up orphaned cloud resources from prior failed deployments
-        // (e.g. CloudWatch log groups that survived an incomplete destroy)
-        if (cfg.infrastructure.provider && cfg.infrastructure.region) {
-          await cleanupOrphanedResources(
-            cfg.infrastructure.provider,
-            cfg.infrastructure.clusterName || `${name}-cluster`,
-            cfg.infrastructure.region,
-          );
-        }
-
-        setStep("infra-apply");
-        await terraformApply(name);
-
-        setStatus((s) => ({ ...s, infrastructure: "success" }));
-
-        // Update kubeconfig
-        setStep("kubeconfig");
-        setStatus((s) => ({ ...s, kubeconfig: "running" }));
-
-        await updateKubeconfig(
-          cfg.infrastructure.provider!,
-          cfg.infrastructure.clusterName || `${name}-cluster`,
-          cfg.infrastructure.region!,
-          {
-            gcpProjectId: cfg.infrastructure.gcpProjectId,
-            azureResourceGroup: cfg.infrastructure.azureResourceGroup,
-          },
-        );
-
-        // Note: StorageClass is managed by the Helm chart, not the CLI
-        // This avoids conflicts where kubectl-created resources lack Helm ownership labels
-
-        setStatus((s) => ({ ...s, kubeconfig: "success" }));
-      } else {
-        // For existing infrastructure, infrastructure is always skipped
-        // kubeconfig may have been updated during preflight if cluster wasn't accessible
-        // (in that case, it's already set to 'success'), otherwise mark as skipped
-        setStatus((s) => ({
-          ...s,
-          infrastructure: "skipped",
-          kubeconfig: s.kubeconfig === "success" ? "success" : "skipped",
-        }));
-      }
-
-      // Helm Chart Installation
       setStep("helm-install");
-      setStatus((s) => ({ ...s, helmInstall: "running" }));
+      markRunning("helmInstall");
 
       const namespace = getNamespace(cfg.name);
       const releaseName = getReleaseName(cfg.name);
 
       if (externalDnsEnabled) {
-        // SINGLE-PHASE DEPLOYMENT (External DNS)
-        // Install with TLS enabled from the start - external-dns handles DNS records
-        await generateHelmValues(cfg, { tlsEnabled: true });
+        if (regenerateValues) {
+          await generateHelmValues(cfg, { tlsEnabled: true });
+        }
+        await ensureGeneratedValuesValid();
         await installOrUpgradeChart(name, {
           releaseName,
           namespace,
@@ -367,99 +224,88 @@ function DeployCommandInner({
         setStatus((s) => ({
           ...s,
           helmInstall: "success",
-          dnsConfig: "skipped", // External DNS handles this
-          helmUpgradeTls: "skipped", // TLS enabled from start
+          dnsConfig: "skipped",
+          helmUpgradeTls: "skipped",
           certCheck: "running",
         }));
 
         setStep("cert-check");
-        try {
-          await waitForCertificatesReady(namespace);
-          setStatus((s) => ({ ...s, certCheck: "success" }));
-        } catch (certErr) {
-          setStatus((s) => ({ ...s, certCheck: "error" }));
-          setTlsWarning(
-            "TLS certificates are still being issued. " +
-              "HTTPS may not be available yet.",
-          );
-        }
+        await verifyCertificates(namespace);
+        await markRunningState(cfg, namespace);
+        setStep("complete");
+        setTimeout(() => exit(), 5000);
+        return;
+      }
 
-        // Update state to running
-        await updateDeploymentStatus(name, "running", {
+      if (regenerateValues) {
+        await generateHelmValues(cfg, { tlsEnabled: false });
+      }
+      await ensureGeneratedValuesValid();
+      await installOrUpgradeChart(name, {
+        releaseName,
+        namespace,
+        version,
+        wait: true,
+      });
+      markSuccess("helmInstall");
+
+      if (assumeDnsConfigured) {
+        setStatus((s) => ({
+          ...s,
+          dnsConfig: "skipped",
+          helmUpgradeTls: "skipped",
+          certCheck: "running",
+        }));
+        setStep("cert-check");
+        await verifyCertificates(namespace);
+        await markRunningState(cfg, namespace);
+        setStep("complete");
+        setTimeout(() => exit(), 5000);
+        return;
+      }
+
+      if (skipDns) {
+        setStatus((s) => ({
+          ...s,
+          dnsConfig: "skipped",
+          helmUpgradeTls: "skipped",
+          certCheck: "skipped",
+        }));
+        const productVersion = getConfigProductVersion(cfg);
+        await updateDeploymentStatus(name, "waiting-dns", {
           application: {
-            appVersion: cfg.appVersion || "latest",
-            hpsVersion: cfg.hpsVersion || cfg.appVersion || "latest",
+            version: productVersion,
             chartVersion: version || "latest",
             namespace,
             url: `https://${cfg.domain}`,
           },
         });
-
         setStep("complete");
         setTimeout(() => exit(), 5000);
-      } else {
-        // TWO-PHASE DEPLOYMENT (Manual DNS)
-        // Phase 1: Install without TLS
-        await generateHelmValues(cfg, { tlsEnabled: false });
-        await installOrUpgradeChart(name, {
-          releaseName,
-          namespace,
-          version,
-          wait: true,
-        });
-
-        setStatus((s) => ({ ...s, helmInstall: "success" }));
-
-        // If skipping DNS, go straight to complete
-        if (skipDns) {
-          setStatus((s) => ({
-            ...s,
-            dnsConfig: "skipped",
-            helmUpgradeTls: "skipped",
-            certCheck: "skipped",
-          }));
-          await updateDeploymentStatus(name, "waiting-dns", {
-            application: {
-              appVersion: cfg.appVersion || "latest",
-              hpsVersion: cfg.hpsVersion || cfg.appVersion || "latest",
-              chartVersion: version || "latest",
-              namespace,
-              url: `https://${cfg.domain}`,
-            },
-          });
-          setStep("complete");
-          setTimeout(() => exit(), 5000);
-          return;
-        }
-
-        // Update state to waiting for DNS
-        await updateDeploymentStatus(name, "waiting-dns");
-
-        // Phase 2: DNS configuration wait
-        setStep("dns-wait");
-        setStatus((s) => ({ ...s, dnsConfig: "running" }));
+        return;
       }
+
+      await updateDeploymentStatus(name, "waiting-dns");
+      setStep("dns-wait");
+      markRunning("dnsConfig");
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setError(message);
+      await failDeployment(err, "Unknown error");
+    }
+  }
 
-      await updateDeploymentStatus(name, "failed");
-
-      // If we started infrastructure provisioning but failed, offer cleanup
-      if (infraStartedRef.current) {
-        setStep("cleanup-prompt");
-      } else {
-        setStep("error");
-      }
+  // Guardrail: validate the values we're about to install against the chart's
+  // bundled schema. Catches reused/hand-edited values too (regenerateValues=false).
+  async function ensureGeneratedValuesValid(): Promise<void> {
+    const values = await loadHelmValues(name);
+    if (values) {
+      assertValidHelmValues(values);
     }
   }
 
   async function runPreflightChecks(cfg: DeploymentConfig): Promise<void> {
-    // Check required tools
-    const [helm, kubectl, terraform] = await Promise.all([
+    const [helm, kubectl] = await Promise.all([
       isHelmInstalled(),
       isKubectlInstalled(),
-      isTerraformInstalled(),
     ]);
 
     if (!helm) {
@@ -467,247 +313,104 @@ function DeployCommandInner({
     }
 
     if (!kubectl) {
-      throw new Error(
-        "kubectl is not installed. Please install kubectl first.",
-      );
+      throw new Error("kubectl is not installed. Please install kubectl first.");
     }
 
-    if (cfg.infrastructure.mode === "provision" && !terraform) {
-      throw new Error(
-        "Terraform is not installed. Required for infrastructure provisioning.",
-      );
-    }
-
-    // Check GCP Application Default Credentials if provisioning GCP infrastructure
+    let clusterError = await checkClusterAccessible();
     if (
-      cfg.infrastructure.mode === "provision" &&
-      cfg.infrastructure.provider === "gcp"
+      clusterError &&
+      cfg.infrastructure.provider &&
+      cfg.infrastructure.region &&
+      cfg.infrastructure.clusterName
     ) {
-      const adcCheck = await checkGcpApplicationDefaultCredentials();
-      if (!adcCheck.configured) {
+      try {
+        setStep("kubeconfig");
+        setStatus((s) => ({
+          ...s,
+          preflight: "success",
+          kubeconfig: "running",
+        }));
+
+        await updateKubeconfig(
+          cfg.infrastructure.provider,
+          cfg.infrastructure.clusterName,
+          cfg.infrastructure.region,
+          {
+            gcpProjectId: cfg.infrastructure.gcpProjectId,
+            azureResourceGroup: cfg.infrastructure.azureResourceGroup,
+          },
+        );
+
+        clusterError = await checkClusterAccessible();
+        if (!clusterError) {
+          markSuccess("kubeconfig");
+        }
+      } catch (kubeconfigError) {
+        const kubeconfigMsg =
+          kubeconfigError instanceof Error
+            ? kubeconfigError.message
+            : "Unknown error";
         throw new Error(
-          "GCP Application Default Credentials (ADC) not configured.\n\n" +
-            "Terraform requires ADC to authenticate with Google Cloud.\n\n" +
-            "To fix this:\n" +
-            "  • Run: gcloud auth login\n" +
-            "  • Run: gcloud auth application-default login\n" +
-            "  • Verify: gcloud auth application-default print-access-token\n\n" +
-            "For more information: https://cloud.google.com/docs/authentication/application-default-credentials"
+          `Cannot access Kubernetes cluster and kubeconfig refresh failed:\n` +
+            `Cluster error: ${clusterError}\n` +
+            `Kubeconfig error: ${kubeconfigMsg}`,
         );
       }
     }
 
-    // Check Azure prerequisites if provisioning Azure infrastructure
-    if (
-      cfg.infrastructure.mode === "provision" &&
-      cfg.infrastructure.provider === "azure"
-    ) {
-      // 1. Verify resource providers are registered
-      const providerCheck = await checkAzureResourceProviders();
-      if (!providerCheck.allRegistered) {
-        throw new Error(
-          `Azure resource providers not registered: ${providerCheck.missing.join(", ")}\n\n` +
-            "To register:\n" +
-            providerCheck.missing
-              .map((p) => `  • az provider register --namespace ${p}`)
-              .join("\n") +
-            "\n\nNote: Registration may take a few minutes to complete."
-        );
-      }
+    if (clusterError) {
+      throw new Error(`Cannot access Kubernetes cluster:\n${clusterError}`);
+    }
 
-      // 2. Check VM quota for the selected tier
-      const tier = cfg.tier || "small";
-      const region = cfg.infrastructure.region;
-      if (!region) {
-        throw new Error("Azure region is required for infrastructure provisioning");
-      }
-      
-      const requiredCores = AZURE_TIER_CORES[tier] || AZURE_TIER_CORES.small;
-      const quotaCheck = await checkAzureVmQuota(
-        region,
-        requiredCores,
+    setStatus((s) => ({
+      ...s,
+      kubeconfig: s.kubeconfig === "success" ? "success" : "skipped",
+    }));
+  }
+
+  async function verifyCertificates(namespace: string): Promise<void> {
+    try {
+      await waitForCertificatesReady(namespace);
+      markSuccess("certCheck");
+    } catch {
+      setStatus((s) => ({ ...s, certCheck: "error" }));
+      setTlsWarning(
+        "TLS certificates are still being issued. HTTPS may not be available yet.",
       );
-
-      if (!quotaCheck.sufficient) {
-        throw new Error(
-          `Insufficient Azure vCPU quota in ${region}.\n` +
-            `Required: ${requiredCores} cores (${tier} tier), Available: ${quotaCheck.available}/${quotaCheck.limit}\n\n` +
-            "Request a quota increase in the Azure portal:\n" +
-            "  • Go to: Subscriptions > Usage + quotas\n" +
-            "  • Request increase for 'Total Regional vCPUs' in your region"
-        );
-      }
-    }
-
-    // Check cluster access if using existing infrastructure
-    if (cfg.infrastructure.mode === "existing") {
-      let clusterError = await checkClusterAccessible();
-
-      // If cluster not accessible but we have provider details, try updating kubeconfig
-      if (
-        clusterError &&
-        cfg.infrastructure.provider &&
-        cfg.infrastructure.region &&
-        cfg.infrastructure.clusterName
-      ) {
-        try {
-          // Show visual feedback for kubeconfig update
-          setStep("kubeconfig");
-          setStatus((s) => ({
-            ...s,
-            preflight: "success",
-            kubeconfig: "running",
-          }));
-
-          await updateKubeconfig(
-            cfg.infrastructure.provider,
-            cfg.infrastructure.clusterName,
-            cfg.infrastructure.region,
-            {
-              gcpProjectId: cfg.infrastructure.gcpProjectId,
-              azureResourceGroup: cfg.infrastructure.azureResourceGroup,
-            },
-          );
-
-          // Retry cluster access check
-          clusterError = await checkClusterAccessible();
-
-          if (!clusterError) {
-            setStatus((s) => ({ ...s, kubeconfig: "success" }));
-          }
-        } catch (kubeconfigError) {
-          // Kubeconfig update failed, include both errors
-          const kubeconfigMsg =
-            kubeconfigError instanceof Error
-              ? kubeconfigError.message
-              : "Unknown error";
-          throw new Error(
-            `Cannot access Kubernetes cluster and kubeconfig update failed:\n` +
-              `Cluster error: ${clusterError}\n` +
-              `Kubeconfig update error: ${kubeconfigMsg}`,
-          );
-        }
-      }
-
-      if (clusterError) {
-        // Provide helpful message based on whether provider details are missing
-        if (
-          !cfg.infrastructure.provider ||
-          !cfg.infrastructure.region ||
-          !cfg.infrastructure.clusterName
-        ) {
-          throw new Error(
-            `Cannot access Kubernetes cluster:\n${clusterError}\n\n` +
-              `Tip: Re-run 'rulebricks init' and provide your cloud provider, region, and cluster name ` +
-              `to enable automatic kubeconfig updates.`,
-          );
-        }
-        throw new Error(`Cannot access Kubernetes cluster:\n${clusterError}`);
-      }
     }
   }
 
-  // Cleanup prompt screen
-  if (step === "cleanup-prompt") {
-    return (
-      <BorderBox title="Deployment Failed">
-        <Box flexDirection="column" marginY={1}>
-          <Text color={colors.error} bold>
-            ✗ Infrastructure provisioning failed
-          </Text>
-          <Text color={colors.error}>{error}</Text>
-
-          <Box marginTop={1} flexDirection="column">
-            <Text color={colors.warning} bold>
-              Partial infrastructure may have been created.
-            </Text>
-            <Text color={colors.muted}>
-              Would you like to clean up to avoid orphaned resources?
-            </Text>
-          </Box>
-
-          <Box marginTop={1}>
-            <Text color={colors.accent} bold>
-              [Y]
-            </Text>
-            <Text color={colors.muted}>
-              {" "}
-              Yes, destroy partial infrastructure
-            </Text>
-          </Box>
-          <Box>
-            <Text color={colors.accent} bold>
-              [N]
-            </Text>
-            <Text color={colors.muted}>
-              {" "}
-              No, keep for debugging (you can run `rulebricks destroy --cluster`
-              later)
-            </Text>
-          </Box>
-        </Box>
-      </BorderBox>
-    );
+  async function markRunningState(
+    cfg: DeploymentConfig,
+    namespace: string,
+  ): Promise<void> {
+    const productVersion = getConfigProductVersion(cfg);
+    await updateDeploymentStatus(name, "running", {
+      application: {
+        version: productVersion,
+        chartVersion: version || "latest",
+        namespace,
+        url: `https://${cfg.domain}`,
+      },
+    });
   }
 
-  // Cleanup running screen
-  if (step === "cleanup-running") {
-    return (
-      <BorderBox title="Cleaning Up">
-        <Box flexDirection="column" marginY={1}>
-          <Spinner label="Destroying partial infrastructure..." />
-          <Box marginTop={1}>
-            <Text color={colors.muted}>This may take several minutes...</Text>
-          </Box>
-        </Box>
-      </BorderBox>
-    );
+  async function failDeployment(err: unknown, fallback: string): Promise<void> {
+    const message = err instanceof Error ? err.message : fallback;
+    setError(message);
+    setStep("error");
+    setStatus((s) => ({
+      ...s,
+      preflight: step === "preflight" ? "error" : s.preflight,
+      federation: step === "federation" ? "error" : s.federation,
+      helmInstall: step === "helm-install" ? "error" : s.helmInstall,
+      helmUpgradeTls:
+        step === "helm-upgrade-tls" ? "error" : s.helmUpgradeTls,
+    }));
+    await updateDeploymentStatus(name, "failed");
   }
 
-  // Cleanup complete screen
-  if (step === "cleanup-complete") {
-    return (
-      <BorderBox title="Cleanup Complete">
-        <Box flexDirection="column" marginY={1}>
-          {cleanupError ? (
-            <>
-              <Text color={colors.warning} bold>
-                ⚠ Cleanup encountered issues
-              </Text>
-              <Text color={colors.warning}>{cleanupError}</Text>
-              <Box marginTop={1}>
-                <Text color={colors.muted}>
-                  Some resources may remain. Run `rulebricks destroy {name}{" "}
-                  --cluster` to retry.
-                </Text>
-              </Box>
-            </>
-          ) : (
-            <>
-              <Text color={colors.success} bold>
-                ✓ Infrastructure cleaned up successfully
-              </Text>
-              <Box marginTop={1}>
-                <Text color={colors.muted}>
-                  All partial resources have been destroyed. You can try
-                  deploying again.
-                </Text>
-              </Box>
-            </>
-          )}
-          <Box marginTop={1}>
-            <Text color={colors.muted} dimColor>
-              Press Esc to exit
-            </Text>
-          </Box>
-        </Box>
-      </BorderBox>
-    );
-  }
-
-  // Error screen (non-infra failures or when user skips cleanup)
   if (step === "error") {
-    // Format error message, preserving newlines for multi-line errors
     const errorLines = error?.split("\n") || ["Unknown error"];
 
     return (
@@ -726,17 +429,11 @@ function DeployCommandInner({
               </Text>
             ))}
           </Box>
-          <Box marginTop={1}>
-            <Text color={colors.muted} dimColor>
-              Press Esc to exit
-            </Text>
-          </Box>
         </Box>
       </BorderBox>
     );
   }
 
-  // DNS wait screen (only for manual DNS flow)
   if (step === "dns-wait" && config) {
     return (
       <DNSWaitScreen
@@ -749,9 +446,11 @@ function DeployCommandInner({
     );
   }
 
-  // Complete screen
   if (step === "complete") {
-    const tlsSkipped = status.helmUpgradeTls === "skipped" && !useExternalDns;
+    const tlsSkipped =
+      status.helmUpgradeTls === "skipped" &&
+      !useExternalDns &&
+      !assumeDnsConfigured;
 
     return (
       <BorderBox title="Deployment Complete">
@@ -782,19 +481,14 @@ function DeployCommandInner({
             )}
             {tlsWarning && (
               <Box marginTop={1}>
-                <Text color={colors.warning}>
-                  ⚠ {tlsWarning}
-                </Text>
+                <Text color={colors.warning}>⚠ {tlsWarning}</Text>
               </Box>
             )}
           </Box>
 
           <Box marginTop={1} flexDirection="column">
             <Text bold>Next steps:</Text>
-            <Text color={colors.muted}>
-              {" "}
-              • Visit the URL to complete initial setup
-            </Text>
+            <Text color={colors.muted}> • Visit the URL to complete setup</Text>
             <Text color={colors.muted}>
               {" "}
               • Run `rulebricks status {name}` to check deployment health
@@ -803,12 +497,6 @@ function DeployCommandInner({
               <Text color={colors.muted}>
                 {" "}
                 • Configure DNS and re-run deploy for TLS
-              </Text>
-            )}
-            {tlsWarning && (
-              <Text color={colors.muted}>
-                {" "}
-                • Run `rulebricks status {name}` to check TLS certificate status
               </Text>
             )}
           </Box>
@@ -827,34 +515,30 @@ function DeployCommandInner({
     );
   }
 
-  // Progress screen
   const helmInstallLabel = useExternalDns
     ? "Helm chart installation (with TLS)"
     : "Helm chart installation";
+
+  // The federation step does the cloud-appropriate per-namespace identity wiring;
+  // label it for the cluster's cloud so it's clear what's happening.
+  const federationLabel =
+    config?.infrastructure.provider === "aws"
+      ? "EKS Pod Identity associations"
+      : config?.infrastructure.provider === "gcp"
+        ? "Workload Identity bindings"
+        : config?.infrastructure.provider === "azure"
+          ? "Azure federated identity credentials"
+          : "Workload identity setup";
 
   return (
     <BorderBox title={`Deploying ${name}`}>
       <Box flexDirection="column" marginY={1}>
         <StatusLine status={status.preflight} label="Preflight checks" />
         <StatusLine
-          status={status.infrastructure}
-          label="Infrastructure provisioning"
-          detail={
-            step === "infra-setup"
-              ? "Setting up workspace"
-              : step === "infra-init"
-                ? "Initializing Terraform"
-                : step === "infra-plan"
-                  ? "Planning changes"
-                  : step === "infra-apply"
-                    ? "Applying infrastructure"
-                    : undefined
-          }
-        />
-        <StatusLine
           status={status.kubeconfig}
           label="Kubernetes configuration"
         />
+        <StatusLine status={status.federation} label={federationLabel} />
         <StatusLine status={status.helmInstall} label={helmInstallLabel} />
         {!useExternalDns && (
           <>
@@ -870,11 +554,9 @@ function DeployCommandInner({
           label="TLS certificate verification"
         />
 
-        {step !== "dns-wait" && (
-          <Box marginTop={1}>
-            <Spinner label={getStepLabel(step, useExternalDns)} />
-          </Box>
-        )}
+        <Box marginTop={1}>
+          <Spinner label={getStepLabel(step, useExternalDns)} />
+        </Box>
       </Box>
     </BorderBox>
   );
@@ -897,16 +579,8 @@ function getStepLabel(step: DeployStep, useExternalDns: boolean): string {
       return "Loading configuration...";
     case "preflight":
       return "Running preflight checks...";
-    case "infra-setup":
-      return "Setting up Terraform workspace...";
-    case "infra-init":
-      return "Initializing Terraform...";
-    case "infra-plan":
-      return "Planning infrastructure changes...";
-    case "infra-apply":
-      return "Creating infrastructure (may take up to 15 minutes)...";
     case "kubeconfig":
-      return "Updating kubeconfig...";
+      return "Refreshing kubeconfig...";
     case "helm-install":
       return useExternalDns
         ? "Installing Helm chart with TLS..."

@@ -2,6 +2,7 @@ import {
   ChartVersion,
   CHANGELOG_URL,
   AppVersion,
+  NodeArchitecture,
   getNamespace,
   getReleaseName,
 } from "../types/index.js";
@@ -10,8 +11,14 @@ import {
   fetchAllImageTags,
   ImageTag,
   normalizeVersion,
-  formatVersionDisplay,
 } from "./dockerHub.js";
+
+// Stock upstream Supabase Postgres image. The backup path uses pg_dump/rclone
+// (no barman), so there is no longer a custom rulebricks/supabase-postgres fork.
+export const SUPABASE_POSTGRES_IMAGE_REPOSITORY = "supabase/postgres";
+export const SUPABASE_POSTGRES_IMAGE_TAG = "15.1.0.147";
+// Cross-cloud uploader used by the backup CronJob and `rulebricks restore`.
+export const RCLONE_IMAGE = "rclone/rclone:latest";
 
 /**
  * Gets version information for display (legacy chart-based)
@@ -25,7 +32,7 @@ export interface VersionInfo {
 }
 
 /**
- * App version information with matched HPS version
+ * Product version information
  */
 export interface AppVersionInfo {
   current: AppVersion | null;
@@ -33,6 +40,18 @@ export interface AppVersionInfo {
   available: AppVersion[];
   hasUpdate: boolean;
   changelogUrl: string;
+}
+
+export function hasRegistryDigestMismatch(
+  deployedDigests: string[],
+  registryDigests?: string[],
+): boolean {
+  if (deployedDigests.length === 0 || !registryDigests?.length) {
+    return false;
+  }
+
+  const registryDigestSet = new Set(registryDigests);
+  return deployedDigests.some((digest) => !registryDigestSet.has(digest));
 }
 
 /**
@@ -62,66 +81,86 @@ export async function getVersionInfo(
   };
 }
 
-/**
- * Normalizes a Date to the start of day (midnight UTC).
- * This allows comparing dates without time components.
- */
-function toStartOfDay(date: Date): Date {
-  const d = new Date(date);
-  d.setUTCHours(0, 0, 0, 0);
-  return d;
+const KNOWN_BAD_PRODUCT_VERSIONS = new Set(["0.0.1"]);
+
+function isSingleNodeArchitecture(
+  architecture?: NodeArchitecture,
+): architecture is "amd64" | "arm64" {
+  return architecture === "amd64" || architecture === "arm64";
+}
+
+function supportsArchitecture(
+  tag: ImageTag,
+  architecture?: NodeArchitecture,
+): boolean {
+  if (!isSingleNodeArchitecture(architecture)) return true;
+  return tag.architectures.includes(architecture);
 }
 
 /**
- * Matches HPS versions to app versions based on release dates.
- * For each app version, finds the latest HPS version released on or before that date.
- * Compares dates only (ignoring time), so an HPS released later in the same day
- * as the app version will still be matched.
+ * Matches app versions to exact HPS server and worker versions.
  *
  * @param appTags - Array of app image tags
  * @param hpsTags - Array of HPS image tags
- * @returns Array of AppVersion with matched HPS versions
+ * @param hpsWorkerTags - Array of HPS worker image tags
+ * @returns Array of product versions with app, HPS, and worker images available
  */
-export function matchHpsVersions(
+export function matchExactHpsVersions(
   appTags: ImageTag[],
   hpsTags: ImageTag[],
+  hpsWorkerTags: ImageTag[],
+  architecture?: NodeArchitecture,
 ): AppVersion[] {
-  // Sort HPS tags by date descending for efficient matching
-  const sortedHpsTags = [...hpsTags].sort(
-    (a, b) => b.lastUpdated.getTime() - a.lastUpdated.getTime(),
+  const compatibleAppTags = appTags.filter((tag) =>
+    supportsArchitecture(tag, architecture),
+  );
+  const hpsByVersion = new Map(
+    hpsTags
+      .filter((tag) => supportsArchitecture(tag, architecture))
+      .map((tag) => [normalizeVersion(tag.name), tag]),
+  );
+  const workerByVersion = new Map(
+    hpsWorkerTags
+      .filter((tag) => supportsArchitecture(tag, architecture))
+      .map((tag) => [normalizeVersion(tag.name.replace(/^worker-/, "")), tag]),
   );
 
-  return appTags.map((appTag) => {
-    // Normalize app release date to start of day for comparison
-    const appDateStart = toStartOfDay(appTag.lastUpdated);
+  return compatibleAppTags
+    .flatMap((appTag) => {
+      const version = normalizeVersion(appTag.name);
+      if (KNOWN_BAD_PRODUCT_VERSIONS.has(version)) {
+        return [];
+      }
 
-    // Find the latest HPS version released on or before the app version's date
-    // Compare by date only (start of day), ignoring time
-    const matchedHps = sortedHpsTags.find(
-      (hpsTag) =>
-        toStartOfDay(hpsTag.lastUpdated).getTime() <= appDateStart.getTime(),
-    );
+      const matchedHps = hpsByVersion.get(version);
+      const matchedWorker = workerByVersion.get(version);
+      if (!matchedHps || !matchedWorker) {
+        return [];
+      }
 
-    return {
-      version: normalizeVersion(appTag.name),
-      releaseDate: appTag.lastUpdated.toISOString(),
-      hpsVersion: matchedHps ? normalizeVersion(matchedHps.name) : null,
-      digest: appTag.digest,
-    };
-  });
+      return {
+        version,
+        releaseDate: appTag.lastUpdated.toISOString(),
+        digest: appTag.digest,
+        hpsDigests: matchedHps.imageDigests,
+        hpsWorkerDigests: matchedWorker.imageDigests,
+      };
+    })
+    .sort((a, b) => compareVersions(b.version, a.version));
 }
 
 /**
- * Fetches app versions with matched HPS versions from Docker Hub
+ * Fetches product versions with app, HPS, and worker images from Docker Hub
  *
  * @param licenseKey - The Rulebricks license key (Docker PAT)
  * @returns Array of AppVersion objects
  */
 export async function fetchAppVersions(
   licenseKey: string,
+  architecture?: NodeArchitecture,
 ): Promise<AppVersion[]> {
-  const { appTags, hpsTags } = await fetchAllImageTags(licenseKey);
-  return matchHpsVersions(appTags, hpsTags);
+  const { appTags, hpsTags, hpsWorkerTags } = await fetchAllImageTags(licenseKey);
+  return matchExactHpsVersions(appTags, hpsTags, hpsWorkerTags, architecture);
 }
 
 /**
@@ -134,8 +173,9 @@ export async function fetchAppVersions(
 export async function getAppVersionInfo(
   licenseKey: string,
   currentAppVersion?: string | null,
+  architecture?: NodeArchitecture,
 ): Promise<AppVersionInfo> {
-  const available = await fetchAppVersions(licenseKey);
+  const available = await fetchAppVersions(licenseKey, architecture);
 
   const latest = available.length > 0 ? available[0] : null;
 

@@ -22,11 +22,5 @@ npm-debug.log*
 .env
 .env.local
 
-# Terraform state (local)
-*.tfstate
-*.tfstate.*
-.terraform/
-.terraform.lock.hcl
-
 # Test coverage
 coverage/

@@ -6,8 +6,13 @@ import { useWizard } from "../WizardContext.js";
 import { BorderBox, useTheme } from "../../common/index.js";
 import { Spinner } from "../../common/Spinner.js";
 import { fetchAppVersions, formatDate } from "../../../lib/versions.js";
-import { AppVersion, CHANGELOG_URL } from "../../../types/index.js";
+import {
+  AppVersion,
+  CHANGELOG_URL,
+  NodeArchitecture,
+} from "../../../types/index.js";
 import { formatVersionDisplay } from "../../../lib/dockerHub.js";
+import { inferClusterCapabilities } from "../../../lib/kubernetes.js";
 
 interface VersionStepProps {
   onComplete: () => void;
@@ -41,11 +46,50 @@ export function VersionStep({ onComplete, onBack }: VersionStepProps) {
     setLoadError(null);
 
     try {
-      const appVersions = await fetchAppVersions(licenseKey);
+      // The Tier step already scanned the cluster and stored its capabilities
+      // in wizard state; only re-scan when that didn't happen (e.g. the user
+      // skipped past a failed scan).
+      let architecture: NodeArchitecture | undefined;
+      if (
+        state.nodeArchitecture === "amd64" ||
+        state.nodeArchitecture === "arm64"
+      ) {
+        architecture = state.nodeArchitecture;
+      } else {
+        const capabilities = await inferClusterCapabilities();
+        if (capabilities) {
+          dispatch({
+            type: "SET_CLUSTER_CAPABILITIES",
+            nodeArchitecture: capabilities.nodeArchitecture,
+            arm64TolerationRequired: capabilities.arm64TolerationRequired,
+            storageClass: capabilities.storageClass,
+            storageProvisioner: capabilities.storageProvisioner,
+            schedulableNodeCount: capabilities.schedulableNodeCount,
+            totalCpuCores: capabilities.totalCpuCores,
+            totalMemoryGi: capabilities.totalMemoryGi,
+            eligibleCpuCores: capabilities.eligibleCpuCores,
+            eligibleMemoryGi: capabilities.eligibleMemoryGi,
+            totalPersistentStorageGi:
+              capabilities.totalPersistentStorageGi ?? 0,
+          });
+          if (
+            capabilities.nodeArchitecture === "amd64" ||
+            capabilities.nodeArchitecture === "arm64"
+          ) {
+            architecture = capabilities.nodeArchitecture;
+          }
+        }
+      }
+
+      const appVersions = await fetchAppVersions(licenseKey, architecture);
       setVersions(appVersions);
 
-      if (appVersions.length === 0) {
-        setLoadError("No versions found. Using latest.");
+      if (appVersions.length === 0 && architecture) {
+        setLoadError(
+          `No compatible Rulebricks version found for ${architecture} nodes.`,
+        );
+      } else if (appVersions.length === 0) {
+        setLoadError("No Rulebricks versions found.");
       }
 
       setSubStep("version");
@@ -82,14 +126,10 @@ export function VersionStep({ onComplete, onBack }: VersionStepProps) {
     loadVersions();
   };
 
-  const handleVersionSelect = (item: {
-    value: string;
-    hpsVersion?: string;
-  }) => {
+  const handleVersionSelect = (item: { value: string }) => {
     dispatch({
-      type: "SET_APP_VERSION",
-      appVersion: item.value,
-      hpsVersion: item.hpsVersion || item.value,
+      type: "SET_VERSION",
+      version: item.value,
     });
     onComplete();
   };
@@ -104,25 +144,16 @@ export function VersionStep({ onComplete, onBack }: VersionStepProps) {
         {
           label: `✨ Latest (${formatVersionDisplay(latestVersion.version)})`,
           value: latestVersion.version,
-          hpsVersion: latestVersion.hpsVersion || latestVersion.version,
           releaseDate: latestVersion.releaseDate,
         },
         // Skip the first version since it's shown as "Latest"
         ...versions.slice(1, 15).map((v) => ({
           label: formatVersionDisplay(v.version),
           value: v.version,
-          hpsVersion: v.hpsVersion || v.version,
           releaseDate: v.releaseDate,
         })),
       ]
-    : [
-        {
-          label: "✨ Latest (recommended)",
-          value: "latest",
-          hpsVersion: "latest",
-          releaseDate: null,
-        },
-      ];
+    : [];
 
   return (
     <BorderBox title="License & Version">
@@ -156,7 +187,7 @@ export function VersionStep({ onComplete, onBack }: VersionStepProps) {
 
       {subStep === "version" && (
         <Box flexDirection="column" marginY={1}>
-          <Text>Select app version to deploy:</Text>
+          <Text>Select Rulebricks version to deploy:</Text>
           {loadError && (
             <Text color={colors.warning} dimColor>
               ⚠ {loadError}
@@ -168,42 +199,40 @@ export function VersionStep({ onComplete, onBack }: VersionStepProps) {
             flexDirection="column"
             overflowY="hidden"
           >
-            <SelectInput
-              items={versionItems}
-              onSelect={handleVersionSelect}
-              limit={10}
-              indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => {
-                // Find the version item from the list using the label
-                const versionItem = versionItems.find((v) => v.label === label);
-                const hasHps =
-                  versionItem?.value &&
-                  versionItem?.hpsVersion &&
-                  versionItem.value !== "latest";
-                const hasDate = versionItem?.releaseDate;
+            {versionItems.length > 0 ? (
+              <SelectInput
+                items={versionItems}
+                onSelect={handleVersionSelect}
+                limit={10}
+                indicatorComponent={() => null}
+                itemComponent={({ isSelected, label }) => {
+                  // Find the version item from the list using the label
+                  const versionItem = versionItems.find(
+                    (v) => v.label === label,
+                  );
+                  const hasDate = versionItem?.releaseDate;
 
-                return (
-                  <Box>
-                    <Text color={isSelected ? colors.accent : undefined}>
-                      {isSelected ? "❯ " : "  "}
-                      {label}
-                    </Text>
-                    {hasDate && (
-                      <Text color={colors.muted}>
-                        {" "}
-                        ({formatDate(versionItem!.releaseDate!)})
+                  return (
+                    <Box>
+                      <Text color={isSelected ? colors.accent : undefined}>
+                        {isSelected ? "❯ " : "  "}
+                        {label}
                       </Text>
-                    )}
-                    {hasHps && (
-                      <Text color={colors.muted}>
-                        {"  "}Solver:{" "}
-                        {formatVersionDisplay(versionItem!.hpsVersion!)}
-                      </Text>
-                    )}
-                  </Box>
-                );
-              }}
-            />
+                      {hasDate && (
+                        <Text color={colors.muted}>
+                          {" "}
+                          ({formatDate(versionItem!.releaseDate!)})
+                        </Text>
+                      )}
+                    </Box>
+                  );
+                }}
+              />
+            ) : (
+              <Text color={colors.warning}>
+                No compatible image versions are available for this cluster.
+              </Text>
+            )}
           </Box>
           <Box marginTop={1}>
             <Text color={colors.success}>✓</Text>

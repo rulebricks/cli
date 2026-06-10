@@ -3,17 +3,37 @@ import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { useWizard } from '../WizardContext.js';
 import { BorderBox, useTheme } from '../../common/index.js';
-import { TIER_CONFIGS, DNS_PROVIDER_NAMES, LOGGING_SINK_INFO, isSupportedDnsProvider } from '../../../types/index.js';
+import { TIER_CONFIGS, DNS_PROVIDER_NAMES, CLOUD_PROVIDER_NAMES, LOGGING_SINK_INFO, isSupportedDnsProvider, KafkaPreset } from '../../../types/index.js';
 
 interface ReviewStepProps {
   onComplete: () => void;
   onBack: () => void;
+  allowEditName?: boolean;
 }
 
-export function ReviewStep({ onComplete, onBack }: ReviewStepProps) {
+function kafkaPresetLabel(preset: KafkaPreset | null): string {
+  switch (preset) {
+    case 'aws-msk-iam':
+      return 'AWS MSK IAM';
+    case 'azure-event-hubs':
+      return 'Azure Event Hubs';
+    case 'gcp-managed':
+      return 'GCP Managed Kafka';
+    case 'custom':
+      return 'custom';
+    default:
+      return 'not configured';
+  }
+}
+
+export function ReviewStep({
+  onComplete,
+  onBack,
+  allowEditName = true,
+}: ReviewStepProps) {
   const { state, dispatch } = useWizard();
   const { colors } = useTheme();
-  const [editingName, setEditingName] = useState(!state.name);
+  const [editingName, setEditingName] = useState(allowEditName && !state.name);
   const [name, setName] = useState(state.name || '');
   const [error, setError] = useState<string | null>(null);
   
@@ -26,7 +46,7 @@ export function ReviewStep({ onComplete, onBack }: ReviewStepProps) {
       if (state.name) {
         onComplete();
       }
-    } else if (input === 'e') {
+    } else if (allowEditName && input === 'e') {
       setEditingName(true);
     }
   });
@@ -49,14 +69,32 @@ export function ReviewStep({ onComplete, onBack }: ReviewStepProps) {
     setEditingName(false);
   };
   
-  const tierConfig = state.infrastructureMode !== 'existing' && state.tier ? TIER_CONFIGS[state.tier] : null;
-  const tierLabel =
-    state.infrastructureMode === 'existing'
-      ? 'Inferred from cluster'
-      : state.tier
-        ? `${state.tier.charAt(0).toUpperCase()}${state.tier.slice(1)}`
-        : 'Not selected';
+  const tierConfig = state.tier ? TIER_CONFIGS[state.tier] : null;
+  const tierLabel = state.tier
+    ? `${state.tier.charAt(0).toUpperCase()}${state.tier.slice(1)}`
+    : 'Not selected';
   const externalDnsEnabled = state.dnsAutoManage && isSupportedDnsProvider(state.dnsProvider);
+  const clusterCpuCores = state.eligibleCpuCores || Math.ceil(state.totalCpuCores);
+  const clusterMemoryGi = state.eligibleMemoryGi || Math.ceil(state.totalMemoryGi);
+  const storageValue = state.storageClass
+    ? state.totalPersistentStorageGi > 0
+      ? `${state.storageClass} (${Math.ceil(state.totalPersistentStorageGi)} Gi reported available)`
+      : `${state.storageClass} (dynamic PVC provisioning)`
+    : '';
+  const monitoringDestination =
+    state.metricsExportEnabled && state.prometheusRemoteWriteDestination
+      ? `Remote write: ${state.prometheusRemoteWriteDestination}`
+      : 'In-cluster Prometheus (no remote write)';
+  const storageAuthValue =
+    state.storageProvider === 's3'
+      ? state.storageAwsIamRoleArn || 'not configured'
+      : state.storageProvider === 'gcs'
+        ? state.storageGcpServiceAccountEmail || 'not configured'
+        : state.storageCloudAuthMode === 'secret'
+          ? `secret: ${state.storageAzureBlobConnectionStringSecretRef || 'not configured'}`
+          : state.storageAzureBlobClientId
+            ? `workload identity (${state.storageAzureBlobClientId})`
+            : 'workload identity';
   
   if (editingName) {
     return (
@@ -106,26 +144,33 @@ export function ReviewStep({ onComplete, onBack }: ReviewStepProps) {
       <Box flexDirection="column">
         <SectionHeader title="Deployment" />
         <ConfigRow label="Name" value={state.name} />
-        {state.appVersion && (
-          <ConfigRow label="App Version" value={state.appVersion} />
+        {state.version && (
+          <ConfigRow label="Version" value={state.version} />
         )}
         
         <SectionHeader title="Infrastructure" />
-        <ConfigRow 
-          label="Mode" 
-          value={state.infrastructureMode === 'provision' ? 'Provision new cluster' : 'Use existing cluster'} 
-        />
         {state.provider && (
-          <ConfigRow label="Provider" value={state.provider.toUpperCase()} />
+          <ConfigRow label="Provider" value={CLOUD_PROVIDER_NAMES[state.provider]} />
+        )}
+        {state.clusterName && (
+          <ConfigRow label="Cluster" value={state.clusterName} />
         )}
         {state.region && (
           <ConfigRow label="Region" value={state.region} />
+        )}
+        {state.azureResourceGroup && (
+          <ConfigRow label="Resource Group" value={state.azureResourceGroup} />
+        )}
+        {state.gcpProjectId && (
+          <ConfigRow label="GCP Project" value={state.gcpProjectId} />
         )}
         
         <SectionHeader title="Domain & DNS" />
         <ConfigRow label="Domain" value={state.domain} />
         <ConfigRow label="Admin Email" value={state.adminEmail} />
-        <ConfigRow label="TLS Email" value={state.tlsEmail} />
+        {state.tlsEmail && state.tlsEmail !== state.adminEmail && (
+          <ConfigRow label="TLS Email" value={state.tlsEmail} />
+        )}
         <Box>
           <Box width={16}>
             <Text color={colors.muted}>DNS</Text>
@@ -153,10 +198,105 @@ export function ReviewStep({ onComplete, onBack }: ReviewStepProps) {
             {tierLabel}
           </Text>
           {tierConfig && <Text color={colors.muted}> ({tierConfig.throughput})</Text>}
-          {state.infrastructureMode === 'existing' && (
-            <Text color={colors.muted}> (used for app sizing)</Text>
-          )}
+          <Text color={colors.muted}> (used for app sizing)</Text>
         </Box>
+        {state.totalCpuCores > 0 && (
+          <ConfigRow
+            label="Cluster"
+            value={`${state.schedulableNodeCount} nodes, ${clusterCpuCores} vCPU, ${clusterMemoryGi} Gi`}
+          />
+        )}
+        {tierConfig && (
+          <ConfigRow
+            label="Requires"
+            value={`${tierConfig.requirements.cpuCores} vCPU, ${tierConfig.requirements.memoryGi} Gi memory, ${tierConfig.requirements.persistentStorageGi} Gi persistent storage`}
+          />
+        )}
+        {state.storageClass && (
+          <ConfigRow label="Storage" value={storageValue} />
+        )}
+        {state.storageProvider && (
+          <>
+            <SectionHeader title="Object Storage" />
+            <ConfigRow
+              label="Bucket"
+              value={`${state.storageProvider} / ${state.storageBucket || 'not configured'}`}
+            />
+            {state.storageRegion && (
+              <ConfigRow label="Region" value={state.storageRegion} />
+            )}
+            {state.storageProvider === 'azure-blob' &&
+              state.storageAzureBlobContainer && (
+                <ConfigRow
+                  label="Container"
+                  value={state.storageAzureBlobContainer}
+                />
+              )}
+            <ConfigRow label="Auth" value={storageAuthValue} />
+            {state.backupEnabled && (
+              <ConfigRow
+                label="DB backups"
+                value={`${state.storageBucket || 'not configured'} / db-backups/`}
+              />
+            )}
+          </>
+        )}
+        {state.databaseType === 'self-hosted' && (
+          <>
+            <SectionHeader title="Backups" />
+            <ConfigRow
+              label="Database"
+              value={
+                state.backupEnabled
+                  ? `${state.backupSchedule} / ${state.backupRetentionDays} days`
+                  : 'Disabled'
+              }
+              valueColor={state.backupEnabled ? colors.success : colors.muted}
+            />
+          </>
+        )}
+
+        {(state.redisMode === 'external' || state.kafkaMode === 'external') && (
+          <>
+            <SectionHeader title="External Services" />
+            <ConfigRow
+              label="Redis"
+              value={
+                state.redisMode === 'external'
+                  ? `external (${state.redisHost || 'not configured'}${state.redisTls ? ', TLS' : ''})`
+                  : 'in-cluster'
+              }
+              valueColor={
+                state.redisMode === 'external' ? colors.success : colors.muted
+              }
+            />
+            <ConfigRow
+              label="Kafka"
+              value={
+                state.kafkaMode === 'external'
+                  ? `external (${kafkaPresetLabel(state.kafkaPreset)})`
+                  : 'in-cluster'
+              }
+              valueColor={
+                state.kafkaMode === 'external' ? colors.success : colors.muted
+              }
+            />
+            {state.kafkaMode === 'external' && (
+              <ConfigRow
+                label="Topic prefix"
+                value={state.kafkaTopicPrefix || '(none)'}
+              />
+            )}
+            {state.kafkaMode === 'external' &&
+              state.kafkaSaslMechanism === 'aws-iam' && (
+                <ConfigRow
+                  label="Vector"
+                  value="kafka-proxy bridge sidecar (MSK IAM)"
+                  valueColor={colors.muted}
+                />
+              )}
+          </>
+        )}
         
         <SectionHeader title="Features" />
         <Box>
@@ -168,14 +308,21 @@ export function ReviewStep({ onComplete, onBack }: ReviewStepProps) {
             {state.ssoEnabled ? '✓' : '○'} SSO
           </Text>
           <Text>  </Text>
-          <Text color={state.monitoringEnabled ? colors.success : colors.muted}>
-            {state.monitoringEnabled ? '✓' : '○'} Monitoring
-          </Text>
+          <Text color={colors.success}>✓ Monitoring</Text>
           <Text>  </Text>
           <Text color={state.loggingSink !== 'console' ? colors.success : colors.muted}>
             {state.loggingSink !== 'console' ? '✓' : '○'} Logging
           </Text>
         </Box>
+        <ConfigRow label="Monitoring" value={monitoringDestination} />
+        {state.loggingSink !== 'console' && (
+          <ConfigRow
+            label="Logging"
+            value={
+              LOGGING_SINK_INFO[state.loggingSink]?.name || state.loggingSink
+            }
+          />
+        )}
         
         <SectionHeader title="License" />
         <ConfigRow label="Key" value={`${state.licenseKey?.substring(0, 12)}...`} />
@@ -186,7 +333,7 @@ export function ReviewStep({ onComplete, onBack }: ReviewStepProps) {
           Press Enter to save this configuration
         </Text>
         <Text color={colors.muted} dimColor>
-          e to edit name • Esc to go back
+          {allowEditName ? 'e to edit name • ' : ''}Esc to go back
         </Text>
       </Box>
     </BorderBox>

@@ -131,6 +131,34 @@ export async function getInstalledVersion(
 }
 
 /**
+ * Gets the installed Helm chart version for a deployment.
+ */
+export async function getInstalledChartVersion(
+  releaseName: string,
+  namespace: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await execa(
+      "helm",
+      ["list", "-n", namespace, "-f", `^${releaseName}$`, "-o", "json"],
+      { timeout: 15000 },
+    );
+
+    const releases = JSON.parse(stdout) as Array<{
+      chart: string;
+    }>;
+
+    if (releases.length === 0) {
+      return null;
+    }
+
+    return releases[0].chart.split("-").pop() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Installs the Rulebricks Helm chart (use installOrUpgradeChart for idempotent operations)
  */
 export async function installChart(

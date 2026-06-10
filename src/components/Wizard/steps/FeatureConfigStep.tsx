@@ -8,20 +8,28 @@ import { Spinner } from "../../common/Spinner.js";
 import {
   SSOProvider,
   LoggingSink,
-  CloudLoggingAuthMode,
-  MonitoringDestination,
   RemoteWriteAuthType,
   RemoteWriteDestination,
-  LOGGING_SINK_INFO,
   CLOUD_REGIONS,
-  CloudProvider,
   DEFAULT_EMAIL_SUBJECTS,
 } from "../../../types/index.js";
-import { listBucketsInRegion, listRegions } from "../../../lib/cloudCli.js";
+import {
+  listRegions,
+  listAzureManagedIdentities,
+  getAzureTenantId,
+  listAzurePrometheusTargets,
+  listAwsPrometheusWorkspaces,
+  AzureManagedIdentity,
+  RemoteWriteTarget,
+} from "../../../lib/cloudCli.js";
+import { findClusterSetupDefaultIndex } from "../../../lib/clusterSetupDefaults.js";
 
 interface FeatureConfigStepProps {
   onComplete: () => void;
   onBack: () => void;
+  // When the user navigates *back* into this step from a later step, resume at
+  // the end of the configured sections instead of restarting from the top.
+  entryDirection?: "forward" | "back";
 }
 
 type SubStep =
@@ -30,32 +38,25 @@ type SubStep =
   | "sso-url"
   | "sso-client-id"
   | "sso-client-secret"
-  | "monitoring-remote-write-ask"
   | "monitoring-remote-write-destination"
   | "monitoring-remote-write-url"
+  | "monitoring-aws-region-loading"
   | "monitoring-aws-region"
-  | "monitoring-aws-role-arn"
+  | "monitoring-aws-workspace-loading"
+  | "monitoring-aws-workspace"
+  | "monitoring-azure-target-loading"
+  | "monitoring-azure-target"
   | "monitoring-remote-write-azure-auth"
   | "monitoring-remote-write-generic-auth"
+  | "monitoring-azure-identity-loading"
   | "monitoring-remote-write-client-id"
+  | "monitoring-remote-write-client-id-manual"
   | "monitoring-remote-write-tenant-id"
   | "monitoring-remote-write-secret-ref"
   | "monitoring-remote-write-username-secret-ref"
   | "monitoring-remote-write-password-secret-ref"
   | "monitoring-remote-write-bearer-secret-ref"
-  | "logging-category"
   | "logging-sink"
-  | "logging-region-loading"
-  | "logging-region"
-  | "logging-bucket-loading"
-  | "logging-bucket"
-  | "logging-s3-role-arn"
-  | "logging-azure-container"
-  | "logging-azure-auth"
-  | "logging-azure-client-id"
-  | "logging-azure-tenant-id"
-  | "logging-azure-connection-string-secret"
-  | "logging-gcp-service-account"
   // Platform-specific config steps
   | "logging-datadog-config"
   | "logging-splunk-config"
@@ -74,6 +75,10 @@ type SubStep =
   | "email-template-change"
   | "done";
 
+// Sentinel value used in select lists to drop into manual text entry.
+const MANUAL = "__manual__";
+const REFRESH = "__refresh__";
+
 const SSO_PROVIDERS = [
   { label: "Microsoft Azure AD", value: "azure" },
   { label: "Google Workspace", value: "google" },
@@ -83,20 +88,9 @@ const SSO_PROVIDERS = [
   { label: "Other OIDC Provider", value: "other" },
 ];
 
-const LOGGING_CATEGORIES = [
-  { label: "Cloud Storage (S3, Azure Blob, GCS)", value: "cloud-storage" },
-  {
-    label: "Logging Platform (Datadog, Splunk, etc.)",
-    value: "logging-platform",
-  },
-];
-
-const CLOUD_STORAGE_SINKS = [
-  { label: "AWS S3", value: "s3" },
-  { label: "Azure Blob Storage", value: "azure-blob" },
-  { label: "Google Cloud Storage", value: "gcs" },
-];
-
+// External logging forwards decision logs to a centralized logging platform.
+// Cloud object storage (S3/Blob/GCS) for decision logs is configured in the
+// dedicated Object Storage step, so it is intentionally not offered here.
 const LOGGING_PLATFORM_SINKS = [
   { label: "Datadog", value: "datadog" },
   { label: "Splunk (HEC)", value: "splunk" },
@@ -115,123 +109,17 @@ const DATADOG_SITES = [
   { label: "AP1 (ap1.datadoghq.com)", value: "ap1.datadoghq.com" },
 ];
 
-// Bucket selector sub-component with R key refresh
-interface BucketSelectorProps {
-  loggingSink: LoggingSink;
-  loggingRegion: string;
-  availableBuckets: string[];
-  isRefreshing: boolean;
-  onSelect: (item: { value: string }) => void;
-  onRefresh: () => void;
-  colors: { accent: string; success: string; muted: string };
-}
-
-function BucketSelector({
-  loggingSink,
-  loggingRegion,
-  availableBuckets,
-  isRefreshing,
-  onSelect,
-  onRefresh,
-  colors,
-}: BucketSelectorProps) {
-  useInput((input) => {
-    if (input.toLowerCase() === "r") {
-      onRefresh();
-    }
-  });
-
-  const bucketItems = availableBuckets.map((b) => ({ label: b, value: b }));
-  const hasBuckets = availableBuckets.length > 0;
-
-  return (
-    <Box flexDirection="column" marginY={1}>
-      <Text bold>
-        {loggingSink === "s3" && "Select S3 Bucket"}
-        {loggingSink === "azure-blob" && "Select Azure Storage Account"}
-        {loggingSink === "gcs" && "Select GCS Bucket"}
-      </Text>
-      <Text color="gray" dimColor>
-        Select an existing bucket in {loggingRegion}
-      </Text>
-
-      {isRefreshing ? (
-        <Box marginTop={1}>
-          <Spinner label="Refreshing bucket list..." />
-        </Box>
-      ) : hasBuckets ? (
-        <Box
-          marginTop={1}
-          height={10}
-          flexDirection="column"
-          overflowY="hidden"
-        >
-          <SelectInput
-            items={bucketItems}
-            onSelect={onSelect}
-            limit={8}
-            indicatorComponent={() => null}
-            itemComponent={({ isSelected, label }) => (
-              <Text color={isSelected ? colors.accent : undefined}>
-                {isSelected ? "❯ " : "  "}
-                {label}
-              </Text>
-            )}
-          />
-        </Box>
-      ) : (
-        <Box marginTop={1} flexDirection="column">
-          <Text color="yellow">No buckets found in {loggingRegion}.</Text>
-          <Text color="gray" dimColor>
-            Create a bucket in your cloud console, then press R to refresh.
-          </Text>
-        </Box>
-      )}
-
-      <Box marginTop={1} flexDirection="column">
-        <Box>
-          <Text color={colors.success}>✓</Text>
-          <Text color="gray">
-            {" "}
-            Sink: {LOGGING_SINK_INFO[loggingSink]?.name}
-          </Text>
-        </Box>
-        <Box>
-          <Text color={colors.success}>✓</Text>
-          <Text color="gray"> Region: {loggingRegion}</Text>
-        </Box>
-      </Box>
-
-      <Box marginTop={1}>
-        <Text color="gray" dimColor>
-          R to refresh list • ↑/↓ to navigate • Enter to select
-        </Text>
-      </Box>
-    </Box>
-  );
-}
-
-const MONITORING_DESTINATIONS = [
-  { label: "Local Grafana (bundled)", value: "local-grafana" },
+const REMOTE_WRITE_DESTINATIONS = [
   { label: "AWS Managed Prometheus (AMP)", value: "aws-amp" },
   { label: "Azure Monitor managed Prometheus", value: "azure-monitor" },
   { label: "Grafana Cloud", value: "grafana-cloud" },
   { label: "Generic Prometheus remote_write", value: "generic" },
 ];
 
-const REMOTE_WRITE_DESTINATIONS = MONITORING_DESTINATIONS.filter(
-  (destination) => destination.value !== "local-grafana",
-);
-
 const AZURE_REMOTE_WRITE_AUTH = [
   { label: "Workload identity", value: "workload-identity" },
   { label: "Managed identity", value: "managed-identity" },
   { label: "OAuth client secret", value: "oauth" },
-];
-
-const AZURE_LOGGING_AUTH = [
-  { label: "Workload identity", value: "workload-identity" },
-  { label: "Connection string Secret (fallback)", value: "secret" },
 ];
 
 const GENERIC_REMOTE_WRITE_AUTH = [
@@ -243,14 +131,17 @@ const GENERIC_REMOTE_WRITE_AUTH = [
 export function FeatureConfigStep({
   onComplete,
   onBack,
+  entryDirection,
 }: FeatureConfigStepProps) {
   const { state, dispatch } = useWizard();
   const { colors } = useTheme();
 
-  // Determine what needs to be configured
+  // Determine what needs to be configured. Metrics export (Prometheus
+  // remote_write) is opt-in via the Features step; in-cluster Prometheus is
+  // always installed and needs no configuration.
   const needsAI = state.aiEnabled && !state.openaiApiKey;
   const needsSSO = state.ssoEnabled;
-  const needsMonitoring = state.monitoringEnabled;
+  const needsMonitoring = state.metricsExportEnabled;
   const needsLogging = state.loggingSink !== "console";
   const needsCustomEmails = state.customEmailsEnabled;
 
@@ -258,13 +149,43 @@ export function FeatureConfigStep({
   const getInitialStep = (): SubStep => {
     if (needsAI) return "openai-key";
     if (needsSSO) return "sso-provider";
-    if (needsMonitoring) return "monitoring-remote-write-ask";
-    if (needsLogging) return "logging-category";
+    if (needsMonitoring) return "monitoring-remote-write-destination";
+    if (needsLogging) return "logging-sink";
     if (needsCustomEmails) return "email-subject-invite";
     return "done";
   };
 
-  const [subStep, setSubStep] = useState<SubStep>(getInitialStep);
+  // Terminal sub-step of the last enabled section. Used when navigating *back*
+  // into this step so the user resumes at the end instead of the very start.
+  const getFinalStep = (): SubStep => {
+    if (needsCustomEmails) return "email-template-change";
+    if (needsLogging) {
+      switch (state.loggingSink) {
+        case "datadog":
+          return "logging-datadog-config";
+        case "splunk":
+          return "logging-splunk-config";
+        case "elasticsearch":
+          return "logging-elasticsearch-config";
+        case "loki":
+          return "logging-loki-config";
+        case "newrelic":
+          return "logging-newrelic-config";
+        case "axiom":
+          return "logging-axiom-config";
+        default:
+          return "logging-sink";
+      }
+    }
+    if (needsMonitoring) return "monitoring-remote-write-destination";
+    if (needsSSO) return "sso-client-secret";
+    if (needsAI) return "openai-key";
+    return "done";
+  };
+
+  const [subStep, setSubStep] = useState<SubStep>(
+    entryDirection === "back" ? getFinalStep : getInitialStep,
+  );
   const [openaiKey, setOpenaiKey] = useState(state.openaiApiKey || "");
   const [ssoProvider, setSsoProvider] = useState<SSOProvider | null>(
     state.ssoProvider,
@@ -285,9 +206,6 @@ export function FeatureConfigStep({
     useState<RemoteWriteAuthType | null>(state.prometheusRemoteWriteAuthType);
   const [remoteWriteAwsRegion, setRemoteWriteAwsRegion] = useState(
     state.prometheusRemoteWriteAwsRegion || state.region || "us-east-1",
-  );
-  const [remoteWriteAwsRoleArn, setRemoteWriteAwsRoleArn] = useState(
-    state.prometheusRemoteWriteAwsRoleArn || "",
   );
   const [remoteWriteAzureCloud] = useState<
     "AzurePublic" | "AzureChina" | "AzureGovernment"
@@ -311,34 +229,6 @@ export function FeatureConfigStep({
   const [loggingSink, setLoggingSink] = useState<LoggingSink>(
     state.loggingSink,
   );
-  const [loggingBucket, setLoggingBucket] = useState(state.loggingBucket || "");
-  const [loggingRegion, setLoggingRegion] = useState(state.loggingRegion || "");
-  const [loggingCloudAuthMode, setLoggingCloudAuthMode] =
-    useState<CloudLoggingAuthMode>(
-      state.loggingCloudAuthMode || "workload-identity",
-    );
-  const [s3RoleArn, setS3RoleArn] = useState(
-    state.loggingAwsIamRoleArn || "",
-  );
-  const [azureBlobContainer, setAzureBlobContainer] = useState(
-    state.loggingAzureBlobContainer || "rulebricks-logs",
-  );
-  const [azureBlobClientId, setAzureBlobClientId] = useState(
-    state.loggingAzureBlobClientId || "",
-  );
-  const [azureBlobTenantId, setAzureBlobTenantId] = useState(
-    state.loggingAzureBlobTenantId || "",
-  );
-  const [
-    azureBlobConnectionStringSecretRef,
-    setAzureBlobConnectionStringSecretRef,
-  ] = useState(state.loggingAzureBlobConnectionStringSecretRef || "");
-  const [gcpServiceAccountEmail, setGcpServiceAccountEmail] = useState(
-    state.loggingGcpServiceAccountEmail || "",
-  );
-  const [loggingCategory, setLoggingCategory] = useState<
-    "cloud-storage" | "logging-platform" | null
-  >(null);
   const [error, setError] = useState<string | null>(null);
 
   // Logging platform config
@@ -357,10 +247,20 @@ export function FeatureConfigStep({
   const [axiomApiToken, setAxiomApiToken] = useState("");
   const [axiomDataset, setAxiomDataset] = useState("rulebricks");
 
-  // Dynamic bucket/region lists
-  const [availableBuckets, setAvailableBuckets] = useState<string[]>([]);
-  const [availableRegions, setAvailableRegions] = useState<string[]>([]);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  // Dynamic resource lists for remote-write identity selection.
+  const [rwRegions, setRwRegions] = useState<string[]>([]);
+  const [rwIdentities, setRwIdentities] = useState<AzureManagedIdentity[]>([]);
+  const [rwTargets, setRwTargets] = useState<RemoteWriteTarget[]>([]);
+
+  // Only offer the managed-Prometheus option for the cluster's own cloud (no
+  // AWS Managed Prometheus on an Azure cluster, etc.); Grafana Cloud and generic
+  // remote_write stay available everywhere.
+  const remoteWriteDestinations = REMOTE_WRITE_DESTINATIONS.filter((d) => {
+    if (d.value === "aws-amp") return state.provider === "aws";
+    if (d.value === "azure-monitor") return state.provider === "azure";
+    return true;
+  });
+  const [rwTenantAutoDetected, setRwTenantAutoDetected] = useState(false);
 
   // Custom email templates
   const [emailSubjectInvite, setEmailSubjectInvite] = useState(
@@ -427,33 +327,49 @@ export function FeatureConfigStep({
       case "sso-client-secret":
         setSubStep("sso-client-id");
         break;
-      case "monitoring-remote-write-ask":
+      case "monitoring-remote-write-destination":
         if (needsSSO) setSubStep("sso-client-secret");
         else if (needsAI) setSubStep("openai-key");
         else onBack();
         break;
-      case "monitoring-remote-write-destination":
-        setSubStep("monitoring-remote-write-ask");
-        break;
-      case "monitoring-remote-write-url":
+      case "monitoring-azure-target-loading":
+      case "monitoring-azure-target":
+      case "monitoring-aws-region-loading":
+      case "monitoring-aws-region":
+        // Azure target discovery and AWS region both branch directly off the
+        // destination choice.
         setSubStep("monitoring-remote-write-destination");
         break;
-      case "monitoring-aws-region":
-        setSubStep("monitoring-remote-write-url");
-        break;
-      case "monitoring-aws-role-arn":
+      case "monitoring-aws-workspace-loading":
+      case "monitoring-aws-workspace":
         setSubStep("monitoring-aws-region");
         break;
+      case "monitoring-remote-write-url":
+        // The manual-URL fallback is reached from the discovery picker.
+        if (remoteWriteDestination === "azure-monitor") {
+          setSubStep("monitoring-azure-target");
+        } else if (remoteWriteDestination === "aws-amp") {
+          setSubStep("monitoring-aws-workspace");
+        } else {
+          setSubStep("monitoring-remote-write-destination");
+        }
+        break;
       case "monitoring-remote-write-azure-auth":
+        setSubStep("monitoring-azure-target");
+        break;
       case "monitoring-remote-write-generic-auth":
         setSubStep("monitoring-remote-write-url");
         break;
+      case "monitoring-azure-identity-loading":
       case "monitoring-remote-write-client-id":
         if (remoteWriteDestination === "azure-monitor") {
           setSubStep("monitoring-remote-write-azure-auth");
         } else {
           setSubStep("monitoring-remote-write-url");
         }
+        break;
+      case "monitoring-remote-write-client-id-manual":
+        setSubStep("monitoring-remote-write-client-id");
         break;
       case "monitoring-remote-write-tenant-id":
         setSubStep("monitoring-remote-write-client-id");
@@ -478,43 +394,11 @@ export function FeatureConfigStep({
       case "monitoring-remote-write-bearer-secret-ref":
         setSubStep("monitoring-remote-write-generic-auth");
         break;
-      case "logging-category":
-        if (needsMonitoring) setSubStep("monitoring-remote-write-ask");
+      case "logging-sink":
+        if (needsMonitoring) setSubStep("monitoring-remote-write-destination");
         else if (needsSSO) setSubStep("sso-client-secret");
         else if (needsAI) setSubStep("openai-key");
         else onBack();
-        break;
-      case "logging-sink":
-        setSubStep("logging-category");
-        break;
-      case "logging-region":
-      case "logging-region-loading":
-        setSubStep("logging-sink");
-        break;
-      case "logging-bucket":
-      case "logging-bucket-loading":
-        setSubStep("logging-region");
-        break;
-      case "logging-s3-role-arn":
-        setSubStep("logging-bucket");
-        break;
-      case "logging-azure-container":
-        setSubStep("logging-bucket");
-        break;
-      case "logging-azure-auth":
-        setSubStep("logging-azure-container");
-        break;
-      case "logging-azure-client-id":
-        setSubStep("logging-azure-auth");
-        break;
-      case "logging-azure-tenant-id":
-        setSubStep("logging-azure-client-id");
-        break;
-      case "logging-azure-connection-string-secret":
-        setSubStep("logging-azure-auth");
-        break;
-      case "logging-gcp-service-account":
-        setSubStep("logging-bucket");
         break;
       // Logging platform config steps
       case "logging-datadog-config":
@@ -527,8 +411,9 @@ export function FeatureConfigStep({
         break;
       // Email template steps
       case "email-subject-invite":
-        if (needsLogging) setSubStep("logging-category");
-        else if (needsMonitoring) setSubStep("monitoring-remote-write-ask");
+        if (needsLogging) setSubStep("logging-sink");
+        else if (needsMonitoring)
+          setSubStep("monitoring-remote-write-destination");
         else if (needsSSO) setSubStep("sso-client-secret");
         else if (needsAI) setSubStep("openai-key");
         else onBack();
@@ -561,22 +446,21 @@ export function FeatureConfigStep({
     switch (from) {
       case "openai-key":
         if (needsSSO) setSubStep("sso-provider");
-        else if (needsMonitoring) setSubStep("monitoring-remote-write-ask");
-        else if (needsLogging) setSubStep("logging-category");
+        else if (needsMonitoring)
+          setSubStep("monitoring-remote-write-destination");
+        else if (needsLogging) setSubStep("logging-sink");
         else if (needsCustomEmails) setSubStep("email-subject-invite");
         else onComplete();
         break;
       case "sso-client-secret":
-        if (needsMonitoring) setSubStep("monitoring-remote-write-ask");
-        else if (needsLogging) setSubStep("logging-category");
+        if (needsMonitoring) setSubStep("monitoring-remote-write-destination");
+        else if (needsLogging) setSubStep("logging-sink");
         else if (needsCustomEmails) setSubStep("email-subject-invite");
         else onComplete();
         break;
-      case "monitoring-remote-write-ask":
       case "monitoring-remote-write-destination":
       case "monitoring-remote-write-url":
       case "monitoring-aws-region":
-      case "monitoring-aws-role-arn":
       case "monitoring-remote-write-azure-auth":
       case "monitoring-remote-write-generic-auth":
       case "monitoring-remote-write-client-id":
@@ -585,17 +469,8 @@ export function FeatureConfigStep({
       case "monitoring-remote-write-username-secret-ref":
       case "monitoring-remote-write-password-secret-ref":
       case "monitoring-remote-write-bearer-secret-ref":
-        if (needsLogging) setSubStep("logging-category");
+        if (needsLogging) setSubStep("logging-sink");
         else if (needsCustomEmails) setSubStep("email-subject-invite");
-        else onComplete();
-        break;
-      case "logging-bucket":
-      case "logging-s3-role-arn":
-      case "logging-azure-tenant-id":
-      case "logging-azure-connection-string-secret":
-      case "logging-gcp-service-account":
-        // Cloud storage config complete, check for custom emails
-        if (needsCustomEmails) setSubStep("email-subject-invite");
         else onComplete();
         break;
       case "logging-datadog-config":
@@ -688,27 +563,6 @@ export function FeatureConfigStep({
   };
 
   // === Monitoring Configuration ===
-  const handleRemoteWriteAsk = (item: { value: string }) => {
-    const destination = item.value as MonitoringDestination;
-
-    if (destination === "local-grafana") {
-      setRemoteWriteDestination(null);
-      dispatch({ type: "SET_PROMETHEUS_REMOTE_WRITE", url: "" });
-      dispatch({
-        type: "SET_PROMETHEUS_REMOTE_WRITE_CONFIG",
-        config: {
-          prometheusMonitoringDestination: "local-grafana",
-          prometheusRemoteWriteDestination: null,
-          prometheusRemoteWriteAuthType: null,
-        },
-      });
-      advanceToNext("monitoring-remote-write-ask");
-      return;
-    }
-
-    handleRemoteWriteDestinationSelect({ value: destination });
-  };
-
   const handleRemoteWriteDestinationSelect = (item: { value: string }) => {
     const destination = item.value as RemoteWriteDestination;
     setRemoteWriteDestination(destination);
@@ -720,23 +574,110 @@ export function FeatureConfigStep({
         prometheusRemoteWriteDestination: destination,
       },
     });
-    setSubStep("monitoring-remote-write-url");
+    // Auto-discover the remote_write URL where we can, so the user selects an
+    // existing target instead of hand-building a URL. Manual entry stays available.
+    if (destination === "azure-monitor") {
+      loadAzureTargets();
+    } else if (destination === "aws-amp") {
+      loadAwsRegions();
+    } else {
+      setSubStep("monitoring-remote-write-url");
+    }
+  };
+
+  // Azure Monitor: discover Data Collection Rules that ingest Prometheus metrics
+  // and pre-assemble each remote_write URL.
+  const loadAzureTargets = async () => {
+    setSubStep("monitoring-azure-target-loading");
+    try {
+      setRwTargets(await listAzurePrometheusTargets());
+    } catch {
+      setRwTargets([]);
+    }
+    setSubStep("monitoring-azure-target");
+  };
+
+  const handleAzureTargetSelect = (item: { value: string }) => {
+    if (item.value === REFRESH) {
+      loadAzureTargets();
+      return;
+    }
+    if (item.value === MANUAL) {
+      setSubStep("monitoring-remote-write-url");
+      return;
+    }
+    setRemoteWriteUrl(item.value);
+    dispatch({ type: "SET_PROMETHEUS_REMOTE_WRITE", url: item.value });
+    setError(null);
+    setSubStep("monitoring-remote-write-azure-auth");
+  };
+
+  // AWS Managed Prometheus: discover workspaces in the chosen region and
+  // pre-assemble each remote_write URL.
+  const loadAwsWorkspaces = async (region: string) => {
+    setSubStep("monitoring-aws-workspace-loading");
+    try {
+      setRwTargets(await listAwsPrometheusWorkspaces(region));
+    } catch {
+      setRwTargets([]);
+    }
+    setSubStep("monitoring-aws-workspace");
+  };
+
+  const handleAwsWorkspaceSelect = (item: { value: string }) => {
+    if (item.value === REFRESH) {
+      loadAwsWorkspaces(remoteWriteAwsRegion);
+      return;
+    }
+    if (item.value === MANUAL) {
+      setSubStep("monitoring-remote-write-url");
+      return;
+    }
+    setRemoteWriteUrl(item.value);
+    dispatch({ type: "SET_PROMETHEUS_REMOTE_WRITE", url: item.value });
+    setError(null);
+    saveAwsAmpConfig("");
   };
 
   const handleRemoteWriteUrlSubmit = () => {
-    if (remoteWriteUrl) {
-      try {
-        new URL(remoteWriteUrl);
-      } catch {
-        setError("Invalid URL format");
-        return;
-      }
+    if (!remoteWriteUrl) {
+      setError(
+        "Remote write URL is required. If you don't have a destination yet, go back and disable Metrics Export.",
+      );
+      return;
+    }
+
+    try {
+      new URL(remoteWriteUrl);
+    } catch {
+      setError("Invalid URL format");
+      return;
+    }
+    // Azure Monitor needs the full DCE metrics-ingestion path, not the bare DCE
+    // host. Catch it here so the user gets immediate feedback instead of a
+    // failure at save time.
+    if (
+      remoteWriteDestination === "azure-monitor" &&
+      !(
+        remoteWriteUrl.includes("/dataCollectionRules/") &&
+        remoteWriteUrl.includes("/streams/") &&
+        remoteWriteUrl.includes("/api/v1/write")
+      )
+    ) {
+      setError(
+        "Azure Monitor needs the full ingestion URL, e.g.\n" +
+          "https://<dce>.<region>.metrics.ingest.monitor.azure.com/dataCollectionRules/<dcrImmutableId>/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24\n" +
+          "(the data collection endpoint host alone won't work).",
+      );
+      return;
     }
     setError(null);
     dispatch({ type: "SET_PROMETHEUS_REMOTE_WRITE", url: remoteWriteUrl });
 
     if (remoteWriteDestination === "aws-amp") {
-      setSubStep("monitoring-aws-region");
+      // Region was already chosen before this manual-URL fallback (it's reached
+      // from the workspace picker), so save directly.
+      saveAwsAmpConfig("");
     } else if (remoteWriteDestination === "azure-monitor") {
       setSubStep("monitoring-remote-write-azure-auth");
     } else if (remoteWriteDestination === "grafana-cloud") {
@@ -753,20 +694,26 @@ export function FeatureConfigStep({
     }
   };
 
-  const handleAwsRemoteWriteRegionSubmit = () => {
-    if (!remoteWriteAwsRegion) {
-      setError("AWS region is required");
-      return;
+  // AWS Managed Prometheus: pick region then IRSA role from CLI-backed lists.
+  const loadAwsRegions = async () => {
+    setSubStep("monitoring-aws-region-loading");
+    try {
+      const regions = await listRegions("aws");
+      setRwRegions(regions.length > 0 ? regions : CLOUD_REGIONS.aws);
+    } catch {
+      setRwRegions(CLOUD_REGIONS.aws);
     }
-    setError(null);
-    setSubStep("monitoring-aws-role-arn");
+    setSubStep("monitoring-aws-region");
   };
 
-  const handleAwsRemoteWriteRoleArnSubmit = () => {
-    if (remoteWriteAwsRoleArn && !remoteWriteAwsRoleArn.startsWith("arn:")) {
-      setError("Enter a valid IAM role ARN or leave blank");
-      return;
-    }
+  const handleAwsRegionSelect = (item: { value: string }) => {
+    setRemoteWriteAwsRegion(item.value);
+    // Discover AMP workspaces in this region; the role is the single Rulebricks
+    // role from the Storage step (reused at assembly), so there's no role prompt.
+    loadAwsWorkspaces(item.value);
+  };
+
+  const saveAwsAmpConfig = (roleArn: string) => {
     dispatch({
       type: "SET_PROMETHEUS_REMOTE_WRITE_CONFIG",
       config: {
@@ -774,11 +721,11 @@ export function FeatureConfigStep({
         prometheusMonitoringDestination: "aws-amp",
         prometheusRemoteWriteAuthType: "none",
         prometheusRemoteWriteAwsRegion: remoteWriteAwsRegion,
-        prometheusRemoteWriteAwsRoleArn: remoteWriteAwsRoleArn,
+        prometheusRemoteWriteAwsRoleArn: roleArn,
       },
     });
     setError(null);
-    advanceToNext("monitoring-aws-role-arn");
+    advanceToNext("monitoring-aws-region");
   };
 
   const saveRemoteWriteConfig = (
@@ -829,7 +776,56 @@ export function FeatureConfigStep({
       type: "SET_PROMETHEUS_REMOTE_WRITE_CONFIG",
       config: { prometheusRemoteWriteAuthType: authType },
     });
+    // Workload/managed identity reuse the single Rulebricks identity chosen in
+    // the Storage step (filled in during config assembly), so there's no second
+    // identity to pick here. Only OAuth needs its own app-registration credentials.
+    if (authType === "workload-identity" || authType === "managed-identity") {
+      saveRemoteWriteConfig(authType);
+      return;
+    }
+    loadAzureIdentitiesForRemoteWrite();
+  };
+
+  // Azure Monitor: pick the managed/workload identity client ID from a list and
+  // auto-fill the tenant ID from the active Azure CLI session.
+  const loadAzureIdentitiesForRemoteWrite = async () => {
+    setSubStep("monitoring-azure-identity-loading");
+    try {
+      const [identities, tenant] = await Promise.all([
+        listAzureManagedIdentities(),
+        remoteWriteTenantId
+          ? Promise.resolve<string | null>(null)
+          : getAzureTenantId(),
+      ]);
+      setRwIdentities(identities);
+      if (tenant) {
+        setRemoteWriteTenantId(tenant);
+        setRwTenantAutoDetected(true);
+      }
+    } catch {
+      setRwIdentities([]);
+    }
     setSubStep("monitoring-remote-write-client-id");
+  };
+
+  const proceedAfterClientId = () => {
+    if (remoteWriteAuthType === "managed-identity") {
+      saveRemoteWriteConfig("managed-identity", {
+        clientId: remoteWriteClientId,
+      });
+      return;
+    }
+    setError(null);
+    setSubStep("monitoring-remote-write-tenant-id");
+  };
+
+  const handleRemoteWriteClientIdSelect = (item: { value: string }) => {
+    if (item.value === MANUAL) {
+      setSubStep("monitoring-remote-write-client-id-manual");
+      return;
+    }
+    setRemoteWriteClientId(item.value);
+    proceedAfterClientId();
   };
 
   const handleGenericRemoteWriteAuthSelect = (item: { value: string }) => {
@@ -850,16 +846,7 @@ export function FeatureConfigStep({
       setError("Client ID is required");
       return;
     }
-
-    if (remoteWriteAuthType === "managed-identity") {
-      saveRemoteWriteConfig("managed-identity", {
-        clientId: remoteWriteClientId,
-      });
-      return;
-    }
-
-    setError(null);
-    setSubStep("monitoring-remote-write-tenant-id");
+    proceedAfterClientId();
   };
 
   const handleRemoteWriteTenantIdSubmit = () => {
@@ -922,247 +909,32 @@ export function FeatureConfigStep({
     });
   };
 
-  // === Logging Configuration ===
-
-  // Map logging sink to cloud provider
-  const sinkToProvider = (sink: LoggingSink): CloudProvider | null => {
-    if (sink === "s3") return "aws";
-    if (sink === "azure-blob") return "azure";
-    if (sink === "gcs") return "gcp";
-    return null;
-  };
-
-  // Is sink a cloud storage type?
-  const isCloudStorageSink = (sink: LoggingSink): boolean => {
-    return sink === "s3" || sink === "azure-blob" || sink === "gcs";
-  };
-
-  // Step 1: Select logging category
-  const handleLoggingCategorySelect = (item: { value: string }) => {
-    const category = item.value as "cloud-storage" | "logging-platform";
-    setLoggingCategory(category);
-    setSubStep("logging-sink");
-  };
-
-  // Step 2: Select logging sink based on category
-  const handleLoggingSinkSelect = async (item: { value: string }) => {
+  // === Logging Configuration (external logging platforms) ===
+  const handleLoggingSinkSelect = (item: { value: string }) => {
     const sink = item.value as LoggingSink;
     setLoggingSink(sink);
     dispatch({ type: "SET_LOGGING_SINK", sink });
 
-    if (isCloudStorageSink(sink)) {
-      // Cloud storage: go to region selection
-      loadRegionsForLogging(sink);
-    } else {
-      // Logging platform: go to platform-specific config
-      switch (sink) {
-        case "datadog":
-          setSubStep("logging-datadog-config");
-          break;
-        case "splunk":
-          setSubStep("logging-splunk-config");
-          break;
-        case "elasticsearch":
-          setSubStep("logging-elasticsearch-config");
-          break;
-        case "loki":
-          setSubStep("logging-loki-config");
-          break;
-        case "newrelic":
-          setSubStep("logging-newrelic-config");
-          break;
-        case "axiom":
-          setSubStep("logging-axiom-config");
-          break;
-      }
+    switch (sink) {
+      case "datadog":
+        setSubStep("logging-datadog-config");
+        break;
+      case "splunk":
+        setSubStep("logging-splunk-config");
+        break;
+      case "elasticsearch":
+        setSubStep("logging-elasticsearch-config");
+        break;
+      case "loki":
+        setSubStep("logging-loki-config");
+        break;
+      case "newrelic":
+        setSubStep("logging-newrelic-config");
+        break;
+      case "axiom":
+        setSubStep("logging-axiom-config");
+        break;
     }
-  };
-
-  // Load regions for cloud storage
-  const loadRegionsForLogging = async (sink: LoggingSink) => {
-    const provider = sinkToProvider(sink);
-    if (!provider) {
-      setSubStep("logging-region");
-      return;
-    }
-
-    setSubStep("logging-region-loading");
-    try {
-      const regions = await listRegions(provider);
-      if (regions.length > 0) {
-        setAvailableRegions(regions);
-      } else {
-        setAvailableRegions(CLOUD_REGIONS[provider]);
-      }
-    } catch {
-      setAvailableRegions(CLOUD_REGIONS[provider]);
-    }
-    setSubStep("logging-region");
-  };
-
-  // After region is selected, load buckets in that region
-  const handleLoggingRegionSelect = async (item: { value: string }) => {
-    setLoggingRegion(item.value);
-    dispatch({
-      type: "SET_LOGGING_CONFIG",
-      config: { loggingRegion: item.value },
-    });
-
-    // Now load buckets in this region
-    const provider = sinkToProvider(loggingSink);
-    if (provider) {
-      setSubStep("logging-bucket-loading");
-      try {
-        const buckets = await listBucketsInRegion(provider, item.value);
-        setAvailableBuckets(buckets);
-      } catch {
-        setAvailableBuckets([]);
-      }
-    }
-    setSubStep("logging-bucket");
-  };
-
-  // Refresh bucket list
-  const refreshBuckets = async () => {
-    if (isRefreshing) return;
-
-    const provider = sinkToProvider(loggingSink);
-    if (!provider || !loggingRegion) return;
-
-    setIsRefreshing(true);
-    try {
-      const buckets = await listBucketsInRegion(provider, loggingRegion);
-      setAvailableBuckets(buckets);
-    } catch {
-      // Keep existing list on error
-    }
-    setIsRefreshing(false);
-  };
-
-  // Select bucket (no create option)
-  const handleLoggingBucketSelect = (item: { value: string }) => {
-    setLoggingBucket(item.value);
-    dispatch({
-      type: "SET_LOGGING_CONFIG",
-      config: { loggingBucket: item.value },
-    });
-    if (loggingSink === "s3") {
-      setSubStep("logging-s3-role-arn");
-      return;
-    }
-    if (loggingSink === "azure-blob") {
-      setSubStep("logging-azure-container");
-      return;
-    }
-    if (loggingSink === "gcs") {
-      setSubStep("logging-gcp-service-account");
-      return;
-    }
-    advanceToNext("logging-bucket");
-  };
-
-  const handleS3RoleArnSubmit = () => {
-    if (!s3RoleArn.startsWith("arn:")) {
-      setError("IAM role ARN is required for S3 IRSA");
-      return;
-    }
-    setError(null);
-    dispatch({
-      type: "SET_LOGGING_CONFIG",
-      config: {
-        loggingCloudAuthMode: "workload-identity",
-        loggingAwsIamRoleArn: s3RoleArn,
-      },
-    });
-    advanceToNext("logging-s3-role-arn");
-  };
-
-  const handleAzureBlobContainerSubmit = () => {
-    if (!azureBlobContainer) {
-      setError("Azure Blob container name is required");
-      return;
-    }
-    setError(null);
-    dispatch({
-      type: "SET_LOGGING_CONFIG",
-      config: { loggingAzureBlobContainer: azureBlobContainer },
-    });
-    setSubStep("logging-azure-auth");
-  };
-
-  const handleAzureBlobAuthSelect = (item: { value: string }) => {
-    const authMode = item.value as CloudLoggingAuthMode;
-    setLoggingCloudAuthMode(authMode);
-    dispatch({
-      type: "SET_LOGGING_CONFIG",
-      config: { loggingCloudAuthMode: authMode },
-    });
-    setSubStep(
-      authMode === "workload-identity"
-        ? "logging-azure-client-id"
-        : "logging-azure-connection-string-secret",
-    );
-  };
-
-  const handleAzureBlobClientIdSubmit = () => {
-    if (!azureBlobClientId) {
-      setError("Managed identity client ID is required");
-      return;
-    }
-    setError(null);
-    setSubStep("logging-azure-tenant-id");
-  };
-
-  const handleAzureBlobTenantIdSubmit = () => {
-    if (!azureBlobTenantId) {
-      setError("Azure tenant ID is required");
-      return;
-    }
-    setError(null);
-    dispatch({
-      type: "SET_LOGGING_CONFIG",
-      config: {
-        loggingCloudAuthMode: "workload-identity",
-        loggingAzureBlobContainer: azureBlobContainer,
-        loggingAzureBlobClientId: azureBlobClientId,
-        loggingAzureBlobTenantId: azureBlobTenantId,
-      },
-    });
-    advanceToNext("logging-azure-tenant-id");
-  };
-
-  const handleAzureBlobConnectionStringSecretSubmit = () => {
-    if (!azureBlobConnectionStringSecretRef.includes(":")) {
-      setError("Use secret-name:key format");
-      return;
-    }
-    setError(null);
-    dispatch({
-      type: "SET_LOGGING_CONFIG",
-      config: {
-        loggingAzureBlobContainer: azureBlobContainer,
-        loggingCloudAuthMode: "secret",
-        loggingAzureBlobConnectionStringSecretRef:
-          azureBlobConnectionStringSecretRef,
-      },
-    });
-    advanceToNext("logging-azure-connection-string-secret");
-  };
-
-  const handleGcpServiceAccountSubmit = () => {
-    if (!gcpServiceAccountEmail.includes("@")) {
-      setError("Google service account email is required");
-      return;
-    }
-    setError(null);
-    dispatch({
-      type: "SET_LOGGING_CONFIG",
-      config: {
-        loggingCloudAuthMode: "workload-identity",
-        loggingGcpServiceAccountEmail: gcpServiceAccountEmail,
-      },
-    });
-    advanceToNext("logging-gcp-service-account");
   };
 
   // === Logging Platform Config Handlers ===
@@ -1395,23 +1167,6 @@ export function FeatureConfigStep({
     advanceToNext("email-template-change");
   };
 
-  // Build bucket items for selection (no create option - just existing buckets)
-  const getBucketItems = (): Array<{ label: string; value: string }> => {
-    return availableBuckets.map((b) => ({ label: b, value: b }));
-  };
-
-  // Get regions based on logging sink (use dynamic regions if available)
-  const getLoggingRegions = (): Array<{ label: string; value: string }> => {
-    if (availableRegions.length > 0) {
-      return availableRegions.map((r) => ({ label: r, value: r }));
-    }
-
-    const provider = sinkToProvider(loggingSink);
-    if (!provider) return [];
-
-    return CLOUD_REGIONS[provider].map((r) => ({ label: r, value: r }));
-  };
-
   // If nothing to configure, don't render
   if (
     !needsAI &&
@@ -1422,6 +1177,20 @@ export function FeatureConfigStep({
   ) {
     return null;
   }
+
+  // Shared list item renderer (matches the wizard's other select lists).
+  const selectItem = ({
+    isSelected,
+    label,
+  }: {
+    isSelected?: boolean;
+    label: string;
+  }) => (
+    <Text color={isSelected ? colors.accent : undefined}>
+      {isSelected ? "❯ " : "  "}
+      {label}
+    </Text>
+  );
 
   // Progress summary
   const ProgressSummary = () => (
@@ -1581,29 +1350,6 @@ export function FeatureConfigStep({
       )}
 
       {/* Monitoring Configuration */}
-      {subStep === "monitoring-remote-write-ask" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>Monitoring Destination</Text>
-          <Text color="gray" dimColor>
-            Choose where Prometheus metrics should be viewed or sent.
-          </Text>
-          <Box marginTop={1}>
-            <SelectInput
-              items={MONITORING_DESTINATIONS}
-              onSelect={handleRemoteWriteAsk}
-              indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "❯ " : "  "}
-                  {label}
-                </Text>
-              )}
-            />
-          </Box>
-          <ProgressSummary />
-        </Box>
-      )}
-
       {subStep === "monitoring-remote-write-url" && (
         <Box flexDirection="column" marginY={1}>
           <Text bold>Remote Write URL</Text>
@@ -1628,61 +1374,159 @@ export function FeatureConfigStep({
         </Box>
       )}
 
+      {subStep === "monitoring-aws-region-loading" && (
+        <Box flexDirection="column" marginY={1}>
+          <Spinner label="Loading AWS regions..." />
+        </Box>
+      )}
+
       {subStep === "monitoring-aws-region" && (
         <Box flexDirection="column" marginY={1}>
           <Text bold>AWS Managed Prometheus Region</Text>
           <Text color="gray" dimColor>
-            Region used for SigV4 signing.
+            Region of your AMP workspace (defaults to your cluster region).
           </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={remoteWriteAwsRegion}
-              onChange={setRemoteWriteAwsRegion}
-              onSubmit={handleAwsRemoteWriteRegionSubmit}
-              placeholder="us-east-1"
+          <Box marginTop={1} height={10} flexDirection="column" overflowY="hidden">
+            <SelectInput
+              items={rwRegions.map((r) => ({ label: r, value: r }))}
+              onSelect={handleAwsRegionSelect}
+              limit={8}
+              initialIndex={Math.max(0, rwRegions.indexOf(remoteWriteAwsRegion))}
+              indicatorComponent={() => null}
+              itemComponent={selectItem}
             />
           </Box>
           <ProgressSummary />
         </Box>
       )}
 
-      {subStep === "monitoring-aws-role-arn" && (
+      {subStep === "monitoring-aws-workspace-loading" && (
         <Box flexDirection="column" marginY={1}>
-          <Text bold>Prometheus IRSA Role ARN</Text>
+          <Spinner label="Discovering AMP workspaces..." />
+        </Box>
+      )}
+
+      {subStep === "monitoring-aws-workspace" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Select AMP Workspace</Text>
           <Text color="gray" dimColor>
-            Optional. If provided, the Prometheus service account will be
-            annotated with this role.
+            Choose the workspace your Rulebricks role can write to. cluster-setup
+            creates {`${state.clusterName || "<cluster>"}-amp`} and grants
+            aps:RemoteWrite on it.
           </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={remoteWriteAwsRoleArn}
-              onChange={setRemoteWriteAwsRoleArn}
-              onSubmit={handleAwsRemoteWriteRoleArnSubmit}
-              placeholder="arn:aws:iam::123456789012:role/rulebricks-prometheus"
-            />
-          </Box>
+          {rwTargets.length === 0 && (
+            <Box marginTop={1}>
+              <Text color="yellow">
+                None found in {remoteWriteAwsRegion}. Refresh after creating one,
+                or enter a URL manually.
+              </Text>
+            </Box>
+          )}
+          {(() => {
+            const recommendedPrefix = `${state.clusterName || ""}-amp`.toLowerCase();
+            const isRec = (name: string) =>
+              recommendedPrefix !== "-amp" &&
+              name.toLowerCase().startsWith(recommendedPrefix);
+            const sorted = [...rwTargets].sort((a, b) => {
+              return (
+                (isRec(a.name) ? 0 : 1) - (isRec(b.name) ? 0 : 1) ||
+                a.name.localeCompare(b.name)
+              );
+            });
+            return (
+              <Box marginTop={1} height={10} flexDirection="column" overflowY="hidden">
+                <SelectInput
+                  items={[
+                    ...sorted.map((t) => ({
+                      label: isRec(t.name) ? `${t.name}  — recommended` : t.name,
+                      value: t.url,
+                    })),
+                    { label: "↻ Refresh list", value: REFRESH },
+                    { label: "Enter URL manually…", value: MANUAL },
+                  ]}
+                  onSelect={handleAwsWorkspaceSelect}
+                  limit={8}
+                  indicatorComponent={() => null}
+                  itemComponent={selectItem}
+                />
+              </Box>
+            );
+          })()}
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-azure-target-loading" && (
+        <Box flexDirection="column" marginY={1}>
+          <Spinner label="Discovering Azure Monitor data collection rules..." />
+        </Box>
+      )}
+
+      {subStep === "monitoring-azure-target" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Select Azure Monitor target</Text>
+          <Text color="gray" dimColor>
+            Choose the Data Collection Rule your Rulebricks identity can publish
+            to. cluster-setup grants that on {`${state.clusterName || "<cluster>"}-dcr`};
+            the workspace's auto-created {`${state.clusterName || "<cluster>"}-amw`} rule
+            usually lacks the publish role.
+          </Text>
+          {rwTargets.length === 0 && (
+            <Box marginTop={1}>
+              <Text color="yellow">
+                None found. Refresh after creating a Prometheus DCR/DCE, or enter
+                a URL manually.
+              </Text>
+            </Box>
+          )}
+          {(() => {
+            // Recommend the cluster-setup DCR (<cluster>-dcr) -- the one granted
+            // Monitoring Metrics Publisher -- and list it first.
+            const recommendedName = `${state.clusterName || ""}-dcr`.toLowerCase();
+            const sorted = [...rwTargets].sort((a, b) => {
+              const aRec = a.name.toLowerCase() === recommendedName ? 0 : 1;
+              const bRec = b.name.toLowerCase() === recommendedName ? 0 : 1;
+              return aRec - bRec || a.name.localeCompare(b.name);
+            });
+            return (
+              <Box marginTop={1} height={10} flexDirection="column" overflowY="hidden">
+                <SelectInput
+                  items={[
+                    ...sorted.map((t) => ({
+                      label:
+                        t.name.toLowerCase() === recommendedName
+                          ? `${t.name}  — recommended`
+                          : t.name,
+                      value: t.url,
+                    })),
+                    { label: "↻ Refresh list", value: REFRESH },
+                    { label: "Enter URL manually…", value: MANUAL },
+                  ]}
+                  onSelect={handleAzureTargetSelect}
+                  limit={8}
+                  indicatorComponent={() => null}
+                  itemComponent={selectItem}
+                />
+              </Box>
+            );
+          })()}
           <ProgressSummary />
         </Box>
       )}
 
       {subStep === "monitoring-remote-write-destination" && (
         <Box flexDirection="column" marginY={1}>
-          <Text bold>Remote Write Destination</Text>
+          <Text bold>Metrics Export Destination</Text>
           <Text color="gray" dimColor>
-            Select the monitoring backend so required auth fields can be
-            collected.
+            Select the backend to send Prometheus metrics to so required auth
+            fields can be collected.
           </Text>
           <Box marginTop={1}>
             <SelectInput
-              items={REMOTE_WRITE_DESTINATIONS}
+              items={remoteWriteDestinations}
               onSelect={handleRemoteWriteDestinationSelect}
               indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "❯ " : "  "}
-                  {label}
-                </Text>
-              )}
+              itemComponent={selectItem}
             />
           </Box>
           <ProgressSummary />
@@ -1703,12 +1547,7 @@ export function FeatureConfigStep({
               items={AZURE_REMOTE_WRITE_AUTH}
               onSelect={handleAzureRemoteWriteAuthSelect}
               indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "❯ " : "  "}
-                  {label}
-                </Text>
-              )}
+              itemComponent={selectItem}
             />
           </Box>
           <ProgressSummary />
@@ -1726,19 +1565,54 @@ export function FeatureConfigStep({
               items={GENERIC_REMOTE_WRITE_AUTH}
               onSelect={handleGenericRemoteWriteAuthSelect}
               indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "❯ " : "  "}
-                  {label}
-                </Text>
-              )}
+              itemComponent={selectItem}
             />
           </Box>
           <ProgressSummary />
         </Box>
       )}
 
+      {subStep === "monitoring-azure-identity-loading" && (
+        <Box flexDirection="column" marginY={1}>
+          <Spinner label="Loading managed identities..." />
+        </Box>
+      )}
+
       {subStep === "monitoring-remote-write-client-id" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Azure Identity</Text>
+          <Text color="gray" dimColor>
+            Select the managed/workload identity for remote_write, or enter a
+            client ID manually.
+          </Text>
+          <Box marginTop={1} height={10} flexDirection="column" overflowY="hidden">
+            <SelectInput
+              items={[
+                ...rwIdentities.map((i) => ({
+                  label: `${i.name} (${i.clientId})`,
+                  value: i.clientId,
+                })),
+                { label: "Enter manually…", value: MANUAL },
+              ]}
+              onSelect={handleRemoteWriteClientIdSelect}
+              limit={8}
+              initialIndex={Math.max(
+                0,
+                findClusterSetupDefaultIndex(
+                  rwIdentities.map((i) => i.name),
+                  "metrics-identity",
+                  { provider: "azure", clusterName: state.clusterName },
+                ),
+              )}
+              indicatorComponent={() => null}
+              itemComponent={selectItem}
+            />
+          </Box>
+          <ProgressSummary />
+        </Box>
+      )}
+
+      {subStep === "monitoring-remote-write-client-id-manual" && (
         <Box flexDirection="column" marginY={1}>
           <Text bold>Azure Client ID</Text>
           <Text color="gray" dimColor>
@@ -1761,7 +1635,9 @@ export function FeatureConfigStep({
         <Box flexDirection="column" marginY={1}>
           <Text bold>Azure Tenant ID</Text>
           <Text color="gray" dimColor>
-            Required for workload identity and OAuth client-secret auth.
+            {rwTenantAutoDetected
+              ? "Auto-detected from your Azure CLI session — edit if needed."
+              : "Required for workload identity and OAuth client-secret auth."}
           </Text>
           <Box marginTop={1}>
             <TextInput
@@ -1849,281 +1725,24 @@ export function FeatureConfigStep({
         </Box>
       )}
 
-      {/* Logging Configuration */}
-      {subStep === "logging-category" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>External Logging Destination</Text>
-          <Text color="gray" dimColor>
-            Choose how you want to store decision logs (Console logging is
-            always included)
-          </Text>
-          <Box marginTop={1}>
-            <SelectInput
-              items={LOGGING_CATEGORIES}
-              onSelect={handleLoggingCategorySelect}
-              indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "❯ " : "  "}
-                  {label}
-                </Text>
-              )}
-            />
-          </Box>
-          <ProgressSummary />
-        </Box>
-      )}
-
+      {/* Logging Configuration (external logging platforms) */}
       {subStep === "logging-sink" && (
         <Box flexDirection="column" marginY={1}>
-          <Text bold>
-            {loggingCategory === "cloud-storage"
-              ? "Select Cloud Storage"
-              : "Select Logging Platform"}
-          </Text>
+          <Text bold>Additional Log Forwarding</Text>
           <Text color="gray" dimColor>
-            {loggingCategory === "cloud-storage"
-              ? "Store logs in cloud object storage"
-              : "Send logs to a centralized logging platform"}
+            Optional: forward a copy of logs to a third-party logging platform.
+            Decision logs are always archived to your object storage (configured
+            in the Object Storage step); this is an additional destination.
           </Text>
           <Box marginTop={1}>
             <SelectInput
-              items={
-                loggingCategory === "cloud-storage"
-                  ? CLOUD_STORAGE_SINKS
-                  : LOGGING_PLATFORM_SINKS
-              }
+              items={LOGGING_PLATFORM_SINKS}
               onSelect={handleLoggingSinkSelect}
               indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "❯ " : "  "}
-                  {label}
-                </Text>
-              )}
+              itemComponent={selectItem}
             />
           </Box>
-          {state.infrastructureMode === "existing" &&
-            loggingCategory === "cloud-storage" && (
-              <Box
-                marginTop={1}
-                borderStyle="round"
-                borderColor="yellow"
-                paddingX={1}
-              >
-                <Text color="yellow">
-                  Note: Cloud storage requires IRSA/Workload Identity in your
-                  cluster.
-                </Text>
-              </Box>
-            )}
           <ProgressSummary />
-        </Box>
-      )}
-
-      {subStep === "logging-region-loading" && (
-        <Box flexDirection="column" marginY={1}>
-          <Spinner label="Loading available regions..." />
-        </Box>
-      )}
-
-      {subStep === "logging-region" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>
-            {loggingSink === "s3" && "Select AWS Region"}
-            {loggingSink === "azure-blob" && "Select Azure Region"}
-            {loggingSink === "gcs" && "Select GCP Region"}
-          </Text>
-          <Text color="gray" dimColor>
-            Select the region where logs will be stored
-          </Text>
-          <Box
-            marginTop={1}
-            height={10}
-            flexDirection="column"
-            overflowY="hidden"
-          >
-            <SelectInput
-              items={getLoggingRegions()}
-              onSelect={handleLoggingRegionSelect}
-              limit={8}
-              indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "❯ " : "  "}
-                  {label}
-                </Text>
-              )}
-            />
-          </Box>
-          <Box marginTop={1}>
-            <Text color={colors.success}>✓</Text>
-            <Text color="gray">
-              {" "}
-              Sink: {LOGGING_SINK_INFO[loggingSink]?.name}
-            </Text>
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "logging-bucket-loading" && (
-        <Box flexDirection="column" marginY={1}>
-          <Spinner label={`Loading buckets in ${loggingRegion}...`} />
-        </Box>
-      )}
-
-      {subStep === "logging-bucket" && (
-        <BucketSelector
-          loggingSink={loggingSink}
-          loggingRegion={loggingRegion}
-          availableBuckets={availableBuckets}
-          isRefreshing={isRefreshing}
-          onSelect={handleLoggingBucketSelect}
-          onRefresh={refreshBuckets}
-          colors={colors}
-        />
-      )}
-
-      {subStep === "logging-s3-role-arn" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>Vector S3 IRSA Role ARN</Text>
-          <Text color="gray" dimColor>
-            IAM role trusted by the Vector Kubernetes service account.
-          </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={s3RoleArn}
-              onChange={setS3RoleArn}
-              onSubmit={handleS3RoleArnSubmit}
-              placeholder="arn:aws:iam::123456789012:role/rulebricks-vector"
-            />
-          </Box>
-          <Box marginTop={1}>
-            <Text color={colors.success}>✓ S3 bucket: {loggingBucket}</Text>
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "logging-azure-container" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>Azure Blob Container</Text>
-          <Text color="gray" dimColor>
-            Enter the container where Rulebricks decision logs should be
-            written.
-          </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={azureBlobContainer}
-              onChange={setAzureBlobContainer}
-              onSubmit={handleAzureBlobContainerSubmit}
-              placeholder="rulebricks-logs"
-            />
-          </Box>
-          <Box marginTop={1} flexDirection="column">
-            <Text color={colors.success}>✓ Storage account: {loggingBucket}</Text>
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "logging-azure-auth" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>Azure Blob Authentication</Text>
-          <Text color="gray" dimColor>
-            Workload identity is recommended. Connection string Secret is a
-            fallback for clusters without Azure Workload Identity.
-          </Text>
-          <Box marginTop={1}>
-            <SelectInput
-              items={AZURE_LOGGING_AUTH}
-              onSelect={handleAzureBlobAuthSelect}
-              indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "❯ " : "  "}
-                  {label}
-                </Text>
-              )}
-            />
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "logging-azure-client-id" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>Azure Managed Identity Client ID</Text>
-          <Text color="gray" dimColor>
-            Client ID for the identity federated to Vector's service account.
-          </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={azureBlobClientId}
-              onChange={setAzureBlobClientId}
-              onSubmit={handleAzureBlobClientIdSubmit}
-              placeholder="00000000-0000-0000-0000-000000000000"
-            />
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "logging-azure-tenant-id" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>Azure Tenant ID</Text>
-          <Text color="gray" dimColor>
-            Tenant ID used by Azure Workload Identity.
-          </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={azureBlobTenantId}
-              onChange={setAzureBlobTenantId}
-              onSubmit={handleAzureBlobTenantIdSubmit}
-              placeholder="00000000-0000-0000-0000-000000000000"
-            />
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "logging-azure-connection-string-secret" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>Azure Storage Connection String Secret</Text>
-          <Text color="gray" dimColor>
-            Enter an existing Kubernetes Secret key in the format name:key.
-          </Text>
-          <Text color="gray" dimColor>
-            The key should contain the Azure Storage connection string.
-          </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={azureBlobConnectionStringSecretRef}
-              onChange={setAzureBlobConnectionStringSecretRef}
-              onSubmit={handleAzureBlobConnectionStringSecretSubmit}
-              placeholder="azure-blob-logs:connection-string"
-            />
-          </Box>
-          <Box marginTop={1} flexDirection="column">
-            <Text color={colors.success}>✓ Storage account: {loggingBucket}</Text>
-            <Text color={colors.success}>✓ Container: {azureBlobContainer}</Text>
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "logging-gcp-service-account" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>Google Service Account Email</Text>
-          <Text color="gray" dimColor>
-            GSA bound to the Vector Kubernetes service account through GKE
-            Workload Identity.
-          </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={gcpServiceAccountEmail}
-              onChange={setGcpServiceAccountEmail}
-              onSubmit={handleGcpServiceAccountSubmit}
-              placeholder="rulebricks-vector@project.iam.gserviceaccount.com"
-            />
-          </Box>
-          <Box marginTop={1}>
-            <Text color={colors.success}>✓ GCS bucket: {loggingBucket}</Text>
-          </Box>
         </Box>
       )}
 
@@ -2156,12 +1775,7 @@ export function FeatureConfigStep({
               )}
               onSelect={(item) => setDatadogSite(item.value)}
               indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "❯ " : "  "}
-                  {label}
-                </Text>
-              )}
+              itemComponent={selectItem}
             />
           </Box>
 

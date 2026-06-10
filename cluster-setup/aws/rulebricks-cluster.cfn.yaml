@@ -1,0 +1,273 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Rulebricks EKS cluster, turnkey. Stands up an EKS cluster with a managed node
+  group and a single IAM role + S3 bucket for all Rulebricks data:
+    decision logs -> s3://<cluster>-data/decision-logs/  (Vector)        SA: vector
+    backups       -> s3://<cluster>-data/db-backups/      (backup job)   SA: <ns>-backup
+    metrics       -> AMP  (Prometheus remote write)                      SA: prometheus
+  Identity uses EKS Pod Identity (AWS's recommended mechanism for new clusters):
+  one IAM role with scoped policies. The namespace-scoped Pod Identity
+  associations binding vector/backup/prometheus to this role are created by the
+  Rulebricks CLI at deploy time, so this stack stays deployment-independent and
+  one cluster can host many deployments. eksctl alone cannot create the S3 bucket
+  or AMP workspace, so the full picture lives here in one stack.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: rulebricks-cluster
+  KubernetesVersion:
+    Type: String
+    Default: "1.34"
+  NodeInstanceType:
+    Type: String
+    Default: c7i.xlarge
+  NodeDesiredCapacity:
+    Type: Number
+    Default: 2
+  NodeMinSize:
+    Type: Number
+    Default: 2
+  NodeMaxSize:
+    Type: Number
+    Default: 4
+  NodeVolumeSizeGiB:
+    Type: Number
+    Default: 50
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Networking (minimal: VPC + 2 public subnets across 2 AZs + IGW + routing)
+  # ---------------------------------------------------------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-vpc" }
+        - { Key: Environment, Value: rulebricks }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.0.0.0/19
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-subnet-a" }
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.0.32.0/19
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-subnet-b" }
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref RouteTable
+
+  SubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref RouteTable
+
+  # ---------------------------------------------------------------------------
+  # Cluster + node group IAM roles
+  # ---------------------------------------------------------------------------
+  ClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: eks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEBSCSIDriverPolicy
+
+  # ---------------------------------------------------------------------------
+  # EKS cluster
+  # ---------------------------------------------------------------------------
+  Cluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref KubernetesVersion
+      RoleArn: !GetAtt ClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !Ref SubnetA
+          - !Ref SubnetB
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: true
+
+  # Pod Identity agent add-on: required for PodIdentityAssociation to work.
+  PodIdentityAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      ClusterName: !Ref Cluster
+      AddonName: eks-pod-identity-agent
+
+  EbsCsiAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      ClusterName: !Ref Cluster
+      AddonName: aws-ebs-csi-driver
+
+  NodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref Cluster
+      NodegroupName: standard-nodes
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      InstanceTypes:
+        - !Ref NodeInstanceType
+      AmiType: AL2023_x86_64_STANDARD # c7i = Intel/x86
+      DiskSize: !Ref NodeVolumeSizeGiB
+      ScalingConfig:
+        DesiredSize: !Ref NodeDesiredCapacity
+        MinSize: !Ref NodeMinSize
+        MaxSize: !Ref NodeMaxSize
+
+  # ---------------------------------------------------------------------------
+  # OBJECT STORAGE (all Rulebricks data)
+  # One bucket holds everything; decision logs and backups are key prefixes
+  # (decision-logs/ and db-backups/) within it.
+  # ---------------------------------------------------------------------------
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ClusterName}-data-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+
+  # ---------------------------------------------------------------------------
+  # METRICS (Amazon Managed Service for Prometheus workspace)
+  # ---------------------------------------------------------------------------
+  PrometheusWorkspace:
+    Type: AWS::APS::Workspace
+    Properties:
+      Alias: !Sub "${ClusterName}-amp"
+
+  # ---------------------------------------------------------------------------
+  # RULEBRICKS ROLE (single role for all data paths)
+  # Trusts the EKS Pod Identity service principal. The Rulebricks CLI creates the
+  # namespace-scoped Pod Identity associations (vector/backup/prometheus) at
+  # deploy time. Grants S3 read/write on the one data bucket and aps:RemoteWrite
+  # on the AMP workspace.
+  # ---------------------------------------------------------------------------
+  RulebricksRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-rulebricks"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: pods.eks.amazonaws.com }
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: rulebricks-s3-data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DataBucket.Arn
+                  - !Sub "${DataBucket.Arn}/*"
+        - PolicyName: rulebricks-amp-remote-write
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aps:RemoteWrite
+                Resource:
+                  - !GetAtt PrometheusWorkspace.Arn
+
+  # Pod Identity associations (vector / backup / prometheus) are namespace-scoped,
+  # so the Rulebricks CLI creates them at `rulebricks deploy` time. This stack
+  # only provisions the deployment-independent role, bucket, and AMP workspace,
+  # so one cluster can host many deployments.
+
+Outputs:
+  ClusterName:
+    Value: !Ref Cluster
+  KubeconfigCommand:
+    Value: !Sub "aws eks update-kubeconfig --name ${ClusterName} --region ${AWS::Region}"
+  DataBucketName:
+    Value: !Ref DataBucket
+  RulebricksRoleArn:
+    Value: !GetAtt RulebricksRole.Arn
+  PrometheusWorkspaceId:
+    Value: !Ref PrometheusWorkspace
+  PrometheusRemoteWriteUrl:
+    Description: Set as Prometheus remote_write url (append /api/v1/remote_write).
+    Value: !GetAtt PrometheusWorkspace.PrometheusEndpoint

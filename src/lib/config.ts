@@ -54,6 +54,113 @@ export async function deploymentExists(name: string): Promise<boolean> {
   }
 }
 
+function migrateStorageConfig(parsed: any): void {
+  if (!parsed || typeof parsed !== "object") return;
+
+  // Collapse the older per-purpose storage shape (separate decisionLogs/dbBackups
+  // buckets, containers, and identities) into a single bucket/container with key
+  // prefixes. The decision-logs location is treated as canonical; the dbBackups
+  // path becomes a prefix in the same bucket/container.
+  const storage = parsed.storage;
+  if (storage && typeof storage === "object" && storage.decisionLogs) {
+    const dl = storage.decisionLogs || {};
+    const db = storage.dbBackups || {};
+    parsed.storage = {
+      provider: storage.provider,
+      cloudAuthMode: storage.cloudAuthMode,
+      bucket: dl.bucket ?? db.bucket,
+      region: dl.region ?? db.region,
+      awsIamRoleArn: storage.awsIamRoleArn,
+      azureBlobClientId: storage.azureBlobClientId,
+      azureBlobTenantId: storage.azureBlobTenantId,
+      azureBlobConnectionStringSecretRef:
+        storage.azureBlobConnectionStringSecretRef,
+      azureBlobContainer: dl.azureBlobContainer ?? db.azureBlobContainer,
+      gcpServiceAccountEmail: storage.gcpServiceAccountEmail,
+      paths: {
+        decisionLogs: dl.path || "decision-logs",
+        dbBackups: db.path || "db-backups",
+      },
+    };
+  }
+
+  if (parsed.features?.decisionLogQuery) {
+    delete parsed.features.decisionLogQuery;
+  }
+}
+
+export function resolveDeploymentConfigVersion(
+  parsed: Record<string, unknown>,
+  values?: { global?: { version?: unknown } },
+  state?: { version?: unknown; application?: { version?: unknown } },
+): string {
+  if (typeof values?.global?.version === "string" && values.global.version) {
+    return values.global.version;
+  }
+
+  if (
+    typeof state?.application?.version === "string" &&
+    state.application.version
+  ) {
+    return state.application.version;
+  }
+
+  if (typeof state?.version === "string" && state.version) {
+    return state.version;
+  }
+
+  if (typeof parsed.chartVersion === "string" && parsed.chartVersion) {
+    return parsed.chartVersion;
+  }
+
+  return "latest";
+}
+
+async function inferMissingVersion(
+  name: string,
+  parsed: Record<string, unknown>,
+): Promise<string> {
+  const dir = getDeploymentDir(name);
+  let values: { global?: { version?: unknown } } | undefined;
+  let state:
+    | { version?: unknown; application?: { version?: unknown } }
+    | undefined;
+
+  try {
+    const valuesContent = await fs.readFile(path.join(dir, "values.yaml"), "utf-8");
+    values = yaml.parse(valuesContent) as {
+      global?: { version?: unknown };
+    };
+  } catch {
+    // values.yaml is optional for config-only deployments.
+  }
+
+  try {
+    const stateContent = await fs.readFile(path.join(dir, "state.yaml"), "utf-8");
+    state = yaml.parse(stateContent) as {
+      version?: unknown;
+      application?: { version?: unknown };
+    };
+  } catch {
+    // state.yaml may not exist yet.
+  }
+
+  return resolveDeploymentConfigVersion(parsed, values, state);
+}
+
+async function migrateConfig(
+  name: string,
+  parsed: unknown,
+): Promise<void> {
+  if (!parsed || typeof parsed !== "object") return;
+  const config = parsed as Record<string, unknown>;
+  migrateStorageConfig(config);
+
+  if (typeof config.version !== "string" || !config.version) {
+    config.version = await inferMissingVersion(name, config);
+  }
+}
+
 /**
  * Saves a deployment configuration
  */
@@ -76,12 +183,26 @@ export async function loadDeploymentConfig(
   const configPath = path.join(getDeploymentDir(name), "config.yaml");
   const content = await fs.readFile(configPath, "utf-8");
   const parsed = yaml.parse(content);
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    "infrastructure" in parsed &&
+    parsed.infrastructure &&
+    typeof parsed.infrastructure === "object" &&
+    "mode" in parsed.infrastructure &&
+    parsed.infrastructure.mode === "provision"
+  ) {
+    throw new Error(
+      `Deployment "${name}" was created with CLI-managed infrastructure, which is no longer supported. Use an existing Kubernetes cluster and create a new deployment config.`,
+    );
+  }
+  await migrateConfig(name, parsed);
   return DeploymentConfigSchema.parse(parsed);
 }
 
 /**
- * Clones a deployment configuration to a new name
- * Only copies config.yaml with the new name - state and terraform are not copied
+ * Clones a deployment configuration to a new name.
+ * Only copies config.yaml with the new name - state is not copied.
  */
 export async function cloneDeploymentConfig(
   sourceName: string,
@@ -163,40 +284,6 @@ export function getHelmValuesPath(name: string): string {
 }
 
 /**
- * Saves Terraform variables
- */
-export async function saveTerraformVars(
-  name: string,
-  vars: Record<string, unknown>,
-): Promise<string> {
-  const dir = path.join(getDeploymentDir(name), "terraform");
-  await fs.mkdir(dir, { recursive: true });
-
-  // Convert to HCL-compatible format
-  let content = "";
-  for (const [key, value] of Object.entries(vars)) {
-    if (typeof value === "string") {
-      content += `${key} = "${value}"\n`;
-    } else if (typeof value === "number" || typeof value === "boolean") {
-      content += `${key} = ${value}\n`;
-    } else {
-      content += `${key} = ${JSON.stringify(value)}\n`;
-    }
-  }
-
-  const varsPath = path.join(dir, "terraform.tfvars");
-  await fs.writeFile(varsPath, content, "utf-8");
-  return varsPath;
-}
-
-/**
- * Gets the Terraform working directory
- */
-export function getTerraformDir(name: string): string {
-  return path.join(getDeploymentDir(name), "terraform");
-}
-
-/**
  * Deletes a deployment and all its files
  */
 export async function deleteDeployment(name: string): Promise<void> {
@@ -259,6 +346,7 @@ export async function loadProfile(): Promise<ProfileConfig | null> {
   try {
     const content = await fs.readFile(profilePath, "utf-8");
     const data = yaml.parse(content);
+    migrateStorageConfig(data);
     return ProfileConfigSchema.parse(data);
   } catch {
     return null;
@@ -292,7 +380,6 @@ export function extractProfileFromConfig(
     provider: config.infrastructure.provider,
     region: config.infrastructure.region,
     clusterName: config.infrastructure.clusterName,
-    infrastructureMode: config.infrastructure.mode,
 
     // Domain - store suffix for suggesting new domains
     domainSuffix: extractDomainSuffix(config.domain),
@@ -315,6 +402,7 @@ export function extractProfileFromConfig(
     // Preferences
     tier: config.tier,
     databaseType: config.database.type,
+    storage: config.storage,
 
     // SSO
     ssoProvider: config.features.sso.provider,

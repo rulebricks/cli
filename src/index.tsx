@@ -7,14 +7,19 @@ import chalk from "chalk";
 
 import { InitWizard } from "./commands/init.js";
 import { DeployCommand } from "./commands/deploy.js";
+import { RedeployCommand } from "./commands/redeploy.js";
 import { UpgradeCommand } from "./commands/upgrade.js";
 import { DestroyCommand } from "./commands/destroy.js";
 import { StatusCommand } from "./commands/status.js";
+import { ListCommand } from "./commands/list.js";
 import { LogsCommand } from "./commands/logs.js";
 import { CloneCommand } from "./commands/clone.js";
 import { OpenCommand } from "./commands/open.js";
 import { BenchmarkCommand } from "./commands/benchmark.js";
+import { BackupCommand } from "./commands/backup.js";
+import { RestoreCommand } from "./commands/restore.js";
 import { listDeployments, deploymentExists } from "./lib/config.js";
+import { DeploymentPicker } from "./components/common/DeploymentPicker.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version: string };
@@ -55,13 +60,13 @@ program
   .command("deploy")
   .description("Deploy Rulebricks to your cluster")
   .argument("[name]", "Deployment name")
-  .option("--skip-infra", "Skip infrastructure provisioning")
-  .option("--version <version>", "Specific chart version to deploy")
+  .option("--chart-version <version>", "Specific chart version to deploy")
+  .option("--version <version>", "Deprecated alias for --chart-version")
   .action(async (name, options) => {
-    const deploymentName = name || (await selectDeployment());
+    const deploymentName = name || (await selectDeployment("deploy"));
     if (!deploymentName) {
       console.error(
-        chalk.red('No deployment specified. Run "rulebricks init" first.'),
+        chalk.red('No deployments found. Run "rulebricks init" first.'),
       );
       process.exit(1);
     }
@@ -69,8 +74,31 @@ program
     const { waitUntilExit } = render(
       <DeployCommand
         name={deploymentName}
-        skipInfra={options.skipInfra}
-        version={options.version}
+        version={options.chartVersion || options.version}
+      />,
+    );
+    await waitUntilExit();
+  });
+
+// Redeploy command
+program
+  .command("redeploy")
+  .description("Reconfigure and redeploy an existing Rulebricks deployment")
+  .argument("[name]", "Deployment name")
+  .option("--chart-version <version>", "Specific chart version to deploy")
+  .action(async (name, options) => {
+    const deploymentName = name || (await selectDeployment("redeploy"));
+    if (!deploymentName) {
+      console.error(
+        chalk.red('No deployments found. Run "rulebricks init" first.'),
+      );
+      process.exit(1);
+    }
+
+    const { waitUntilExit } = render(
+      <RedeployCommand
+        name={deploymentName}
+        chartVersion={options.chartVersion}
       />,
     );
     await waitUntilExit();
@@ -84,24 +112,12 @@ program
   .option("--version <version>", "Target version (defaults to latest)")
   .option("--dry-run", "Preview changes without applying")
   .action(async (name, options) => {
-    let deploymentName = name;
+    const deploymentName = name || (await selectDeployment("upgrade"));
     if (!deploymentName) {
-      const deployments = await listDeployments();
-      if (deployments.length === 0) {
-        console.error(
-          chalk.red('No deployments found. Run "rulebricks init" first.'),
-        );
-        process.exit(1);
-      } else if (deployments.length > 1) {
-        console.error(chalk.red("Please specify a deployment to upgrade.\n"));
-        console.log("Available deployments:");
-        for (const d of deployments) {
-          console.log(`  ${chalk.yellow("•")} ${d}`);
-        }
-        console.log(`\nUsage: ${chalk.cyan("rulebricks upgrade <name>")}`);
-        process.exit(1);
-      }
-      deploymentName = deployments[0]; // Only one deployment, auto-select
+      console.error(
+        chalk.red('No deployments found. Run "rulebricks init" first.'),
+      );
+      process.exit(1);
     }
 
     const { waitUntilExit } = render(
@@ -119,10 +135,6 @@ program
   .command("destroy")
   .description("Destroy a Rulebricks deployment")
   .argument("[name]", "Deployment name")
-  .option(
-    "--cluster",
-    "Also destroy cloud infrastructure (EKS/GKE/AKS cluster)",
-  )
   .option("--config", "Also delete local configuration files")
   .option("-f, --force", "Skip confirmation")
   .action(async (name, options) => {
@@ -147,7 +159,6 @@ program
     const { waitUntilExit } = render(
       <DestroyCommand
         name={name}
-        cluster={options.cluster}
         config={options.config}
         force={options.force}
       />,
@@ -161,9 +172,11 @@ program
   .description("Show deployment status")
   .argument("[name]", "Deployment name")
   .action(async (name) => {
-    const deploymentName = name || (await selectDeployment());
+    const deploymentName = name || (await selectDeployment("show status for"));
     if (!deploymentName) {
-      console.error(chalk.red("No deployment specified."));
+      console.error(
+        chalk.red('No deployments found. Run "rulebricks init" first.'),
+      );
       process.exit(1);
     }
 
@@ -185,28 +198,12 @@ program
   .option("-t, --tail <lines>", "Number of lines to show", "100")
   .option("-s, --split", "Show logs in split-pane view (side-by-side columns)")
   .action(async (name, component, options) => {
-    let deploymentName = name;
+    const deploymentName = name || (await selectDeployment("view logs for"));
     if (!deploymentName) {
-      const deployments = await listDeployments();
-      if (deployments.length === 0) {
-        console.error(
-          chalk.red('No deployments found. Run "rulebricks init" first.'),
-        );
-        process.exit(1);
-      } else if (deployments.length > 1) {
-        console.error(
-          chalk.red("Please specify a deployment to view logs for.\n"),
-        );
-        console.log("Available deployments:");
-        for (const d of deployments) {
-          console.log(`  ${chalk.yellow("•")} ${d}`);
-        }
-        console.log(
-          `\nUsage: ${chalk.cyan("rulebricks logs <name> [component]")}`,
-        );
-        process.exit(1);
-      }
-      deploymentName = deployments[0]; // Only one deployment, auto-select
+      console.error(
+        chalk.red('No deployments found. Run "rulebricks init" first.'),
+      );
+      process.exit(1);
     }
 
     const { waitUntilExit } = render(
@@ -226,23 +223,8 @@ program
   .command("list")
   .description("List all deployments")
   .action(async () => {
-    const deployments = await listDeployments();
-    const listColor = chalk.green; // Use status theme color (green)
-
-    if (deployments.length === 0) {
-      console.log(
-        chalk.yellow(
-          'No deployments found. Run "rulebricks init" to create one.',
-        ),
-      );
-      return;
-    }
-
-    console.log(chalk.bold("\nDeployments:\n"));
-    for (const name of deployments) {
-      console.log(`  ${listColor("•")} ${name}`);
-    }
-    console.log("");
+    const { waitUntilExit } = render(<ListCommand />);
+    await waitUntilExit();
   });
 
 // Clone command
@@ -265,7 +247,6 @@ program
   .argument("<name>", "Deployment name")
   .option("--config", "Open config.yaml only")
   .option("--values", "Open values.yaml only")
-  .option("--terraform", "Open terraform directory only")
   .action(async (name, options) => {
     // Validate deployment exists before rendering
     const exists = await deploymentExists(name);
@@ -285,9 +266,7 @@ program
       ? "config"
       : options.values
         ? "values"
-        : options.terraform
-          ? "terraform"
-          : "all";
+        : "all";
 
     const { waitUntilExit } = render(
       <OpenCommand name={name} target={target} />,
@@ -305,8 +284,49 @@ program
     await waitUntilExit();
   });
 
-// Helper to select a deployment interactively
-async function selectDeployment(): Promise<string | null> {
+// Backup command
+program
+  .command("backup")
+  .description("Run an on-demand database backup")
+  .argument("[name]", "Deployment name")
+  .action(async (name) => {
+    const deploymentName = name || (await selectDeployment("back up"));
+    if (!deploymentName) {
+      console.error(
+        chalk.red('No deployments found. Run "rulebricks init" first.'),
+      );
+      process.exit(1);
+    }
+
+    const { waitUntilExit } = render(<BackupCommand name={deploymentName} />);
+    await waitUntilExit();
+  });
+
+// Restore command
+program
+  .command("restore")
+  .description("Restore the database from a backup")
+  .argument("[name]", "Deployment name")
+  .action(async (name) => {
+    const deploymentName = name || (await selectDeployment("restore"));
+    if (!deploymentName) {
+      console.error(
+        chalk.red('No deployments found. Run "rulebricks init" first.'),
+      );
+      process.exit(1);
+    }
+
+    const { waitUntilExit } = render(<RestoreCommand name={deploymentName} />);
+    await waitUntilExit();
+  });
+
+/**
+ * Resolves a deployment name when none was given on the command line.
+ * - 0 deployments: returns null (callers print the "run init first" error)
+ * - 1 deployment: auto-selects it
+ * - multiple: renders an interactive picker; Esc exits cleanly
+ */
+async function selectDeployment(action: string): Promise<string | null> {
   const deployments = await listDeployments();
 
   if (deployments.length === 0) {
@@ -317,9 +337,32 @@ async function selectDeployment(): Promise<string | null> {
     return deployments[0];
   }
 
-  // For now, return the first one. In a full implementation,
-  // we'd render an interactive selector
-  return deployments[0];
+  const selection = await new Promise<string | null>((resolve) => {
+    const { unmount, clear } = render(
+      <DeploymentPicker
+        deployments={deployments}
+        action={action}
+        onSelect={(name) => {
+          clear();
+          unmount();
+          resolve(name);
+        }}
+        onCancel={() => {
+          clear();
+          unmount();
+          resolve(null);
+        }}
+      />,
+    );
+  });
+
+  if (selection === null) {
+    // User cancelled the picker; not an error.
+    console.log(chalk.gray("Cancelled."));
+    process.exit(0);
+  }
+
+  return selection;
 }
 
 program.parse();

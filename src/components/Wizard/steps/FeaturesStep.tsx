@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useWizard } from '../WizardContext.js';
 import { BorderBox, useTheme } from '../../common/index.js';
-import { LOGGING_SINK_INFO, LoggingSink } from '../../../types/index.js';
+import { LOGGING_SINK_INFO } from '../../../types/index.js';
 
 interface FeaturesStepProps {
   onComplete: () => void;
@@ -16,7 +16,7 @@ interface Feature {
   requiresConfig: boolean;
 }
 
-// Five features: AI, SSO, Monitoring, External Logging, Custom Emails
+// Features: AI, SSO, External Logging, Custom Emails
 // External DNS is handled in Domain step, not here
 const FEATURES: Feature[] = [
   {
@@ -31,18 +31,25 @@ const FEATURES: Feature[] = [
     description: 'Enable SSO via OIDC provider (Azure AD, Google, Okta, etc.)',
     requiresConfig: true
   },
+  // In-cluster Prometheus is always installed; this only opts into exporting
+  // metrics to an external backend via remote_write.
   {
-    id: 'monitoring',
-    label: 'Monitoring',
-    description: 'Enable Prometheus metrics collection. Optionally send to external system.',
+    id: 'metricsExport',
+    label: 'Metrics Export',
+    description: 'Send Prometheus metrics to an external backend via remote_write (AWS Managed Prometheus, Azure Monitor, Grafana Cloud, etc.). In-cluster monitoring is always on.',
     requiresConfig: true
   },
-  {
-    id: 'logging',
-    label: 'External Logging',
-    description: 'Forward logs to cloud storage or logging platforms (Datadog, Splunk, etc.)',
-    requiresConfig: true
-  },
+  // Additional log forwarding to third-party platforms (Datadog, Splunk, etc.)
+  // is intentionally hidden for now: it was confusing alongside the always-on
+  // decision-log archive to object storage. The Vector sink generation
+  // (helmValues.generateVectorSinks) and the FeatureConfigStep logging sub-flow
+  // are left in place so this can be re-enabled by uncommenting this entry.
+  // {
+  //   id: 'logging',
+  //   label: 'Additional Log Forwarding',
+  //   description: 'Optional: forward a copy of logs to a third-party platform (Datadog, Splunk, Elasticsearch, Loki, New Relic, Axiom). Decision logs are always archived to your object storage regardless of this.',
+  //   requiresConfig: true
+  // },
   {
     id: 'customEmails',
     label: 'Custom Email Templates',
@@ -59,7 +66,7 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
   const enabledFeatures = {
     ai: state.aiEnabled,
     sso: state.ssoEnabled,
-    monitoring: state.monitoringEnabled,
+    metricsExport: state.metricsExportEnabled,
     logging: state.loggingSink !== 'console', // External logging is "enabled" if not console-only (includes 'pending')
     customEmails: state.customEmailsEnabled
   };
@@ -99,18 +106,21 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
       case 'sso':
         dispatch({ type: 'SET_SSO_ENABLED', enabled: !state.ssoEnabled });
         break;
-      case 'monitoring':
-        dispatch({ type: 'SET_MONITORING', enabled: !state.monitoringEnabled });
+      case 'metricsExport':
+        dispatch({
+          type: 'SET_METRICS_EXPORT',
+          enabled: !state.metricsExportEnabled
+        });
         break;
-      case 'logging':
-        // Toggle between console-only and needing to pick a sink
-        // If currently console, mark as pending - FeatureConfigStep will handle sink selection
-        if (state.loggingSink === 'console') {
-          dispatch({ type: 'SET_LOGGING_SINK', sink: 'pending' });
-        } else {
-          dispatch({ type: 'SET_LOGGING_SINK', sink: 'console' });
-        }
-        break;
+      // Log forwarding toggle is disabled while the feature is hidden (see the
+      // commented FEATURES entry above). Kept for easy re-enablement.
+      // case 'logging':
+      //   if (state.loggingSink === 'console') {
+      //     dispatch({ type: 'SET_LOGGING_SINK', sink: 'pending' });
+      //   } else {
+      //     dispatch({ type: 'SET_LOGGING_SINK', sink: 'console' });
+      //   }
+      //   break;
       case 'customEmails':
         dispatch({ type: 'SET_CUSTOM_EMAILS_ENABLED', enabled: !state.customEmailsEnabled });
         break;
@@ -178,7 +188,11 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
         <Text color="gray" dimColor>
           Space/Enter to toggle • ↑/↓ to navigate • Esc to go back
         </Text>
-        {(state.aiEnabled || state.ssoEnabled || state.monitoringEnabled || state.loggingSink !== 'console') && (
+        {(state.aiEnabled ||
+          state.ssoEnabled ||
+          state.metricsExportEnabled ||
+          state.loggingSink !== 'console' ||
+          state.customEmailsEnabled) && (
           <Text color="yellow" dimColor>
             Note: Enabled features will be configured in the next step
           </Text>

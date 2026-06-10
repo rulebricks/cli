@@ -1,4 +1,3 @@
-export { DeploymentModeStep } from './DeploymentModeStep.js';
 export { CloudProviderStep } from './CloudProviderStep.js';
 export { DomainStep } from './DomainStep.js';
 export { SMTPStep } from './SMTPStep.js';
@@ -6,7 +5,9 @@ export { DatabaseStep } from './DatabaseStep.js';
 export { SupabaseCredentialsStep } from './SupabaseCredentialsStep.js';
 export { TierStep } from './TierStep.js';
 export { FeaturesStep } from './FeaturesStep.js';
+export { StorageStep } from './StorageStep.js';
+export { BackupStep } from './BackupStep.js';
+export { ExternalServicesStep } from './ExternalServicesStep.js';
 export { FeatureConfigStep } from './FeatureConfigStep.js';
 export { VersionStep } from './VersionStep.js';
-export { CredentialsStep } from './CredentialsStep.js';
 export { ReviewStep } from './ReviewStep.js';

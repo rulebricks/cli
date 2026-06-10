@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "clusterName": { "value": "rulebricks-cluster" },
+    "location": { "value": "eastus" },
+    "kubernetesVersion": { "value": "1.34" },
+    "nodeCount": { "value": 2 },
+    "maxNodeCount": { "value": 4 },
+    "nodeVmSize": { "value": "Standard_F4as_v6" },
+    "maxPods": { "value": 110 },
+    "osDiskSizeGB": { "value": 30 },
+    "osDiskType": { "value": "Managed" },
+
+    "enableExternalDns": { "value": false },
+    "dnsZoneResourceGroup": { "value": "" },
+
+    "createStorage": { "value": true },
+    "existingStorageAccountName": { "value": "" },
+    "enableDecisionLogExport": { "value": true },
+    "enableBackupExport": { "value": true },
+
+    "createMonitorWorkspace": { "value": true },
+    "existingDataCollectionRuleId": { "value": "" },
+    "enableMetricsRemoteWrite": { "value": true }
+  }
+}

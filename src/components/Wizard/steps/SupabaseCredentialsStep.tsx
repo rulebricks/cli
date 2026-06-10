@@ -22,17 +22,21 @@ export function SupabaseCredentialsStep({
 }: SupabaseCredentialsStepProps) {
   const { state, dispatch } = useWizard();
 
-  // Generate defaults if not already set
-  const defaultDbPass = state.supabaseDbPassword || generateSecureSecret(24);
-  const defaultDashboardPass =
-    state.supabaseDashboardPass || generateSecureSecret(16);
+  // Secure fallbacks used only when the user leaves a field empty. Generated
+  // once so they stay stable across renders. The inputs themselves start empty
+  // (or prefilled with an existing value when editing) so there's no confusing
+  // pre-filled secret to clear.
+  const [defaultDbPass] = useState(() => generateSecureSecret(24));
+  const [defaultDashboardPass] = useState(() => generateSecureSecret(16));
 
   const [subStep, setSubStep] = useState<SubStep>("db-password");
-  const [dbPassword, setDbPassword] = useState(defaultDbPass);
+  const [dbPassword, setDbPassword] = useState(state.supabaseDbPassword || "");
   const [dashboardUser, setDashboardUser] = useState(
     state.supabaseDashboardUser || "supabase",
   );
-  const [dashboardPass, setDashboardPass] = useState(defaultDashboardPass);
+  const [dashboardPass, setDashboardPass] = useState(
+    state.supabaseDashboardPass || "",
+  );
   const [error, setError] = useState<string | null>(null);
 
   useInput((input, key) => {
@@ -49,10 +53,13 @@ export function SupabaseCredentialsStep({
   });
 
   const handleDbPasswordSubmit = () => {
-    if (!dbPassword || dbPassword.length < 8) {
+    // Empty means "use a generated secure value".
+    const effective = dbPassword.trim() || defaultDbPass;
+    if (effective.length < 8) {
       setError("Database password must be at least 8 characters");
       return;
     }
+    setDbPassword(effective);
     setError(null);
     setSubStep("dashboard-user");
   };
@@ -67,7 +74,9 @@ export function SupabaseCredentialsStep({
   };
 
   const handleDashboardPassSubmit = () => {
-    if (!dashboardPass || dashboardPass.length < 8) {
+    // Empty means "use a generated secure value".
+    const effectivePass = dashboardPass.trim() || defaultDashboardPass;
+    if (effectivePass.length < 8) {
       setError("Dashboard password must be at least 8 characters");
       return;
     }
@@ -77,21 +86,13 @@ export function SupabaseCredentialsStep({
       type: "SET_SUPABASE_SELF_HOSTED",
       config: {
         supabaseJwtSecret: JWT_SECRET,
-        supabaseDbPassword: dbPassword,
+        supabaseDbPassword: dbPassword.trim() || defaultDbPass,
         supabaseDashboardUser: dashboardUser,
-        supabaseDashboardPass: dashboardPass,
+        supabaseDashboardPass: effectivePass,
       },
     });
 
     onComplete();
-  };
-
-  const regenerateSecret = (field: "db" | "dashboard") => {
-    if (field === "db") {
-      setDbPassword(generateSecureSecret(24));
-    } else {
-      setDashboardPass(generateSecureSecret(16));
-    }
   };
 
   return (
@@ -110,17 +111,15 @@ export function SupabaseCredentialsStep({
         <Box flexDirection="column" marginY={1}>
           <Text>Database Password:</Text>
           <Text color="gray" dimColor>
-            PostgreSQL database password
-          </Text>
-          <Text color="gray" dimColor>
-            Default (press Enter to use): {defaultDbPass}
+            PostgreSQL database password. Leave empty to generate a secure
+            value.
           </Text>
           <Box marginTop={1}>
             <TextInput
               value={dbPassword}
               onChange={setDbPassword}
               onSubmit={handleDbPasswordSubmit}
-              placeholder="Database password (min 8 chars)"
+              placeholder="Leave empty to generate a secure value"
               mask="*"
             />
           </Box>
@@ -154,17 +153,15 @@ export function SupabaseCredentialsStep({
         <Box flexDirection="column" marginY={1}>
           <Text>Supabase Studio Password:</Text>
           <Text color="gray" dimColor>
-            Password for accessing the Supabase dashboard
-          </Text>
-          <Text color="gray" dimColor>
-            Default (press Enter to use): {defaultDashboardPass}
+            Password for accessing the Supabase dashboard. Leave empty to
+            generate a secure value.
           </Text>
           <Box marginTop={1}>
             <TextInput
               value={dashboardPass}
               onChange={setDashboardPass}
               onSubmit={handleDashboardPassSubmit}
-              placeholder="Dashboard password (min 8 chars)"
+              placeholder="Leave empty to generate a secure value"
               mask="*"
             />
           </Box>

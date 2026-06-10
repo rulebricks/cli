@@ -2,7 +2,7 @@
  * Cloud CLI detection and dynamic resource listing
  *
  * Detects installed cloud CLIs (AWS, GCP, Azure), checks authentication status,
- * and provides functions to list regions and buckets dynamically.
+ * and provides functions to list regions, clusters, and storage dynamically.
  */
 
 import { exec } from "child_process";
@@ -54,6 +54,45 @@ export interface AllCloudCliStatus {
   azure: CloudCliStatus;
   anyAvailable: boolean;
   anyInstalled: boolean;
+}
+
+/**
+ * Managed Kubernetes cluster discovered through a cloud provider CLI.
+ */
+export interface DiscoveredCluster {
+  provider: CloudProvider;
+  name: string;
+  region: string;
+  projectId?: string;
+  resourceGroup?: string;
+  status?: string;
+  version?: string;
+  nodeCount?: number;
+}
+
+/**
+ * AWS IAM role discovered through the AWS CLI.
+ */
+export interface IamRole {
+  name: string;
+  arn: string;
+}
+
+/**
+ * Azure user-assigned managed identity discovered through the Azure CLI.
+ */
+export interface AzureManagedIdentity {
+  name: string;
+  clientId: string;
+  resourceGroup?: string;
+}
+
+/**
+ * GCP service account discovered through the gcloud CLI.
+ */
+export interface GcpServiceAccount {
+  email: string;
+  displayName?: string;
 }
 
 /**
@@ -186,11 +225,11 @@ export async function listS3Buckets(): Promise<string[]> {
 }
 
 /**
- * Static fallback for AWS regions (c8g Graviton4 ARM64 available or expected)
+ * Static fallback for common AWS regions.
  */
 function getStaticAwsRegions(): string[] {
   return [
-    // US regions (c8g Graviton4 available)
+    // US regions
     "us-east-1",
     "us-east-2",
     "us-west-1",
@@ -198,7 +237,7 @@ function getStaticAwsRegions(): string[] {
     // Canada
     "ca-central-1",
     "ca-west-1",
-    // Europe (c8g available)
+    // Europe
     "eu-west-1",
     "eu-west-2",
     "eu-west-3",
@@ -207,7 +246,7 @@ function getStaticAwsRegions(): string[] {
     "eu-north-1",
     "eu-south-1",
     "eu-south-2",
-    // Asia Pacific (c8g available)
+    // Asia Pacific
     "ap-northeast-1",
     "ap-northeast-2",
     "ap-northeast-3",
@@ -249,17 +288,102 @@ export async function listEksClusters(region: string): Promise<string[]> {
   }
 }
 
+async function describeEksCluster(
+  name: string,
+  region: string,
+): Promise<DiscoveredCluster | null> {
+  try {
+    const result = await execCommand(
+      `aws eks describe-cluster --name ${name} --region ${region} --query "cluster.{name:name,status:status,version:version}" --output json`,
+    );
+    if (result.stderr && !result.stdout) {
+      return null;
+    }
+
+    const cluster = JSON.parse(result.stdout) as {
+      name: string;
+      status?: string;
+      version?: string;
+    };
+
+    if (cluster.status !== "ACTIVE") {
+      return null;
+    }
+
+    return {
+      provider: "aws",
+      name: cluster.name,
+      region,
+      status: cluster.status,
+      version: cluster.version,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * List EKS clusters across all accessible AWS regions.
+ */
+export async function listAllEksClusters(): Promise<DiscoveredCluster[]> {
+  const regions = await listAwsRegions();
+  const clustersByRegion = await Promise.all(
+    regions.map(async (region) => {
+      const names = await listEksClusters(region);
+      return Promise.all(names.map((name) => describeEksCluster(name, region)));
+    }),
+  );
+
+  return clustersByRegion
+    .flat()
+    .filter((cluster): cluster is DiscoveredCluster => cluster !== null)
+    .sort(
+      (a, b) =>
+        a.region.localeCompare(b.region) || a.name.localeCompare(b.name),
+    );
+}
+
+/**
+ * List IAM roles for selection (e.g. IRSA roles for S3 / AMP). Returns an empty
+ * list on any failure so callers can fall back to manual entry.
+ */
+export async function listIamRoles(): Promise<IamRole[]> {
+  try {
+    const result = await execCommand(
+      'aws iam list-roles --query "Roles[].{name:RoleName,arn:Arn}" --output json',
+    );
+    if (result.stderr && !result.stdout) {
+      return [];
+    }
+
+    const roles = JSON.parse(result.stdout) as IamRole[];
+    return roles.sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get the active AWS account ID (useful for constructing/validating ARNs).
+ */
+export async function getAwsAccountId(): Promise<string | null> {
+  try {
+    const result = await execCommand(
+      "aws sts get-caller-identity --query Account --output text",
+    );
+    const accountId = result.stdout.trim();
+    return accountId || null;
+  } catch {
+    return null;
+  }
+}
+
 // ============================================================================
 // GCP CLI (gcloud)
 // ============================================================================
 
 /**
- * Check if gcloud CLI is installed and fully authenticated
- * 
- * For GCP to be considered "authenticated", the user must have:
- * 1. Logged in with `gcloud auth login`
- * 2. Set a default project with `gcloud config set project PROJECT_ID`
- * 3. Configured Application Default Credentials with `gcloud auth application-default login`
+ * Check if gcloud CLI is installed and authenticated enough to list clusters.
  */
 export async function checkGcloudCli(): Promise<CloudCliStatus> {
   const status: CloudCliStatus = {
@@ -293,28 +417,17 @@ export async function checkGcloudCli(): Promise<CloudCliStatus> {
       const account = config.core?.account;
       const project = config.core?.project;
 
-      // Step 1: Check if logged in
       if (!account) {
         status.error = 'Not authenticated - run "gcloud auth login"';
         return status;
       }
 
-      // Step 2: Check if project is set
       if (!project) {
         status.error =
           'No default project set - run "gcloud config set project PROJECT_ID"';
         return status;
       }
 
-      // Step 3: Check Application Default Credentials
-      const adcResult = await checkGcpApplicationDefaultCredentials();
-      if (!adcResult.configured) {
-        status.error =
-          'Application Default Credentials not configured - run "gcloud auth application-default login"';
-        return status;
-      }
-
-      // All checks passed
       status.authenticated = true;
       status.identity = `Project: ${project}`;
     } catch {
@@ -337,51 +450,6 @@ export async function getGcpProjectId(): Promise<string | null> {
     return projectId && projectId !== "(unset)" ? projectId : null;
   } catch {
     return null;
-  }
-}
-
-/**
- * Check if GCP Application Default Credentials (ADC) are configured
- * ADC is required for Terraform to authenticate with Google Cloud
- */
-export async function checkGcpApplicationDefaultCredentials(): Promise<{
-  configured: boolean;
-  error?: string;
-}> {
-  try {
-    // Try to get an access token using ADC
-    const result = await execCommand(
-      "gcloud auth application-default print-access-token"
-    );
-    
-    if (result.stdout && result.stdout.trim().length > 0) {
-      return { configured: true };
-    }
-    
-    return {
-      configured: false,
-      error: "Application Default Credentials not configured",
-    };
-  } catch (error) {
-    const errorMessage =
-      error instanceof Error ? error.message : "Unknown error";
-    
-    // Check if it's specifically an authentication error
-    if (
-      errorMessage.includes("not found") ||
-      errorMessage.includes("not configured") ||
-      errorMessage.includes("Could not automatically determine credentials")
-    ) {
-      return {
-        configured: false,
-        error: "Application Default Credentials not configured",
-      };
-    }
-    
-    return {
-      configured: false,
-      error: errorMessage,
-    };
   }
 }
 
@@ -430,33 +498,59 @@ export async function listGcsBuckets(): Promise<string[]> {
 }
 
 /**
- * Static fallback for GCP regions (C4A/Google Axion ARM64 confirmed availability)
- * Only includes regions with full C4A zone coverage for GKE regional clusters
+ * List GCP service accounts for selection (e.g. for GKE Workload Identity).
+ * Returns an empty list on any failure so callers can fall back to manual entry.
+ */
+export async function listGcpServiceAccounts(): Promise<GcpServiceAccount[]> {
+  try {
+    const result = await execCommand(
+      'gcloud iam service-accounts list --format="json(email,displayName)"',
+    );
+    if (result.stderr && !result.stdout) {
+      return [];
+    }
+
+    const accounts = JSON.parse(result.stdout) as Array<{
+      email: string;
+      displayName?: string;
+    }>;
+    return accounts
+      .map((account) => ({
+        email: account.email,
+        displayName: account.displayName,
+      }))
+      .sort((a, b) => a.email.localeCompare(b.email));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Static fallback for common GCP regions.
  */
 function getStaticGcpRegions(): string[] {
   return [
-    // Tier 1: Full C4A (Google Axion ARM64) availability - 3+ zones confirmed
     // US regions
-    "us-central1",    // C4A in zones a, b, c, f (best availability)
-    "us-east1",       // C4A in zones b, c, d
-    "us-east4",       // C4A in zones a, b, c
-    "us-west1",       // C4A in zones a, b, c
-    "us-west4",       // C4A in zones a, b, c
+    "us-central1",
+    "us-east1",
+    "us-east4",
+    "us-west1",
+    "us-west4",
     // North America
-    "northamerica-south1", // C4A in zones a, b, c (Mexico)
+    "northamerica-south1",
     // Europe
-    "europe-west1",   // C4A in zones b, c, d
-    "europe-west2",   // C4A in zones a, b, c
-    "europe-west3",   // C4A in zones a, b, c
-    "europe-west4",   // C4A in zones a, b, c
-    "europe-north1",  // C4A in zones a, b
+    "europe-west1",
+    "europe-west2",
+    "europe-west3",
+    "europe-west4",
+    "europe-north1",
     // Asia Pacific
-    "asia-east1",     // C4A in zones a, b, c
-    "asia-northeast1", // C4A in zones b, c
-    "asia-south1",    // C4A in zones a, b, c
-    "asia-southeast1", // C4A in zones a, b, c
+    "asia-east1",
+    "asia-northeast1",
+    "asia-south1",
+    "asia-southeast1",
     // Australia
-    "australia-southeast2", // C4A in zones a, b, c
+    "australia-southeast2",
   ];
 }
 
@@ -481,18 +575,54 @@ export async function listGkeClusters(region: string): Promise<string[]> {
   }
 }
 
+/**
+ * List GKE clusters across the active GCP project.
+ */
+export async function listAllGkeClusters(): Promise<DiscoveredCluster[]> {
+  const projectId = await getGcpProjectId();
+
+  try {
+    const result = await execCommand(
+      'gcloud container clusters list --format="json(name,location,status,currentMasterVersion,currentNodeCount)"',
+    );
+    if (result.stderr && !result.stdout) {
+      return [];
+    }
+
+    const clusters = JSON.parse(result.stdout) as Array<{
+      name: string;
+      location: string;
+      status?: string;
+      currentMasterVersion?: string;
+      currentNodeCount?: number;
+    }>;
+
+    return clusters
+      .filter((cluster) => cluster.status === "RUNNING")
+      .map((cluster) => ({
+        provider: "gcp" as const,
+        name: cluster.name,
+        region: cluster.location,
+        projectId: projectId || undefined,
+        status: cluster.status,
+        version: cluster.currentMasterVersion,
+        nodeCount: cluster.currentNodeCount,
+      }))
+      .sort(
+        (a, b) =>
+          a.region.localeCompare(b.region) || a.name.localeCompare(b.name),
+      );
+  } catch {
+    return [];
+  }
+}
+
 // ============================================================================
 // Azure CLI
 // ============================================================================
 
 /**
- * Check if Azure CLI is installed and fully authenticated
- * 
- * For Azure to be considered "authenticated", the user must have:
- * 1. Logged in with `az login`
- * 2. An active subscription in "Enabled" state
- * 3. Required resource providers registered (Microsoft.ContainerService, etc.)
- * 4. Sufficient vCPU quota for at least the small tier (8 cores)
+ * Check if Azure CLI is installed and authenticated enough to list clusters.
  */
 export async function checkAzureCli(): Promise<CloudCliStatus> {
   const status: CloudCliStatus = {
@@ -514,7 +644,6 @@ export async function checkAzureCli(): Promise<CloudCliStatus> {
     const versionMatch = versionResult.stdout.match(/azure-cli\s+([\d.]+)/);
     status.version = versionMatch ? versionMatch[1] : undefined;
 
-    // Step 1: Check authentication and subscription
     const accountResult = await execCommand("az account show --output json");
 
     if (accountResult.stderr && accountResult.stderr.includes("Please run")) {
@@ -527,7 +656,6 @@ export async function checkAzureCli(): Promise<CloudCliStatus> {
       const account = JSON.parse(accountResult.stdout);
       subscriptionName = account.name;
       
-      // Step 2: Check subscription state is Enabled
       if (account.state !== "Enabled") {
         status.error = `Subscription "${account.name}" is not enabled (state: ${account.state})`;
         return status;
@@ -541,29 +669,6 @@ export async function checkAzureCli(): Promise<CloudCliStatus> {
       return status;
     }
 
-    // Step 3: Check required resource providers are registered
-    const providerCheck = await checkAzureResourceProviders();
-    if (!providerCheck.allRegistered) {
-      status.error =
-        `Resource providers not registered: ${providerCheck.missing.join(", ")}. ` +
-        `Run: ${providerCheck.missing.map((p) => `az provider register --namespace ${p}`).join(" && ")}`;
-      return status;
-    }
-
-    // Step 4: Check minimum vCPU quota (small tier = 8 cores)
-    const quotaCheck = await checkAzureVmQuota(
-      AZURE_DEFAULT_QUOTA_CHECK_REGION,
-      AZURE_TIER_CORES.small,
-    );
-    
-    if (!quotaCheck.sufficient) {
-      status.error =
-        `Insufficient vCPU quota (${quotaCheck.available}/${quotaCheck.limit} available in ${AZURE_DEFAULT_QUOTA_CHECK_REGION}). ` +
-        "Request increase at Azure portal > Subscriptions > Usage + quotas";
-      return status;
-    }
-
-    // All checks passed
     status.authenticated = true;
   } catch (error) {
     status.error = error instanceof Error ? error.message : "Unknown error";
@@ -581,6 +686,135 @@ export async function getAzureSubscriptionId(): Promise<string | null> {
     return result.stdout.trim() || null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Get the active Azure tenant ID. Used to auto-fill workload-identity tenant
+ * fields so users don't have to look it up manually.
+ */
+export async function getAzureTenantId(): Promise<string | null> {
+  try {
+    const result = await execCommand(
+      "az account show --query tenantId --output tsv",
+    );
+    return result.stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * List Azure user-assigned managed identities for selection (workload identity
+ * client IDs). Returns an empty list on any failure so callers can fall back to
+ * manual entry.
+ */
+export async function listAzureManagedIdentities(): Promise<
+  AzureManagedIdentity[]
+> {
+  try {
+    const result = await execCommand(
+      'az identity list --query "[].{name:name,clientId:clientId,resourceGroup:resourceGroup}" --output json',
+    );
+    if (result.stderr && !result.stdout) {
+      return [];
+    }
+
+    const identities = JSON.parse(result.stdout) as AzureManagedIdentity[];
+    return identities.sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A Prometheus remote_write target the user can write to, with the full URL
+ * pre-assembled so the wizard never has to hand-build it.
+ */
+export interface RemoteWriteTarget {
+  name: string;
+  url: string;
+}
+
+/**
+ * Discovers Azure Monitor Prometheus remote_write targets: every Data Collection
+ * Rule that ingests the Microsoft-PrometheusMetrics stream, paired with its Data
+ * Collection Endpoint's metrics-ingestion endpoint, assembled into the exact
+ * remote_write URL. Works for any DCR the caller can see (not just ones we made).
+ */
+export async function listAzurePrometheusTargets(): Promise<RemoteWriteTarget[]> {
+  try {
+    const dceResult = await execCommand(
+      'az monitor data-collection endpoint list --query "[].{id:id,endpoint:metricsIngestion.endpoint}" --output json',
+    );
+    const dces = JSON.parse(dceResult.stdout || "[]") as {
+      id: string;
+      endpoint?: string;
+    }[];
+    const endpointById = new Map<string, string>();
+    for (const dce of dces) {
+      if (dce.id && dce.endpoint) {
+        endpointById.set(dce.id.toLowerCase(), dce.endpoint);
+      }
+    }
+
+    const dcrResult = await execCommand(
+      'az monitor data-collection rule list --query "[].{name:name,immutableId:immutableId,dce:dataCollectionEndpointId,streams:dataFlows[].streams[]}" --output json',
+    );
+    const dcrs = JSON.parse(dcrResult.stdout || "[]") as {
+      name: string;
+      immutableId?: string;
+      dce?: string;
+      streams?: string[];
+    }[];
+
+    const targets: RemoteWriteTarget[] = [];
+    for (const dcr of dcrs) {
+      if (!dcr.immutableId || !dcr.dce) continue;
+      if (!(dcr.streams || []).includes("Microsoft-PrometheusMetrics")) continue;
+      const endpoint = endpointById.get(dcr.dce.toLowerCase());
+      if (!endpoint) continue;
+      const url = `${endpoint.replace(/\/+$/, "")}/dataCollectionRules/${dcr.immutableId}/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24`;
+      targets.push({ name: dcr.name, url });
+    }
+    return targets.sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Discovers AWS Managed Prometheus (AMP) workspaces in a region and assembles the
+ * remote_write URL (<prometheusEndpoint>api/v1/remote_write) for each.
+ */
+export async function listAwsPrometheusWorkspaces(
+  region: string,
+): Promise<RemoteWriteTarget[]> {
+  try {
+    const listResult = await execCommand(
+      `aws amp list-workspaces --region ${region} --query "workspaces[].{id:workspaceId,alias:alias}" --output json`,
+    );
+    const workspaces = JSON.parse(listResult.stdout || "[]") as {
+      id: string;
+      alias?: string;
+    }[];
+
+    const targets: RemoteWriteTarget[] = [];
+    for (const ws of workspaces) {
+      const descResult = await execCommand(
+        `aws amp describe-workspace --workspace-id ${ws.id} --region ${region} --query "workspace.prometheusEndpoint" --output text`,
+      );
+      const endpoint = descResult.stdout.trim();
+      if (!endpoint || endpoint === "None") continue;
+      const url = `${endpoint.replace(/\/+$/, "")}/api/v1/remote_write`;
+      targets.push({
+        name: ws.alias ? `${ws.alias} (${ws.id})` : ws.id,
+        url,
+      });
+    }
+    return targets.sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
   }
 }
 
@@ -644,11 +878,11 @@ export async function listAzureBlobContainers(
 }
 
 /**
- * Static fallback for Azure regions (Dpsv5 ARM64 available or expected)
+ * Static fallback for common Azure regions.
  */
 function getStaticAzureRegions(): string[] {
   return [
-    // US regions (Dpsv5 ARM64 available)
+    // US regions
     "eastus",
     "eastus2",
     "westus",
@@ -663,7 +897,7 @@ function getStaticAzureRegions(): string[] {
     "canadaeast",
     // South America
     "brazilsouth",
-    // Europe (Dpsv5 available)
+    // Europe
     "northeurope",
     "westeurope",
     "uksouth",
@@ -725,134 +959,46 @@ export async function listAksClusters(
 }
 
 /**
- * Required Azure resource providers for AKS deployment
+ * List AKS clusters across the active Azure subscription.
  */
-const AZURE_REQUIRED_PROVIDERS = [
-  "Microsoft.ContainerService", // For AKS
-  "Microsoft.Network", // For VNets, NSGs
-  "Microsoft.ManagedIdentity", // For managed identities
-  "Microsoft.Compute", // For VMs
-];
-
-/**
- * Azure tier to vCPU core requirements mapping
- */
-export const AZURE_TIER_CORES: Record<string, number> = {
-  small: 8, // 4 nodes × 2 vCPU
-  medium: 16, // 4 nodes × 4 vCPU
-  large: 40, // 5 nodes × 8 vCPU
-};
-
-/**
- * Default region used for baseline quota checks when region is not yet selected
- */
-const AZURE_DEFAULT_QUOTA_CHECK_REGION = "eastus";
-
-/**
- * Check if required Azure resource providers are registered
- */
-export async function checkAzureResourceProviders(): Promise<{
-  allRegistered: boolean;
-  missing: string[];
-}> {
-  const missing: string[] = [];
-
-  try {
-    for (const provider of AZURE_REQUIRED_PROVIDERS) {
-      const result = await execCommand(
-        `az provider show --namespace ${provider} --query "registrationState" --output tsv`,
-      );
-
-      const state = result.stdout.trim();
-      if (state !== "Registered") {
-        missing.push(provider);
-      }
-    }
-
-    return {
-      allRegistered: missing.length === 0,
-      missing,
-    };
-  } catch {
-    // If we can't check, assume they're not registered
-    return {
-      allRegistered: false,
-      missing: AZURE_REQUIRED_PROVIDERS,
-    };
-  }
-}
-
-/**
- * Check Azure VM quota for a specific region
- * 
- * @param region - Azure region to check quota for
- * @param requiredCores - Number of vCPUs required
- * @returns Quota check result with availability info
- */
-export async function checkAzureVmQuota(
-  region: string,
-  requiredCores: number,
-): Promise<{
-  sufficient: boolean;
-  available: number;
-  limit: number;
-  used: number;
-  error?: string;
-}> {
+export async function listAllAksClusters(): Promise<DiscoveredCluster[]> {
   try {
     const result = await execCommand(
-      `az vm list-usage --location ${region} --output json`,
+      'az aks list --query "[].{name:name,resourceGroup:resourceGroup,location:location,kubernetesVersion:kubernetesVersion,powerState:powerState,agentPoolProfiles:agentPoolProfiles}" --output json',
     );
-
     if (result.stderr && !result.stdout) {
-      return {
-        sufficient: false,
-        available: 0,
-        limit: 0,
-        used: 0,
-        error: "Failed to check VM quota",
-      };
+      return [];
     }
 
-    const usageList = JSON.parse(result.stdout) as Array<{
-      name: { value: string; localizedValue: string };
-      currentValue: number;
-      limit: number;
+    const clusters = JSON.parse(result.stdout) as Array<{
+      name: string;
+      resourceGroup?: string;
+      location: string;
+      kubernetesVersion?: string;
+      powerState?: { code?: string };
+      agentPoolProfiles?: Array<{ count?: number }>;
     }>;
 
-    // Find total regional vCPU quota
-    const regionalQuota = usageList.find(
-      (u) => u.name.value === "cores" || u.name.localizedValue === "Total Regional vCPUs",
-    );
-
-    if (!regionalQuota) {
-      return {
-        sufficient: false,
-        available: 0,
-        limit: 0,
-        used: 0,
-        error: "Could not find regional vCPU quota",
-      };
-    }
-
-    const used = regionalQuota.currentValue;
-    const limit = regionalQuota.limit;
-    const available = limit - used;
-
-    return {
-      sufficient: available >= requiredCores,
-      available,
-      limit,
-      used,
-    };
-  } catch (error) {
-    return {
-      sufficient: false,
-      available: 0,
-      limit: 0,
-      used: 0,
-      error: error instanceof Error ? error.message : "Failed to check VM quota",
-    };
+    return clusters
+      .filter((cluster) => cluster.powerState?.code === "Running")
+      .map((cluster) => ({
+        provider: "azure" as const,
+        name: cluster.name,
+        region: cluster.location,
+        resourceGroup: cluster.resourceGroup,
+        status: cluster.powerState?.code,
+        version: cluster.kubernetesVersion,
+        nodeCount: cluster.agentPoolProfiles?.reduce(
+          (sum, pool) => sum + (pool.count || 0),
+          0,
+        ),
+      }))
+      .sort(
+        (a, b) =>
+          a.region.localeCompare(b.region) || a.name.localeCompare(b.name),
+      );
+  } catch {
+    return [];
   }
 }
 
@@ -930,6 +1076,73 @@ export async function listClusters(
 }
 
 /**
+ * List managed Kubernetes clusters discoverable through a provider CLI.
+ */
+export async function listManagedClusters(
+  provider: CloudProvider,
+): Promise<DiscoveredCluster[]> {
+  switch (provider) {
+    case "aws":
+      return listAllEksClusters();
+    case "gcp":
+      return listAllGkeClusters();
+    case "azure":
+      return listAllAksClusters();
+    default:
+      return [];
+  }
+}
+
+/**
+ * Refresh kubeconfig credentials for a selected managed Kubernetes cluster.
+ */
+export async function updateKubeconfig(
+  provider: CloudProvider,
+  clusterName: string,
+  region: string,
+  options: {
+    gcpProjectId?: string;
+    azureResourceGroup?: string;
+  } = {},
+): Promise<void> {
+  switch (provider) {
+    case "aws":
+      {
+        const result = await execCommand(
+          `aws eks update-kubeconfig --name ${clusterName} --region ${region}`,
+          30000,
+        );
+        if (result.stderr && !result.stdout) throw new Error(result.stderr);
+      }
+      return;
+    case "gcp":
+      if (!options.gcpProjectId) {
+        throw new Error("GCP project ID is required to refresh kubeconfig");
+      }
+      {
+        const result = await execCommand(
+          `gcloud container clusters get-credentials ${clusterName} --location ${region} --project ${options.gcpProjectId}`,
+          30000,
+        );
+        if (result.stderr && !result.stdout) throw new Error(result.stderr);
+      }
+      return;
+    case "azure":
+      if (!options.azureResourceGroup) {
+        throw new Error("Azure resource group is required to refresh kubeconfig");
+      }
+      {
+        const result = await execCommand(
+          `az aks get-credentials --name ${clusterName} --resource-group ${options.azureResourceGroup} --overwrite-existing`,
+          30000,
+        );
+        if (result.stderr && !result.stdout) throw new Error(result.stderr);
+      }
+      return;
+  }
+}
+
+/**
  * Get installation URLs for cloud CLIs
  */
 export const CLI_INSTALL_URLS: Record<
@@ -961,57 +1174,11 @@ export const CLI_LOGIN_COMMANDS: Record<CloudProvider, string | string[]> = {
   gcp: [
     "gcloud auth login",
     "gcloud config set project PROJECT_ID",
-    "gcloud auth application-default login",
   ],
   azure: [
     "az login",
     "az account set --subscription YOUR_SUBSCRIPTION_ID",
-    "az provider register --namespace Microsoft.ContainerService",
   ],
-};
-
-// ============================================================================
-// Terraform
-// ============================================================================
-
-/**
- * Terraform installation status
- */
-export interface TerraformStatus {
-  installed: boolean;
-  version?: string;
-  error?: string;
-}
-
-/**
- * Check if Terraform is installed
- */
-export async function checkTerraform(): Promise<TerraformStatus> {
-  try {
-    const result = await execCommand("terraform --version");
-
-    if (result.stderr && !result.stdout) {
-      return { installed: false, error: "Terraform not found" };
-    }
-
-    // Extract version (e.g., "Terraform v1.5.0")
-    const versionMatch = result.stdout.match(/Terraform v([\d.]+)/);
-    return {
-      installed: true,
-      version: versionMatch ? versionMatch[1] : undefined,
-    };
-  } catch {
-    return { installed: false, error: "Terraform not found" };
-  }
-}
-
-/**
- * Terraform installation info
- */
-export const TERRAFORM_INSTALL_INFO = {
-  name: "Terraform",
-  url: "https://developer.hashicorp.com/terraform/downloads",
-  installCmd: "brew install terraform",
 };
 
 // ============================================================================

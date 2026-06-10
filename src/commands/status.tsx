@@ -8,9 +8,7 @@ import {
   useTheme,
   Logo,
 } from "../components/common/index.js";
-import { loadDeploymentConfig, loadDeploymentState } from "../lib/config.js";
 import {
-  getPodStatus,
   getServiceStatus,
   getIngressStatus,
   getCertificateStatus,
@@ -19,14 +17,16 @@ import {
   IngressStatus,
   CertificateStatus,
 } from "../lib/kubernetes.js";
-import { getInstalledVersion } from "../lib/helm.js";
 import {
   DeploymentConfig,
   DeploymentState,
-  getNamespace,
-  getReleaseName,
 } from "../types/index.js";
 import { CommandTheme } from "../lib/theme.js";
+import {
+  arePodsHealthy,
+  DeploymentHealth,
+  loadDeploymentHealth,
+} from "../lib/deploymentHealth.js";
 
 interface StatusCommandProps {
   name: string;
@@ -43,6 +43,7 @@ interface ClusterStatus {
 interface LoadedData {
   config: DeploymentConfig;
   state: DeploymentState | null;
+  health: DeploymentHealth;
   clusterStatus: ClusterStatus;
 }
 
@@ -53,7 +54,7 @@ function StatusCommandInner({
   const { exit } = useApp();
   const { colors } = useTheme();
 
-  const { config, state, clusterStatus } = data;
+  const { config, state, health, clusterStatus } = data;
 
   useEffect(() => {
     // Auto-exit after displaying
@@ -63,28 +64,20 @@ function StatusCommandInner({
 
   // Determine overall status based on deployment state and pod health
   const getOverallStatus = () => {
-    // If no state file exists, deployment was never attempted
-    if (!state) return "not-deployed";
-
-    // Check the deployment state status
-    if (state.status === "failed") return "failed";
-    if (state.status === "destroyed") return "destroyed";
-    if (state.status === "pending") return "pending";
-    if (state.status === "deploying") return "deploying";
-    if (state.status === "waiting-dns") return "waiting-dns";
-
-    // If state says running, verify with actual pod status
-    const pods = clusterStatus.pods || [];
-    if (pods.length === 0) {
-      // No pods means something is wrong (unless still deploying)
-      return state.status === "running" ? "degraded" : "unknown";
+    if (health.kind === "online") return "healthy";
+    if (health.kind === "installed-unreachable") return "unreachable";
+    if (health.kind === "installed-degraded") return "degraded";
+    if (health.kind === "cluster-unreachable") return "cluster-unreachable";
+    if (health.kind === "destroyed") return "destroyed";
+    if (health.kind === "not-installed") {
+      if (state?.status === "failed") return "failed";
+      if (state?.status === "pending") return "pending";
+      if (state?.status === "deploying") return "deploying";
+      if (state?.status === "waiting-dns") return "waiting-dns";
+      return state ? "not-installed" : "not-deployed";
     }
 
-    // Consider a pod healthy if it's ready OR if it's a completed Job pod
-    const allPodsHealthy = pods.every(
-      (p) => p.ready || p.status === "Succeeded" || p.status === "Completed",
-    );
-    return allPodsHealthy ? "healthy" : "degraded";
+    return "unknown";
   };
 
   const overallStatus = getOverallStatus();
@@ -94,9 +87,16 @@ function StatusCommandInner({
     { icon: string; label: string; color: string }
   > = {
     healthy: { icon: "●", label: "Healthy", color: colors.success },
+    unreachable: { icon: "◐", label: "Installed, URL Unreachable", color: colors.warning },
     degraded: { icon: "◐", label: "Degraded", color: colors.warning },
     failed: { icon: "✗", label: "Failed", color: colors.error },
+    "cluster-unreachable": {
+      icon: "?",
+      label: "Cluster Unreachable",
+      color: colors.warning,
+    },
     destroyed: { icon: "○", label: "Destroyed", color: colors.muted },
+    "not-installed": { icon: "○", label: "Not Installed", color: colors.muted },
     pending: { icon: "○", label: "Pending", color: colors.muted },
     deploying: { icon: "◐", label: "Deploying", color: colors.accent },
     "waiting-dns": {
@@ -132,6 +132,15 @@ function StatusCommandInner({
           <Text>
             URL: <Text color={colors.accent}>https://{config.domain}</Text>
           </Text>
+          <Text>
+            URL Health:{" "}
+            <Text color={health.httpReachable ? colors.success : colors.warning}>
+              {health.httpReachable ? "Reachable" : "Unreachable"}
+            </Text>
+          </Text>
+          {health.clusterError && (
+            <Text color={colors.warning}>Cluster: Unreachable</Text>
+          )}
         </Section>
 
         {/* Not Deployed message */}
@@ -148,8 +157,8 @@ function StatusCommandInner({
           </Box>
         )}
 
-        {/* Only show infrastructure sections when deployment has been attempted */}
-        {state && (
+        {/* Only show infrastructure sections when Kubernetes data is available */}
+        {!health.clusterError && health.kind !== "not-installed" && health.kind !== "destroyed" && (
           <>
             {/* Pods */}
             <Section title="Pods">
@@ -157,11 +166,7 @@ function StatusCommandInner({
                 <Text color={colors.muted}>No pods found</Text>
               ) : (
                 clusterStatus.pods.map((pod) => {
-                  // Consider pod healthy if ready OR if it's a completed Job
-                  const isHealthy =
-                    pod.ready ||
-                    pod.status === "Succeeded" ||
-                    pod.status === "Completed";
+                  const isHealthy = arePodsHealthy([pod]);
                   return (
                     <Box key={pod.name}>
                       <Text color={isHealthy ? colors.success : colors.warning}>
@@ -275,31 +280,43 @@ function StatusLoader({ name }: StatusCommandProps) {
 
   async function loadStatus() {
     try {
-      const config = await loadDeploymentConfig(name);
-      const state = await loadDeploymentState(name);
+      const health = await loadDeploymentHealth(name, {
+        refreshKubeconfig: true,
+      });
 
-      // Determine theme based on whether deployment was attempted
-      // Use 'logs' theme (gray/muted) for undeployed, 'status' (green) for deployed
-      const selectedTheme: CommandTheme = state ? "status" : "logs";
+      if (!health.config) {
+        setError(health.configError || "Invalid deployment config");
+        setLoading(false);
+        return;
+      }
+
+      const selectedTheme: CommandTheme =
+        health.kind === "online" ||
+        health.kind === "installed-unreachable" ||
+        health.kind === "installed-degraded"
+          ? "status"
+          : "logs";
       setTheme(selectedTheme);
 
-      // Use namespace from state if available (backwards compat), otherwise compute from deployment name
-      const namespace = state?.application?.namespace || getNamespace(name);
-      const releaseName = getReleaseName(name);
-
-      const [pods, services, ingresses, certificates, version] =
-        await Promise.all([
-          getPodStatus(namespace),
-          getServiceStatus(namespace),
-          getIngressStatus(namespace),
-          getCertificateStatus(namespace),
-          getInstalledVersion(releaseName, namespace),
-        ]);
+      const [services, ingresses, certificates] = health.clusterError
+        ? [[], [], []]
+        : await Promise.all([
+            getServiceStatus(health.namespace),
+            getIngressStatus(health.namespace),
+            getCertificateStatus(health.namespace),
+          ]);
 
       setData({
-        config,
-        state,
-        clusterStatus: { pods, services, ingresses, certificates, version },
+        config: health.config,
+        state: health.state,
+        health,
+        clusterStatus: {
+          pods: health.pods,
+          services,
+          ingresses,
+          certificates,
+          version: health.helmVersion,
+        },
       });
       setLoading(false);
     } catch (err) {

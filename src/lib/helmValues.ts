@@ -1,18 +1,71 @@
 import {
   DeploymentConfig,
   TIER_CONFIGS,
+  TierConfig,
   isSupportedDnsProvider,
-  getLoggingDestinationLabel,
-  LoggingSink,
   RemoteWriteConfig,
   SecretKeyRef,
+  validateRemoteWriteConfig,
 } from "../types/index.js";
 import { saveHelmValues, getHelmValuesPath } from "./config.js";
+import { assertValidHelmValues } from "./validateValues.js";
+import {
+  SUPABASE_POSTGRES_IMAGE_REPOSITORY,
+  SUPABASE_POSTGRES_IMAGE_TAG,
+} from "./versions.js";
 import fs from "fs/promises";
 import YAML from "yaml";
 
 interface GenerateOptions {
   tlsEnabled?: boolean;
+}
+
+// global.version must be empty or a semantic version per the chart schema. The
+// CLI normally pins a real version, but migrated/legacy configs can carry
+// "latest"; emitting that would fail chart validation, so we omit it instead
+// and let the chart fall back to its default.
+const SEMVER_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+
+// Healthy defaults for the decision-log archive that ClickHouse reads:
+// flush a gzipped NDJSON file at ~256 MiB (uncompressed) or after 5 minutes,
+// whichever comes first. Users can override these in their Helm values.
+const DECISION_LOG_BATCH = { max_bytes: 268435456, timeout_secs: 300 } as const;
+
+// VRL that normalizes the Kafka decision-log envelope into the ClickHouse column
+// types. Inlined as a real multi-line string (not a chart `{{ include }}`) so
+// that YAML.stringify / Helm's toYaml emit it as a block scalar. A templated
+// single-line include gets rendered into a single-quoted YAML scalar, whose
+// newlines YAML folds into spaces — collapsing the statements onto one line and
+// breaking VRL parsing. Keep in sync with rulebricks.vector.normalizeLogs.
+const VECTOR_NORMALIZE_LOGS_VRL = [
+  "parsed, err = parse_json(string!(.message))",
+  "if err == null {",
+  "  . = parsed",
+  "}",
+  '.timestamp = parse_timestamp!(to_string(.timestamp) ?? to_string(now()), format: "%+")',
+  '.api_key = to_string(.api_key) ?? ""',
+  ".user_id = to_string(.user_id) ?? null",
+  ".environment = to_string(.environment) ?? null",
+  ".ip = to_string(.ip) ?? null",
+  ".method = to_string(.method) ?? null",
+  '.url = to_string(.url) ?? ""',
+  ".status = to_int(.status) ?? 0",
+  ".rule_name = to_string(.rule_name) ?? null",
+  ".rule_id = to_string(.rule_id) ?? null",
+  ".rule_slug = to_string(.rule_slug) ?? null",
+  ".rule_version = to_string(.rule_version) ?? null",
+  ".operation = to_string(.operation) ?? null",
+  '.level = to_string(.level) ?? "info"',
+  ".error = to_string(.error) ?? null",
+  '.request = to_string(.request) ?? "null"',
+  '.response = to_string(.response) ?? "null"',
+  '.decision = to_string(.decision) ?? "{}"',
+  '.params = to_string(.params) ?? "{}"',
+].join("\n");
+
+function decisionLogPathPrefix(config: DeploymentConfig): string {
+  const path = config.storage?.paths?.decisionLogs || "decision-logs";
+  return `${path.replace(/^\/+|\/+$/g, "")}/year=%Y/month=%m/day=%d/hour=%H/`;
 }
 
 /**
@@ -25,14 +78,76 @@ function generateVectorSinks(
     // Console sink is always enabled
     console: {
       type: "console",
-      inputs: ["kafka"],
+      inputs: ["normalize_logs"],
       encoding: {
         codec: "json",
       },
     },
   };
 
-  // Add external sink if configured
+  if (config.storage) {
+    const storage = config.storage;
+    switch (config.storage.provider) {
+      case "s3":
+        sinks.decision_logs = {
+          type: "aws_s3",
+          inputs: ["normalize_logs"],
+          bucket: storage.bucket,
+          region: storage.region,
+          key_prefix: decisionLogPathPrefix(config),
+          filename_extension: "ndjson",
+          compression: "gzip",
+          encoding: { codec: "json" },
+          framing: { method: "newline_delimited" },
+          batch: { ...DECISION_LOG_BATCH },
+        };
+        break;
+      case "azure-blob": {
+        const sink: Record<string, unknown> = {
+          type: "azure_blob",
+          inputs: ["normalize_logs"],
+          account_name: storage.bucket,
+          container_name: storage.azureBlobContainer || "rulebricks",
+          blob_prefix: decisionLogPathPrefix(config),
+          // azure_blob has no filename_extension (unlike aws_s3/gcs); it always
+          // writes ".log" (".log.gz" when compressed). ClickHouse globs on *.gz.
+          compression: "gzip",
+          encoding: { codec: "json" },
+          framing: { method: "newline_delimited" },
+          batch: { ...DECISION_LOG_BATCH },
+        };
+        if (config.storage.cloudAuthMode === "secret") {
+          sink.connection_string = "${AZURE_STORAGE_CONNECTION_STRING}";
+        } else {
+          sink.auth = {
+            azure_credential_kind: "workload_identity",
+            client_id: config.storage.azureBlobClientId,
+            tenant_id: config.storage.azureBlobTenantId,
+            token_file_path: "/var/run/secrets/azure/tokens/azure-identity-token",
+          };
+        }
+        sinks.decision_logs = sink;
+        break;
+      }
+      case "gcs":
+        sinks.decision_logs = {
+          type: "gcp_cloud_storage",
+          inputs: ["normalize_logs"],
+          bucket: storage.bucket,
+          key_prefix: decisionLogPathPrefix(config),
+          filename_extension: "ndjson",
+          compression: "gzip",
+          encoding: { codec: "json" },
+          framing: { method: "newline_delimited" },
+          batch: { ...DECISION_LOG_BATCH },
+        };
+        break;
+    }
+  }
+
+  // Add external logging-platform sink if configured. Decision logs always go
+  // to object storage via the decision_logs sink above; this is an additional
+  // platform destination (Datadog, Splunk, etc.).
   if (
     config.features.logging.sink !== "console" &&
     config.features.logging.sink !== "pending"
@@ -40,82 +155,12 @@ function generateVectorSinks(
     const { sink, bucket, region } = config.features.logging;
 
     switch (sink) {
-      // Cloud Storage sinks
-      case "s3":
-        sinks.s3 = {
-          type: "aws_s3",
-          inputs: ["kafka"],
-          bucket: bucket,
-          region: region,
-          key_prefix: "rulebricks/logs/%Y/%m/%d/",
-          compression: "gzip",
-          encoding: {
-            codec: "json",
-          },
-        };
-        break;
-
-      case "azure-blob":
-        if (!bucket) {
-          throw new Error("Azure Blob logging requires a storage account.");
-        }
-        const azureBlobSink: Record<string, unknown> = {
-          type: "azure_blob",
-          inputs: ["kafka"],
-          account_name: bucket,
-          container_name:
-            config.features.logging.azureBlobContainer || "rulebricks-logs",
-          blob_prefix: "rulebricks/logs/%Y/%m/%d/",
-          compression: "gzip",
-          encoding: {
-            codec: "json",
-          },
-        };
-        if (config.features.logging.cloudAuthMode === "secret") {
-          if (!config.features.logging.azureBlobConnectionStringSecretRef) {
-            throw new Error(
-              "Azure Blob connection string auth requires a secret ref.",
-            );
-          }
-          azureBlobSink.connection_string = "${AZURE_STORAGE_CONNECTION_STRING}";
-        } else {
-          if (
-            !config.features.logging.azureBlobClientId ||
-            !config.features.logging.azureBlobTenantId
-          ) {
-            throw new Error(
-              "Azure Blob workload identity requires client ID and tenant ID.",
-            );
-          }
-          azureBlobSink.auth = {
-            azure_credential_kind: "workload_identity",
-            client_id: config.features.logging.azureBlobClientId,
-            tenant_id: config.features.logging.azureBlobTenantId,
-            token_file_path: "/var/run/secrets/azure/tokens/azure-identity-token",
-          };
-        }
-        sinks.azure_blob = azureBlobSink;
-        break;
-
-      case "gcs":
-        sinks.gcs = {
-          type: "gcp_cloud_storage",
-          inputs: ["kafka"],
-          bucket: bucket,
-          key_prefix: "rulebricks/logs/%Y/%m/%d/",
-          compression: "gzip",
-          encoding: {
-            codec: "json",
-          },
-        };
-        break;
-
       // Logging platform sinks
       // For platforms, bucket is repurposed for API key/token, region for site/URL
       case "datadog":
         sinks.datadog = {
           type: "datadog_logs",
-          inputs: ["kafka"],
+          inputs: ["normalize_logs"],
           default_api_key: bucket, // API key stored in bucket field
           site: region || "datadoghq.com", // Site stored in region field
           compression: "gzip",
@@ -128,7 +173,7 @@ function generateVectorSinks(
       case "splunk":
         sinks.splunk = {
           type: "splunk_hec_logs",
-          inputs: ["kafka"],
+          inputs: ["normalize_logs"],
           endpoint: region, // URL stored in region field
           default_token: bucket, // HEC token stored in bucket field
           compression: "gzip",
@@ -144,7 +189,7 @@ function generateVectorSinks(
           const esConfig = JSON.parse(bucket || "{}");
           sinks.elasticsearch = {
             type: "elasticsearch",
-            inputs: ["kafka"],
+            inputs: ["normalize_logs"],
             endpoints: [esConfig.url],
             bulk: {
               index: esConfig.index || "rulebricks-logs",
@@ -163,7 +208,7 @@ function generateVectorSinks(
           // Fallback if JSON parsing fails
           sinks.elasticsearch = {
             type: "elasticsearch",
-            inputs: ["kafka"],
+            inputs: ["normalize_logs"],
             endpoints: [bucket],
             bulk: {
               index: region || "rulebricks-logs",
@@ -175,7 +220,7 @@ function generateVectorSinks(
       case "loki":
         sinks.loki = {
           type: "loki",
-          inputs: ["kafka"],
+          inputs: ["normalize_logs"],
           endpoint: bucket, // Loki URL stored in bucket field
           labels: {
             app: "rulebricks",
@@ -190,7 +235,7 @@ function generateVectorSinks(
       case "newrelic":
         sinks.newrelic = {
           type: "new_relic",
-          inputs: ["kafka"],
+          inputs: ["normalize_logs"],
           license_key: bucket, // License key stored in bucket field
           account_id: region, // Account ID stored in region field
           api: "logs",
@@ -204,7 +249,7 @@ function generateVectorSinks(
       case "axiom":
         sinks.axiom = {
           type: "axiom",
-          inputs: ["kafka"],
+          inputs: ["normalize_logs"],
           token: bucket, // API token stored in bucket field
           dataset: region || "rulebricks", // Dataset stored in region field
           compression: "gzip",
@@ -220,24 +265,36 @@ function generateVectorSinks(
 }
 
 function generateVectorEnv(config: DeploymentConfig): Array<Record<string, unknown>> {
-  const env: Array<Record<string, unknown>> = [
-    {
-      name: "KAFKA_BOOTSTRAP_SERVERS",
-      valueFrom: {
-        configMapKeyRef: {
-          name: "vector-kafka-env",
-          key: "KAFKA_BOOTSTRAP_SERVERS",
-        },
-      },
-    },
+  // Kafka connection settings come from the templated vector-kafka-env ConfigMap
+  // so the in-cluster vs external (and bridge) decision lives in one place.
+  const configMapKeys = [
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "KAFKA_TLS_ENABLED",
+    "KAFKA_SASL_ENABLED",
+    "KAFKA_SASL_MECHANISM",
+    "KAFKA_LOG_TOPIC",
   ];
+  const env: Array<Record<string, unknown>> = configMapKeys.map((key) => ({
+    name: key,
+    valueFrom: { configMapKeyRef: { name: "vector-kafka-env", key } },
+  }));
 
-  const azureBlobSecretRef =
-    config.features.logging.azureBlobConnectionStringSecretRef;
+  // SASL credentials (inline PLAIN/SCRAM). Optional so in-cluster/token-auth
+  // deploys work without the secret existing.
+  for (const key of ["KAFKA_SASL_USERNAME", "KAFKA_SASL_PASSWORD"]) {
+    env.push({
+      name: key,
+      valueFrom: {
+        secretKeyRef: { name: "vector-kafka-credentials", key, optional: true },
+      },
+    });
+  }
+
+  const azureBlobSecretRef = config.storage?.azureBlobConnectionStringSecretRef;
 
   if (
-    config.features.logging.sink === "azure-blob" &&
-    config.features.logging.cloudAuthMode === "secret" &&
+    config.storage?.provider === "azure-blob" &&
+    config.storage.cloudAuthMode === "secret" &&
     azureBlobSecretRef
   ) {
     env.push({
@@ -256,23 +313,32 @@ function generateVectorServiceAccount(
 ): Record<string, unknown> {
   const annotations: Record<string, string> = {};
 
-  if (config.features.logging.sink === "s3" && config.features.logging.awsIamRoleArn) {
+  if (config.storage?.provider === "s3" && config.storage.awsIamRoleArn) {
     annotations["eks.amazonaws.com/role-arn"] =
-      config.features.logging.awsIamRoleArn;
+      config.storage.awsIamRoleArn;
   }
 
   if (
-    config.features.logging.sink === "azure-blob" &&
-    config.features.logging.cloudAuthMode !== "secret" &&
-    config.features.logging.azureBlobClientId
+    config.storage?.provider === "azure-blob" &&
+    config.storage.cloudAuthMode !== "secret" &&
+    config.storage.azureBlobClientId
   ) {
     annotations["azure.workload.identity/client-id"] =
-      config.features.logging.azureBlobClientId;
+      config.storage.azureBlobClientId;
   }
 
-  if (config.features.logging.sink === "gcs" && config.features.logging.gcpServiceAccountEmail) {
+  if (config.storage?.provider === "gcs" && config.storage.gcpServiceAccountEmail) {
     annotations["iam.gke.io/gcp-service-account"] =
-      config.features.logging.gcpServiceAccountEmail;
+      config.storage.gcpServiceAccountEmail;
+  }
+
+  // When external Kafka uses MSK IAM, the kafka-proxy bridge sidecar in this pod
+  // authenticates with the pod's IRSA role. This role must also grant the object
+  // storage permissions the Vector sink needs (one IRSA role per service account).
+  const kafkaRoleArn =
+    config.externalServices?.kafka?.external?.identity?.awsRoleArn;
+  if (kafkaUsesBridge(config) && kafkaRoleArn) {
+    annotations["eks.amazonaws.com/role-arn"] = kafkaRoleArn;
   }
 
   return {
@@ -283,11 +349,13 @@ function generateVectorServiceAccount(
 }
 
 function generateVectorPodLabels(config: DeploymentConfig): Record<string, string> {
-  const labels: Record<string, string> = {};
+  const labels: Record<string, string> = {
+    "rulebricks.com/workload-group": "infrastructure",
+  };
 
   if (
-    config.features.logging.sink === "azure-blob" &&
-    config.features.logging.cloudAuthMode !== "secret"
+    config.storage?.provider === "azure-blob" &&
+    config.storage.cloudAuthMode !== "secret"
   ) {
     labels["azure.workload.identity/use"] = "true";
   }
@@ -315,6 +383,17 @@ function secretKeySelector(ref: SecretKeyRef): Record<string, string> {
   };
 }
 
+/**
+ * Strips surrounding whitespace and embedded control characters (notably the
+ * trailing carriage return that sneaks in when a remote_write URL is pasted from
+ * a CRLF file or captured from command output). A stray "\r" corrupts the URL
+ * the Prometheus operator hands to remote_write, so normalize it at the source.
+ */
+function sanitizeRemoteWriteUrl(url: string): string {
+  // eslint-disable-next-line no-control-regex
+  return url.replace(/[\u0000-\u001F\u007F]/g, "").trim();
+}
+
 function generateRemoteWriteSpec(
   config: DeploymentConfig,
 ): Array<Record<string, unknown>> {
@@ -326,12 +405,20 @@ function generateRemoteWriteSpec(
 
   if (!remoteWrite) {
     return config.features.monitoring.remoteWriteUrl
-      ? [{ url: config.features.monitoring.remoteWriteUrl }]
+      ? [{ url: sanitizeRemoteWriteUrl(config.features.monitoring.remoteWriteUrl) }]
       : [];
   }
 
+  // Enforce the same per-destination/auth requirements the wizard and Zod
+  // schema do. This is unreachable for CLI-generated configs (they are gated
+  // earlier) but guards hand-edited values and keeps one source of truth.
+  const remoteWriteErrors = validateRemoteWriteConfig(remoteWrite);
+  if (remoteWriteErrors.length > 0) {
+    throw new Error(remoteWriteErrors.join(" "));
+  }
+
   const base: Record<string, unknown> = {
-    url: remoteWrite.url,
+    url: sanitizeRemoteWriteUrl(remoteWrite.url),
   };
 
   switch (remoteWrite.destination) {
@@ -431,8 +518,16 @@ function generateAzureMonitorRemoteWrite(
         "Azure Monitor remote_write workload identity requires client ID and tenant ID.",
       );
     }
-    azureAd.workloadIdentity = {
-      clientId: remoteWrite.clientId,
+    // The prometheus-operator AzureAD schema supports only managedIdentity,
+    // oauth, and sdk (there is no "workloadIdentity" field — emitting it makes
+    // the operator reject the whole remoteWrite with "must provide Azure Managed
+    // Identity or Azure OAuth or Azure SDK", which silently prevents the
+    // Prometheus StatefulSet from being created). For AKS workload identity we
+    // use the Azure SDK credential: it reads the projected token + AZURE_CLIENT_ID
+    // injected by the workload-identity webhook (driven by the prometheus
+    // ServiceAccount's azure.workload.identity/client-id annotation and the
+    // azure.workload.identity/use pod label), so only the tenant ID is needed here.
+    azureAd.sdk = {
       tenantId: remoteWrite.tenantId,
     };
   } else {
@@ -521,13 +616,273 @@ function generateKafkaExtraEnvVars(): Array<{ name: string; value: string }> {
   ];
 }
 
+function generateWorkerPodAntiAffinity(): Record<string, unknown> {
+  return {
+    podAntiAffinity: {
+      preferredDuringSchedulingIgnoredDuringExecution: [
+        {
+          weight: 50,
+          podAffinityTerm: {
+            labelSelector: {
+              matchExpressions: [
+                {
+                  key: "rulebricks.com/workload-group",
+                  operator: "In",
+                  values: ["infrastructure"],
+                },
+              ],
+            },
+            topologyKey: "kubernetes.io/hostname",
+          },
+        },
+      ],
+    },
+  };
+}
+
+function generateScheduling(
+  tolerations?: Array<Record<string, string>>,
+  affinity?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...(affinity ? { affinity } : {}),
+    ...(tolerations ? { tolerations } : {}),
+  };
+}
+
+function generateBackupValues(config: DeploymentConfig): Record<string, unknown> {
+  const enabled =
+    config.database.type === "self-hosted" && config.backup?.enabled === true;
+
+  // The backup CronJob streams pg_dump from the running DB (using supabase.db.image)
+  // and uploads it with rclone, so no backup-specific image is needed here. The
+  // chart default rclone image applies unless overridden in values.
+  return {
+    enabled,
+    schedule: config.backup?.schedule || "0 2 * * *",
+    retentionDays: config.backup?.retentionDays || 7,
+  };
+}
+
+function isExternalRedis(config: DeploymentConfig): boolean {
+  return config.externalServices?.redis?.mode === "external";
+}
+
+function isExternalKafka(config: DeploymentConfig): boolean {
+  return config.externalServices?.kafka?.mode === "external";
+}
+
 /**
- * Generates Helm values from the deployment configuration
+ * Whether the Vector kafka-proxy bridge sidecar is required. Only AWS MSK IAM
+ * needs it: Vector's kafka source can't speak token mechanisms, while Azure
+ * Event Hubs and GCP both use SASL PLAIN/SCRAM that Vector handles directly.
  */
-export async function generateHelmValues(
+function kafkaUsesBridge(config: DeploymentConfig): boolean {
+  if (!isExternalKafka(config)) return false;
+  const ext = config.externalServices?.kafka?.external;
+  return (
+    ext?.preset === "aws-msk-iam" || ext?.sasl?.mechanism === "aws-iam"
+  );
+}
+
+/**
+ * Whether Vector's kafka source connects with a direct PLAIN/SCRAM credential
+ * and therefore needs username/password. This mirrors the vector-kafka-env
+ * ConfigMap, which only sets KAFKA_SASL_ENABLED=true for external, non-token,
+ * non-bridge mechanisms (and where vector-kafka-credentials is populated). For
+ * in-cluster, bridge, and token-auth paths SASL is disabled, so username and
+ * password MUST be omitted: an empty env default (${VAR:-}) renders unquoted
+ * via Helm's toYaml and Vector reads the value as YAML null, which it rejects
+ * at startup ("invalid type: unit value, expected any valid TOML value").
+ */
+function kafkaUsesDirectSasl(config: DeploymentConfig): boolean {
+  if (!isExternalKafka(config)) return false;
+  if (kafkaUsesBridge(config)) return false;
+  const mechanism = config.externalServices?.kafka?.external?.sasl?.mechanism;
+  if (!mechanism) return false;
+  return mechanism !== "aws-iam" && mechanism !== "oauthbearer";
+}
+
+/**
+ * Builds the rulebricks.redis block: in-cluster sizing when embedded, or
+ * external connection settings when the user points at managed Redis.
+ */
+function generateRedisBlock(
+  config: DeploymentConfig,
+  tierConfig: TierConfig,
+  storageClass: string,
+  infrastructurePodLabels: Record<string, string>,
+  coreScheduling: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!isExternalRedis(config)) {
+    return {
+      podLabels: infrastructurePodLabels,
+      resources: tierConfig.redisResources,
+      ...coreScheduling,
+      persistence: {
+        enabled: true,
+        size: tierConfig.redisPersistenceSize,
+        storageClass,
+      },
+    };
+  }
+
+  const ext = config.externalServices?.redis?.external ?? {};
+  const external: Record<string, unknown> = {
+    host: ext.host ?? "",
+    port: ext.port ?? 6379,
+    tls: { enabled: ext.tls ?? false },
+  };
+  if (ext.password) {
+    external.password = ext.password;
+  }
+  if (ext.existingSecret) {
+    external.existingSecret = ext.existingSecret;
+    external.existingSecretKey = ext.existingSecretKey || "redis-password";
+  }
+  if (ext.httpApi?.enabled) {
+    external.httpApi = {
+      enabled: true,
+      url: ext.httpApi.url ?? "",
+      token: ext.httpApi.token ?? "",
+    };
+  }
+
+  return {
+    enabled: false,
+    external,
+  };
+}
+
+/**
+ * Builds the rulebricks.app.logging block. Decision logging is always enabled;
+ * external Kafka adds brokers + SSL/SASL, while embedded auto-discovers the
+ * in-cluster Kafka service.
+ */
+function generateAppLogging(config: DeploymentConfig): Record<string, unknown> {
+  if (!isExternalKafka(config)) {
+    return {
+      enabled: true,
+      kafkaBrokers: "", // Auto-discover from Kafka subchart
+      kafkaTopic: "logs",
+      // The in-cluster app/HPS produce to unprefixed topics (logs, solution,
+      // solution-response). The chart default prefix ("com.rulebricks.") is meant
+      // for shared/managed Kafka collision avoidance, but when applied here it
+      // makes the chart-side consumers diverge from the producers: Vector would
+      // subscribe to "com.rulebricks.logs" (no data) and the KEDA worker trigger
+      // would watch "com.rulebricks.solution" (no lag signal). Disable prefixing
+      // for the dedicated in-cluster broker so everything lines up.
+      kafkaTopicPrefix: "",
+    };
+  }
+
+  const ext = config.externalServices?.kafka?.external ?? {};
+  const logging: Record<string, unknown> = {
+    enabled: true,
+    kafkaBrokers: ext.brokers ?? "",
+    kafkaTopic: ext.topic || "logs",
+    kafkaSsl: ext.ssl ?? false,
+  };
+
+  // Topic prefix: emit only when explicitly provided (incl. "" to disable). When
+  // omitted, the chart default (com.rulebricks.) applies via value merge.
+  if (ext.topicPrefix !== undefined) {
+    logging.kafkaTopicPrefix = ext.topicPrefix;
+  }
+
+  if (ext.sasl?.mechanism) {
+    const sasl: Record<string, unknown> = { mechanism: ext.sasl.mechanism };
+    if (ext.sasl.region) sasl.region = ext.sasl.region;
+    if (ext.sasl.username) sasl.username = ext.sasl.username;
+    if (ext.sasl.password) sasl.password = ext.sasl.password;
+    if (ext.sasl.existingSecret) sasl.existingSecret = ext.sasl.existingSecret;
+    logging.kafkaSasl = sasl;
+  }
+
+  return logging;
+}
+
+/**
+ * HPS service account. When external Kafka uses MSK IAM, HPS authenticates via
+ * its pod identity (IRSA), so create the SA and annotate it with the role ARN.
+ */
+function generateHpsServiceAccount(
+  config: DeploymentConfig,
+): Record<string, unknown> {
+  const roleArn = config.externalServices?.kafka?.external?.identity?.awsRoleArn;
+  if (kafkaUsesBridge(config) && roleArn) {
+    return {
+      create: true,
+      annotations: { "eks.amazonaws.com/role-arn": roleArn },
+    };
+  }
+  return { create: false, annotations: {} };
+}
+
+/**
+ * Top-level kafkaBridge block consumed by the Vector env ConfigMap. Only enabled
+ * for AWS MSK IAM, where a kafka-proxy sidecar fronts the brokers for Vector.
+ */
+function generateKafkaBridge(config: DeploymentConfig): Record<string, unknown> {
+  if (!kafkaUsesBridge(config)) {
+    return { enabled: false };
+  }
+  const ext = config.externalServices?.kafka?.external ?? {};
+  return {
+    enabled: true,
+    provider: "aws",
+    region: ext.sasl?.region ?? "",
+    brokers: ext.brokers ?? "",
+    localPort: 19092,
+    image: "grepplabs/kafka-proxy:latest",
+    awsRoleArn: ext.identity?.awsRoleArn ?? "",
+  };
+}
+
+/**
+ * kafka-proxy sidecar for the Vector pod (AWS MSK IAM). Maps each upstream
+ * broker to a sequential local port and authenticates with the pod's IRSA role.
+ */
+function generateVectorExtraContainers(
+  config: DeploymentConfig,
+): Array<Record<string, unknown>> | undefined {
+  if (!kafkaUsesBridge(config)) return undefined;
+  const ext = config.externalServices?.kafka?.external ?? {};
+  const brokers = (ext.brokers ?? "")
+    .split(",")
+    .map((b) => b.trim())
+    .filter(Boolean);
+  if (brokers.length === 0) return undefined;
+
+  const basePort = 19092;
+  const mappings = brokers.map(
+    (broker, i) => `--bootstrap-server-mapping=${broker},127.0.0.1:${basePort + i}`,
+  );
+
+  return [
+    {
+      name: "kafka-proxy",
+      image: "grepplabs/kafka-proxy:latest",
+      args: [
+        "server",
+        ...mappings,
+        "--tls-enable",
+        "--sasl-enable",
+        "--sasl-method=AWS_MSK_IAM",
+        `--sasl-aws-region=${ext.sasl?.region ?? ""}`,
+      ],
+      ports: brokers.map((_, i) => ({ containerPort: basePort + i })),
+    },
+  ];
+}
+
+/**
+ * Builds Helm values from the deployment configuration.
+ */
+export function buildHelmValues(
   config: DeploymentConfig,
   options: GenerateOptions = {},
-): Promise<void> {
+): Record<string, unknown> {
   const tierConfig = TIER_CONFIGS[config.tier];
   const { tlsEnabled = true } = options;
   const useLocalGrafana =
@@ -537,27 +892,47 @@ export async function generateHelmValues(
   const externalDnsEnabled =
     config.dns.autoManage && isSupportedDnsProvider(config.dns.provider);
 
-  // Determine storage class based on provider
-  // Note: GCP uses "hyperdisk-balanced" because C4A instances only support Hyperdisk (not Persistent Disk)
+  const gcpDiskType =
+    config.infrastructure.nodeArchitecture === "amd64"
+      ? "pd-balanced"
+      : "hyperdisk-balanced";
+
+  // Prefer the live cluster's StorageClass. Provider defaults are only a
+  // fallback for legacy configs that predate capability scanning.
   const storageClass =
-    config.infrastructure.provider === "aws"
+    config.infrastructure.storageClass ||
+    (config.infrastructure.provider === "aws"
       ? "gp3"
       : config.infrastructure.provider === "gcp"
-        ? "hyperdisk-balanced"
+        ? gcpDiskType
         : config.infrastructure.provider === "azure"
           ? "managed-premium"
-          : "gp3";
+          : "gp3");
 
-  // ARM64 tolerations for GKE C4A nodes (and other ARM64 providers)
-  // GKE automatically taints ARM64 nodes with kubernetes.io/arch=arm64:NoSchedule
-  const arm64Tolerations = [
-    {
-      key: "kubernetes.io/arch",
-      operator: "Equal",
-      value: "arm64",
-      effect: "NoSchedule",
-    },
-  ];
+  const shouldApplyArm64Toleration =
+    config.infrastructure.arm64TolerationRequired ?? false;
+  const architectureTolerations = shouldApplyArm64Toleration
+    ? [
+        {
+          key: "kubernetes.io/arch",
+          operator: "Equal",
+          value: "arm64",
+          effect: "NoSchedule",
+        },
+      ]
+    : undefined;
+  const coreScheduling = generateScheduling(architectureTolerations);
+  const workerScheduling = generateScheduling(
+    architectureTolerations,
+    generateWorkerPodAntiAffinity(),
+  );
+  const infrastructurePodLabels = {
+    "rulebricks.com/workload-group": "infrastructure",
+  };
+  const applicationPodLabels = {
+    "rulebricks.com/workload-group": "application",
+  };
+  const productVersion = config.version;
 
   // Build global.supabase configuration
   const supabaseGlobalConfig: Record<string, unknown> =
@@ -606,6 +981,9 @@ export async function generateHelmValues(
       email: config.adminEmail,
       tlsEnabled,
       licenseKey: config.licenseKey,
+      ...(productVersion && SEMVER_PATTERN.test(productVersion)
+        ? { version: productVersion }
+        : {}),
       externalDnsEnabled,
 
       // SMTP Configuration
@@ -641,52 +1019,91 @@ export async function generateHelmValues(
         : {
             enabled: false,
           },
+
+      storage: config.storage
+        ? {
+            // One provider, one identity, one bucket/container. decision-logs and
+            // db-backups are key prefixes under paths.* within it.
+            provider: config.storage.provider,
+            bucket: config.storage.bucket,
+            region: config.storage.region,
+            s3: {
+              iamRoleArn: config.storage.awsIamRoleArn || "",
+              existingSecret: { name: "" },
+            },
+            azure: {
+              authMode:
+                config.storage.cloudAuthMode === "secret"
+                  ? "connection-string"
+                  : "workload-identity",
+              clientId: config.storage.azureBlobClientId || "",
+              tenantId: config.storage.azureBlobTenantId || "",
+              container: config.storage.azureBlobContainer || "",
+              connectionStringSecretRef:
+                config.storage.azureBlobConnectionStringSecretRef || {
+                  name: "",
+                  key: "",
+                },
+            },
+            gcp: {
+              serviceAccountEmail: config.storage.gcpServiceAccountEmail || "",
+            },
+            paths: {
+              decisionLogs: config.storage.paths?.decisionLogs || "decision-logs",
+              dbBackups: config.storage.paths?.dbBackups || "db-backups",
+            },
+          }
+        : undefined,
     },
+
+    backup: generateBackupValues(config),
 
     // =============================================================================
     // RULEBRICKS APPLICATION STACK
     // =============================================================================
     rulebricks: {
-      app: {
-        ...(config.appVersion
-          ? {
-              image: {
-                repository: "index.docker.io/rulebricks/app",
-                tag: config.appVersion,
-                pullPolicy: "IfNotPresent",
-              },
-            }
-          : {}),
-        replicaCount: tierConfig.appReplicas,
-        resources: tierConfig.appResources,
-        tolerations: arm64Tolerations,
-
-        // Logging configuration
-        logging: {
+      metrics: {
+        enabled: true,
+        serviceMonitor: {
           enabled: true,
-          kafkaBrokers: "", // Auto-discover from Kafka subchart
-          kafkaTopic: "logs",
-          loggingDestination: getLoggingDestinationLabel(
-            config.features.logging.sink,
-          ),
+          interval: "30s",
+          scrapeTimeout: "10s",
         },
+        app: {
+          path: "/api/metrics",
+        },
+        hps: {
+          path: "/metrics",
+        },
+      },
+      app: {
+        image: {
+          repository: "index.docker.io/rulebricks/app",
+          pullPolicy: "IfNotPresent",
+        },
+        replicas: tierConfig.appReplicas,
+        resources: tierConfig.appResources,
+        podLabels: infrastructurePodLabels,
+        ...coreScheduling,
+
+        // Logging configuration (in-cluster auto-discovery or external Kafka)
+        logging: generateAppLogging(config),
       },
 
       // HPS (High Performance Server)
       hps: {
         enabled: true,
-        ...(config.hpsVersion
-          ? {
-              image: {
-                repository: "index.docker.io/rulebricks/hps",
-                tag: config.hpsVersion,
-                pullPolicy: "Always",
-              },
-            }
-          : {}),
+        image: {
+          repository: "index.docker.io/rulebricks/hps",
+          pullPolicy: "Always",
+        },
         replicas: tierConfig.hpsReplicas,
         resources: tierConfig.hpsResources,
-        tolerations: arm64Tolerations,
+        podLabels: applicationPodLabels,
+        ...coreScheduling,
+
+        // Service account (annotated with the MSK IAM role for external Kafka)
+        serviceAccount: generateHpsServiceAccount(config),
 
         // HPS Workers with KEDA autoscaling
         workers: {
@@ -702,7 +1119,8 @@ export async function generateHelmValues(
             cpuThreshold: 25,
           },
           resources: tierConfig.hpsWorkerResources,
-          tolerations: arm64Tolerations,
+          podLabels: applicationPodLabels,
+          ...workerScheduling,
         },
       },
 
@@ -713,23 +1131,21 @@ export async function generateHelmValues(
         paths: [{ path: "/", pathType: "Prefix" }],
       },
 
-      // Redis configuration
-      redis: {
-        resources: tierConfig.redisResources,
-        tolerations: arm64Tolerations,
-        persistence: {
-          enabled: true,
-          size: tierConfig.redisPersistenceSize,
-          storageClass: storageClass,
-        },
-      },
+      // Redis configuration (in-cluster sizing or external connection settings)
+      redis: generateRedisBlock(
+        config,
+        tierConfig,
+        storageClass,
+        infrastructurePodLabels,
+        coreScheduling,
+      ),
     },
 
     // =============================================================================
     // KAFKA (Message Queue)
     // =============================================================================
     kafka: {
-      enabled: true,
+      enabled: !isExternalKafka(config),
       // KRaft mode (no Zookeeper)
       kraft: {
         enabled: true,
@@ -747,8 +1163,9 @@ export async function generateHelmValues(
       },
       controller: {
         replicaCount: tierConfig.kafkaReplication,
+        podLabels: infrastructurePodLabels,
         resources: tierConfig.kafkaResources,
-        tolerations: arm64Tolerations,
+        ...coreScheduling,
         persistence: {
           enabled: true,
           size: tierConfig.kafkaStorage,
@@ -768,6 +1185,72 @@ export async function generateHelmValues(
           protocol: "PLAINTEXT",
         },
       },
+      metrics: {
+        jmx: {
+          enabled: true,
+        },
+        serviceMonitor: {
+          enabled: true,
+        },
+      },
+    },
+
+    // =============================================================================
+    // VECTOR KAFKA BRIDGE (AWS MSK IAM token auth)
+    // =============================================================================
+    kafkaBridge: generateKafkaBridge(config),
+
+    clickhouse: {
+      enabled: true,
+      auth: {
+        username: "rulebricks",
+        password: "",
+        existingSecret: '{{ printf "%s-clickhouse-credentials" .Release.Name }}',
+        existingSecretKey: "admin-password",
+      },
+      shards: 1,
+      replicaCount: 1,
+      keeper: { enabled: false },
+      persistence: { enabled: false },
+      resources: {
+        requests: { cpu: "200m", memory: "512Mi" },
+        limits: { cpu: "1000m", memory: "2Gi" },
+      },
+      serviceAccount: {
+        create: true,
+        annotations: {},
+      },
+      metrics: {
+        enabled: true,
+        serviceMonitor: {
+          enabled: true,
+        },
+      },
+      queryLimits: {
+        maxMemoryUsage: 1073741824,
+        maxThreads: 4,
+        maxExecutionTime: 60,
+      },
+      configdFiles: {
+        // Server-level named collections belong in config.d (the <clickhouse> root).
+        "09-decision-log-storage.xml":
+          '{{ include "rulebricks.clickhouse.decisionLogStorageXml" . }}',
+      },
+      usersdFiles: {
+        // <profiles>/<users> are read from the users config tree, so these MUST be
+        // in users.d. In config.d they are silently ignored: query limits go unset,
+        // date_time_input_format stays "basic" (breaking decision_logs DateTime64
+        // parsing), and the admin user never gets NAMED COLLECTION access (so the
+        // initdb decision_logs view fails to create).
+        "10-query-limits.xml":
+          '{{ include "rulebricks.clickhouse.queryLimitsXml" . }}',
+        "11-named-collection-access.xml":
+          '{{ include "rulebricks.clickhouse.userAccessXml" . }}',
+      },
+      initdbScripts: {
+        "01-decision-logs-view.sql":
+          '{{ include "rulebricks.clickhouse.decisionLogsViewSql" . }}',
+      },
     },
 
     // =============================================================================
@@ -778,7 +1261,7 @@ export async function generateHelmValues(
       ingressClass: {
         name: "traefik",
       },
-      tolerations: arm64Tolerations,
+      ...coreScheduling,
       autoscaling: {
         enabled: true,
         minReplicas: 1,
@@ -810,6 +1293,14 @@ export async function generateHelmValues(
           },
         },
       },
+      metrics: {
+        prometheus: {
+          enabled: true,
+          serviceMonitor: {
+            enabled: false,
+          },
+        },
+      },
       persistence: {
         enabled: false,
       },
@@ -820,7 +1311,7 @@ export async function generateHelmValues(
     // =============================================================================
     keda: {
       enabled: true,
-      tolerations: arm64Tolerations,
+      ...coreScheduling,
       crds: {
         install: false, // CRDs managed in parent chart
       },
@@ -832,12 +1323,12 @@ export async function generateHelmValues(
     "cert-manager": {
       enabled: tlsEnabled,
       installCRDs: false, // CRDs managed in parent chart
-      tolerations: arm64Tolerations,
+      ...coreScheduling,
       webhook: {
-        tolerations: arm64Tolerations,
+        ...coreScheduling,
       },
       cainjector: {
-        tolerations: arm64Tolerations,
+        ...coreScheduling,
       },
     },
 
@@ -856,9 +1347,12 @@ export async function generateHelmValues(
       role: "Stateless-Aggregator",
       replicas: tierConfig.vectorReplicas,
       resources: tierConfig.vectorResources,
-      tolerations: arm64Tolerations,
+      ...coreScheduling,
       serviceAccount: generateVectorServiceAccount(config),
       podLabels: generateVectorPodLabels(config),
+      ...(generateVectorExtraContainers(config)
+        ? { extraContainers: generateVectorExtraContainers(config) }
+        : {}),
       service: {
         enabled: true,
         ports: [{ name: "api", port: 8686, protocol: "TCP", targetPort: 8686 }],
@@ -871,9 +1365,35 @@ export async function generateHelmValues(
             type: "kafka",
             bootstrap_servers:
               "${KAFKA_BOOTSTRAP_SERVERS:-rulebricks-kafka:9092}",
-            topics: ["logs"],
+            // KAFKA_LOG_TOPIC carries the namespace prefix (e.g. com.rulebricks.logs).
+            topics: ["${KAFKA_LOG_TOPIC:-logs}"],
             group_id: "vector-consumers",
             auto_offset_reset: "latest",
+            // TLS + SASL driven by env from vector-kafka-env (disabled for
+            // in-cluster Kafka and the kafka-proxy bridge path).
+            tls: { enabled: "${KAFKA_TLS_ENABLED:-false}" },
+            sasl: {
+              enabled: "${KAFKA_SASL_ENABLED:-false}",
+              mechanism: "${KAFKA_SASL_MECHANISM:-PLAIN}",
+              // username/password are only emitted for external Kafka using a
+              // direct PLAIN/SCRAM credential (where vector-kafka-credentials is
+              // populated). Emitting them with an empty default would render as
+              // YAML null and crash Vector at config load; omitting the keys
+              // leaves them unset (valid) whenever SASL is disabled.
+              ...(kafkaUsesDirectSasl(config)
+                ? {
+                    username: "${KAFKA_SASL_USERNAME}",
+                    password: "${KAFKA_SASL_PASSWORD}",
+                  }
+                : {}),
+            },
+          },
+        },
+        transforms: {
+          normalize_logs: {
+            type: "remap",
+            inputs: ["kafka"],
+            source: VECTOR_NORMALIZE_LOGS_VRL,
           },
         },
         sinks: generateVectorSinks(config),
@@ -902,8 +1422,18 @@ export async function generateHelmValues(
               },
             },
             db: {
+              // Explicit so chart schema rules that key off supabase.db.enabled
+              // (e.g. Database Backup Storage Validation) hold without relying
+              // on subchart-default coalescing.
+              enabled: true,
+              image: {
+                repository: SUPABASE_POSTGRES_IMAGE_REPOSITORY,
+                tag: SUPABASE_POSTGRES_IMAGE_TAG,
+                pullPolicy: "IfNotPresent",
+              },
+              podLabels: infrastructurePodLabels,
               resources: tierConfig.dbResources,
-              tolerations: arm64Tolerations,
+              ...coreScheduling,
               persistence: {
                 enabled: true,
                 size: tierConfig.dbPersistenceSize,
@@ -911,19 +1441,19 @@ export async function generateHelmValues(
               },
             },
             auth: {
-              tolerations: arm64Tolerations,
+              ...coreScheduling,
             },
             rest: {
-              tolerations: arm64Tolerations,
+              ...coreScheduling,
             },
             realtime: {
-              tolerations: arm64Tolerations,
+              ...coreScheduling,
             },
             meta: {
-              tolerations: arm64Tolerations,
+              ...coreScheduling,
             },
             kong: {
-              tolerations: arm64Tolerations,
+              ...coreScheduling,
               ingress: {
                 enabled: true,
                 className: "traefik",
@@ -931,7 +1461,7 @@ export async function generateHelmValues(
               },
             },
             studio: {
-              tolerations: arm64Tolerations,
+              ...coreScheduling,
             },
           }
         : {}),
@@ -941,10 +1471,10 @@ export async function generateHelmValues(
     // MONITORING
     // =============================================================================
     monitoring: {
-      enabled: config.features.monitoring.enabled,
+      enabled: true,
     },
     "kube-prometheus-stack": {
-      enabled: config.features.monitoring.enabled,
+      enabled: true,
       alertmanager: {
         enabled: false,
       },
@@ -952,11 +1482,15 @@ export async function generateHelmValues(
         enabled: useLocalGrafana,
       },
       prometheus: {
-        enabled: config.features.monitoring.enabled,
+        enabled: true,
         serviceAccount: generatePrometheusServiceAccount(config),
         prometheusSpec: {
           retention: "30d",
           podMetadata: generatePrometheusPodMetadata(config),
+          serviceMonitorSelectorNilUsesHelmValues: false,
+          serviceMonitorSelector: {},
+          podMonitorSelectorNilUsesHelmValues: false,
+          podMonitorSelector: {},
           storageSpec: {
             volumeClaimTemplate: {
               spec: {
@@ -979,22 +1513,23 @@ export async function generateHelmValues(
     // STORAGE CLASS
     // =============================================================================
     storageClass: {
-      create: true,
+      create: false,
       name: storageClass,
       provisioner:
-        config.infrastructure.provider === "aws"
+        config.infrastructure.storageProvisioner ||
+        (config.infrastructure.provider === "aws"
           ? "ebs.csi.aws.com"
           : config.infrastructure.provider === "gcp"
             ? "pd.csi.storage.gke.io"
             : config.infrastructure.provider === "azure"
               ? "disk.csi.azure.com"
-              : "ebs.csi.aws.com",
+              : "ebs.csi.aws.com"),
       // Parameters for the StorageClass - must include type for disk provisioning
       parameters:
         config.infrastructure.provider === "aws"
           ? { type: "gp3" }
           : config.infrastructure.provider === "gcp"
-            ? { type: "hyperdisk-balanced" }
+            ? { type: gcpDiskType }
             : config.infrastructure.provider === "azure"
               ? { skuName: "Premium_LRS" }
               : { type: "gp3" },
@@ -1020,6 +1555,19 @@ export async function generateHelmValues(
         },
   };
 
+  return values;
+}
+
+/**
+ * Generates Helm values from the deployment configuration
+ */
+export async function generateHelmValues(
+  config: DeploymentConfig,
+  options: GenerateOptions = {},
+): Promise<void> {
+  const values = buildHelmValues(config, options);
+  // Last-line guardrail: never write/deploy values the chart would reject.
+  assertValidHelmValues(values);
   await saveHelmValues(config.name, values);
 }
 
