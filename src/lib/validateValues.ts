@@ -111,8 +111,192 @@ function formatErrors(errors: ErrorObject[] | null | undefined): string[] {
   return [...messages];
 }
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
+function get(obj: unknown, path: string[]): any {
+  let cur: any = obj;
+  for (const key of path) {
+    if (cur === null || cur === undefined || typeof cur !== "object") {
+      return undefined;
+    }
+    cur = cur[key];
+  }
+  return cur;
+}
+
 /**
- * Validates a generated Helm values object against the bundled chart schema.
+ * Cross-field invariants the JSON schema cannot express. These encode the
+ * Kafka sizing model: partitions are the worker-fleet concurrency ceiling,
+ * topic names must carry the same prefix HPS/Vector/KEDA use, and worker CPU
+ * requests must not exceed their (one-core) burst limit.
+ */
+export function validateValuesInvariants(values: unknown): string[] {
+  const errors: string[] = [];
+
+  const workers = get(values, ["rulebricks", "hps", "workers"]);
+  const solutionPartitions = get(workers, ["solutionPartitions"]);
+  const maxReplicaCount = get(workers, ["keda", "maxReplicaCount"]);
+
+  // 1. Workers beyond the partition count would sit idle.
+  if (
+    typeof solutionPartitions === "number" &&
+    typeof maxReplicaCount === "number" &&
+    maxReplicaCount > solutionPartitions
+  ) {
+    errors.push(
+      `rulebricks.hps.workers.keda.maxReplicaCount (${maxReplicaCount}) must be <= solutionPartitions (${solutionPartitions}); partitions are the fleet concurrency ceiling`,
+    );
+  }
+
+  // 2. Single-threaded CPU-bound workers are Burstable: the request may sit
+  //    below the limit (tight bin-packing + a cheap warm pool), but it must
+  //    never exceed the limit. The limit is the per-worker burst ceiling (one
+  //    core); under genuine node contention a Burstable worker can be
+  //    CFS-throttled toward its request.
+  const parseCpuMillicores = (value: unknown): number | undefined => {
+    if (typeof value === "number") return value * 1000;
+    if (typeof value !== "string") return undefined;
+    const millicores = value.endsWith("m")
+      ? Number(value.slice(0, -1))
+      : Number(value) * 1000;
+    return Number.isFinite(millicores) ? millicores : undefined;
+  };
+  const workerCpuRequest = get(workers, ["resources", "requests", "cpu"]);
+  const workerCpuLimit = get(workers, ["resources", "limits", "cpu"]);
+  const workerCpuRequestM = parseCpuMillicores(workerCpuRequest);
+  const workerCpuLimitM = parseCpuMillicores(workerCpuLimit);
+  if (
+    workerCpuRequestM !== undefined &&
+    workerCpuLimitM !== undefined &&
+    workerCpuRequestM > workerCpuLimitM
+  ) {
+    errors.push(
+      `rulebricks.hps.workers.resources cpu request (${workerCpuRequest}) must not exceed limit (${workerCpuLimit})`,
+    );
+  }
+
+  // 3. In-cluster provisioning: topic names must carry the SAME prefix the
+  //    application uses, and the solution topic must match solutionPartitions
+  //    (which HPS receives as MAX_WORKERS). Mirrors the chart's render guard.
+  const kafkaEnabled = get(values, ["kafka", "enabled"]);
+  const provisioning = get(values, ["kafka", "provisioning"]);
+  if (kafkaEnabled && provisioning && provisioning.enabled) {
+    const logging = get(values, ["rulebricks", "app", "logging"]) ?? {};
+    const prefix = Object.prototype.hasOwnProperty.call(
+      logging,
+      "kafkaTopicPrefix",
+    )
+      ? String(logging.kafkaTopicPrefix ?? "")
+      : "com.rulebricks.";
+    const topics: Array<{ name?: string; partitions?: number }> = Array.isArray(
+      provisioning.topics,
+    )
+      ? provisioning.topics
+      : [];
+    const names = topics.map((t) => t?.name);
+
+    for (const base of ["solution", "solution-response", "logs"]) {
+      const expected = `${prefix}${base}`;
+      if (!names.includes(expected)) {
+        errors.push(
+          `kafka.provisioning.topics must include "${expected}" (kafkaTopicPrefix is "${prefix}"); found: ${names.join(", ") || "none"}`,
+        );
+      }
+    }
+
+    const solutionTopic = topics.find((t) => t?.name === `${prefix}solution`);
+    if (
+      typeof solutionPartitions === "number" &&
+      solutionTopic &&
+      typeof solutionTopic.partitions === "number" &&
+      solutionTopic.partitions !== solutionPartitions
+    ) {
+      errors.push(
+        `kafka.provisioning "${prefix}solution" partitions (${solutionTopic.partitions}) must equal rulebricks.hps.workers.solutionPartitions (${solutionPartitions}); HPS derives MAX_WORKERS from it`,
+      );
+    }
+  }
+
+  // 4. Distributed tracing: when enabled, the collector must have a non-empty
+  //    endpoint for the selected destination (the JSON schema also enforces
+  //    this, but we surface a clearer message), and the active auth mode must
+  //    carry its credential.
+  const tracing = get(values, ["global", "tracing"]);
+  if (tracing && tracing.enabled) {
+    const destination = tracing.destination ?? "elastic";
+    if (destination === "elastic") {
+      const elastic = get(tracing, ["elastic"]) ?? {};
+      if (!elastic.endpoint) {
+        errors.push(
+          "global.tracing.elastic.endpoint must be set when tracing destination is 'elastic'",
+        );
+      }
+      const authMode = elastic.authMode ?? "secret-token";
+      if (
+        authMode === "secret-token" &&
+        !elastic.secretToken &&
+        !elastic.existingSecret?.name
+      ) {
+        errors.push(
+          "global.tracing.elastic.secretToken (or existingSecret.name) is required for authMode 'secret-token'",
+        );
+      }
+      if (
+        authMode === "api-key" &&
+        !elastic.apiKey &&
+        !elastic.existingSecret?.name
+      ) {
+        errors.push(
+          "global.tracing.elastic.apiKey (or existingSecret.name) is required for authMode 'api-key'",
+        );
+      }
+    } else if (destination === "otlp") {
+      const otlp = get(tracing, ["otlp"]) ?? {};
+      if (!otlp.endpoint) {
+        errors.push(
+          "global.tracing.otlp.endpoint must be set when tracing destination is 'otlp'",
+        );
+      }
+    } else if (destination === "azure-monitor") {
+      const azure = get(tracing, ["azureMonitor"]) ?? {};
+      if (!azure.connectionString && !azure.existingSecret?.name) {
+        errors.push(
+          "global.tracing.azureMonitor.connectionString (or existingSecret.name) is required when tracing destination is 'azure-monitor'",
+        );
+      }
+    }
+  }
+
+  // 5. Application/container log shipping: when the Vector agent is enabled it
+  //    must have exactly one configured external sink.
+  const vectorAgent = get(values, ["vector-agent"]);
+  if (vectorAgent && vectorAgent.enabled) {
+    const sinks = get(vectorAgent, ["customConfig", "sinks"]) as
+      | Record<string, unknown>
+      | undefined;
+    const elasticsearchEndpoints = get(sinks, ["elasticsearch", "endpoints"]);
+    const hasElasticsearch =
+      Array.isArray(elasticsearchEndpoints) &&
+      elasticsearchEndpoints.some(
+        (e) => typeof e === "string" && e.length > 0,
+      );
+    const lokiEndpoint = get(sinks, ["loki", "endpoint"]);
+    const hasLoki = typeof lokiEndpoint === "string" && lokiEndpoint.length > 0;
+    const genericUri = get(sinks, ["generic_http", "uri"]);
+    const hasGeneric = typeof genericUri === "string" && genericUri.length > 0;
+
+    if (!hasElasticsearch && !hasLoki && !hasGeneric) {
+      errors.push(
+        "vector-agent is enabled but no app-log sink endpoint is configured; set features.logging.appLogs for elasticsearch, loki, or generic",
+      );
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Validates a generated Helm values object against the bundled chart schema
+ * plus cross-field invariants the schema cannot express.
  * Values are round-tripped through YAML first so we validate exactly what Helm
  * receives (dropping `undefined`, normalizing numbers, etc.).
  */
@@ -120,8 +304,10 @@ export function validateHelmValues(values: unknown): ValuesValidationResult {
   const normalized = YAML.parse(YAML.stringify(values));
   const validate = loadValidator();
   const valid = validate(normalized) as boolean;
-  if (valid) return { valid: true, errors: [] };
-  return { valid: false, errors: formatErrors(validate.errors) };
+  const errors = valid ? [] : formatErrors(validate.errors);
+  errors.push(...validateValuesInvariants(normalized));
+  if (errors.length === 0) return { valid: true, errors: [] };
+  return { valid: false, errors };
 }
 
 /**

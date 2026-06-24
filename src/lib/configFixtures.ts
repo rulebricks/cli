@@ -87,6 +87,9 @@ interface MatrixOptions {
   customEmails?: boolean;
   remoteWrite?: RemoteWriteConfig;
   monitoringDestination?: MonitoringDestination;
+  tracing?: NonNullable<DeploymentConfig["features"]["tracing"]>;
+  appLogs?: NonNullable<DeploymentConfig["features"]["logging"]["appLogs"]>;
+  cache?: NonNullable<DeploymentConfig["features"]["cache"]>;
   version?: string;
 }
 
@@ -150,7 +153,6 @@ function build(options: MatrixOptions): DeploymentConfig {
       fromName: "Rulebricks",
     },
     database: databaseConfig,
-    tier: "small",
     storage,
     externalServices: options.externalServices,
     backup:
@@ -179,7 +181,9 @@ function build(options: MatrixOptions): DeploymentConfig {
         destination: monitoringDestination,
         remoteWrite: options.remoteWrite,
       },
-      logging: { sink: "console" },
+      tracing: options.tracing,
+      cache: options.cache,
+      logging: { sink: "console", appLogs: options.appLogs },
       customEmails: options.customEmails
         ? {
             enabled: true,
@@ -342,6 +346,113 @@ export function buildConfigMatrix(): { name: string; config: DeploymentConfig }[
         url: "https://metrics.example.com/api/v1/write",
         authType: "bearer",
         bearerTokenSecretRef: { name: "metrics", key: "token" },
+      },
+    },
+    {
+      name: "aws-tracing-elastic",
+      provider: "aws",
+      tracing: {
+        enabled: true,
+        samplingRatio: 1,
+        elastic: {
+          endpoint: "https://rb-deployment.apm.us-east-1.aws.elastic-cloud.com:443",
+          authMode: "secret-token",
+          secretToken: "elastic-apm-secret-token",
+        },
+      },
+    },
+    {
+      name: "aws-app-logs-elasticsearch",
+      provider: "aws",
+      appLogs: {
+        enabled: true,
+        destination: "elasticsearch",
+        elasticsearch: {
+          endpoint: "https://rb-deployment.es.us-east-1.aws.elastic-cloud.com:9243",
+          index: "rulebricks-app-logs",
+          authMode: "basic",
+          username: "elastic",
+          password: "elastic-password",
+        },
+      },
+    },
+    {
+      name: "aws-app-logs-loki",
+      provider: "aws",
+      appLogs: {
+        enabled: true,
+        destination: "loki",
+        loki: {
+          endpoint: "https://loki.example.com/loki/api/v1/push",
+          labels: { app: "rulebricks", source: "app-logs" },
+        },
+      },
+    },
+    {
+      name: "aws-app-logs-generic-http",
+      provider: "aws",
+      appLogs: {
+        enabled: true,
+        destination: "generic",
+        generic: {
+          endpoint: "https://logs.example.com/ingest",
+          authHeader: "Bearer generic-log-token",
+        },
+      },
+    },
+    {
+      name: "aws-valkey-admin-internal",
+      provider: "aws",
+      cache: {
+        valkeyAdmin: { enabled: true, exposure: "internal" },
+        redisExporter: { enabled: true },
+        kafkaExporter: { enabled: true },
+      },
+    },
+    {
+      name: "aws-tracing-otlp",
+      provider: "aws",
+      tracing: {
+        enabled: true,
+        destination: "otlp",
+        otlp: {
+          endpoint: "https://otlp-gateway.example.com/otlp",
+          authMode: "bearer",
+          token: "otlp-bearer-token",
+        },
+      },
+    },
+    {
+      name: "azure-tracing-azure-monitor",
+      provider: "azure",
+      tracing: {
+        enabled: true,
+        destination: "azure-monitor",
+        azureMonitor: {
+          connectionString:
+            "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://eastus-1.in.applicationinsights.azure.com/",
+        },
+      },
+    },
+    {
+      name: "aws-tracing-and-app-logs",
+      provider: "aws",
+      tracing: {
+        enabled: true,
+        elastic: {
+          endpoint: "https://rb-deployment.apm.us-east-1.aws.elastic-cloud.com:443",
+          authMode: "api-key",
+          apiKey: "elastic-apm-api-key",
+        },
+      },
+      appLogs: {
+        enabled: true,
+        destination: "elasticsearch",
+        elasticsearch: {
+          endpoint: "https://rb-deployment.es.us-east-1.aws.elastic-cloud.com:9243",
+          authMode: "api-key",
+          apiKey: "elastic-es-api-key",
+        },
       },
     },
     { name: "aws-version-latest", provider: "aws", version: "latest" },

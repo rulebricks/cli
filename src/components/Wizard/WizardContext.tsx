@@ -4,7 +4,6 @@ import {
   CloudProvider,
   DatabaseType,
   NodeArchitecture,
-  PerformanceTier,
   SSOProvider,
   DnsProvider,
   KafkaPreset,
@@ -21,6 +20,7 @@ import {
   ProfileConfig,
   SecretKeyRef,
   RemoteWriteConfig,
+  TracingDestination,
   validateRemoteWriteConfig,
 } from "../../types/index.js";
 
@@ -67,8 +67,7 @@ export interface WizardState {
   supabaseDashboardUser: string;
   supabaseDashboardPass: string;
 
-  // Performance
-  tier: PerformanceTier | null;
+  // Cluster capabilities (informational; sizing follows chart defaults)
   nodeArchitecture: NodeArchitecture | null;
   arm64TolerationRequired: boolean;
   storageClass: string;
@@ -120,11 +119,38 @@ export interface WizardState {
   prometheusRemoteWritePasswordSecretRef: string;
   prometheusRemoteWriteBearerTokenSecretRef: string;
 
-  // Features - Logging (external logging platform; Vector sink). bucket/region
-  // are repurposed to carry the platform credential and endpoint.
+  // Features - Logging (external logging platform; Vector sink). These hold the
+  // platform's credential (API key / token / JSON) and an endpoint/site/account
+  // detail - NOT an object-storage bucket/region (that lives under storage*).
+  // They are persisted to features.logging.bucket/region for compatibility.
   loggingSink: LoggingSink;
-  loggingBucket: string;
-  loggingRegion: string;
+  loggingPlatformCredential: string;
+  loggingPlatformDetail: string;
+
+  // Features - Distributed Tracing (in-cluster OTel collector -> pluggable
+  // backend: Elastic APM, a generic OTLP/HTTP endpoint, or Azure Monitor).
+  tracingEnabled: boolean;
+  tracingDestination: TracingDestination;
+  tracingElasticEndpoint: string;
+  tracingElasticAuthMode: "secret-token" | "api-key";
+  tracingElasticSecretToken: string;
+  tracingElasticApiKey: string;
+  // Generic OTLP destination
+  tracingOtlpEndpoint: string;
+  tracingOtlpAuthMode: "none" | "bearer" | "api-key" | "header";
+  tracingOtlpHeaderName: string;
+  tracingOtlpToken: string;
+  // Azure Monitor destination
+  tracingAzureConnectionString: string;
+
+  // Features - Application/container log shipping to Elasticsearch (Vector agent)
+  appLogsEnabled: boolean;
+  appLogsElasticEndpoint: string;
+  appLogsElasticIndex: string;
+  appLogsElasticAuthMode: "basic" | "api-key";
+  appLogsElasticUsername: string;
+  appLogsElasticPassword: string;
+  appLogsElasticApiKey: string;
 
   // Features - Custom Email Templates
   customEmailsEnabled: boolean;
@@ -147,6 +173,13 @@ export interface WizardState {
   redisHttpApiEnabled: boolean;
   redisHttpApiUrl: string;
   redisHttpApiToken: string;
+  valkeyAdminEnabled: boolean;
+  valkeyAdminExposure: "internal" | "ingress";
+  valkeyAdminHostname: string;
+  valkeyAdminBasicAuthUsers: string[];
+  valkeyAdminAllowedIPs: string[];
+  redisExporterEnabled: boolean;
+  kafkaExporterEnabled: boolean;
 
   // External services - Kafka
   kafkaMode: "embedded" | "external";
@@ -214,7 +247,6 @@ type WizardAction =
         >
       >;
     }
-  | { type: "SET_TIER"; tier: PerformanceTier }
   | {
       type: "SET_CLUSTER_CAPABILITIES";
       nodeArchitecture: NodeArchitecture;
@@ -283,7 +315,43 @@ type WizardAction =
     }
   | {
       type: "SET_LOGGING_CONFIG";
-      config: Partial<Pick<WizardState, "loggingBucket" | "loggingRegion">>;
+      config: Partial<
+        Pick<WizardState, "loggingPlatformCredential" | "loggingPlatformDetail">
+      >;
+    }
+  | { type: "SET_TRACING_ENABLED"; enabled: boolean }
+  | {
+      type: "SET_TRACING_CONFIG";
+      config: Partial<
+        Pick<
+          WizardState,
+          | "tracingDestination"
+          | "tracingElasticEndpoint"
+          | "tracingElasticAuthMode"
+          | "tracingElasticSecretToken"
+          | "tracingElasticApiKey"
+          | "tracingOtlpEndpoint"
+          | "tracingOtlpAuthMode"
+          | "tracingOtlpHeaderName"
+          | "tracingOtlpToken"
+          | "tracingAzureConnectionString"
+        >
+      >;
+    }
+  | { type: "SET_APP_LOGS_ENABLED"; enabled: boolean }
+  | {
+      type: "SET_APP_LOGS_CONFIG";
+      config: Partial<
+        Pick<
+          WizardState,
+          | "appLogsElasticEndpoint"
+          | "appLogsElasticIndex"
+          | "appLogsElasticAuthMode"
+          | "appLogsElasticUsername"
+          | "appLogsElasticPassword"
+          | "appLogsElasticApiKey"
+        >
+      >;
     }
   | { type: "SET_BACKUP_ENABLED"; enabled: boolean }
   | { type: "SET_BACKUP_SCHEDULE"; schedule: string }
@@ -303,6 +371,13 @@ type WizardAction =
           | "redisHttpApiEnabled"
           | "redisHttpApiUrl"
           | "redisHttpApiToken"
+          | "valkeyAdminEnabled"
+          | "valkeyAdminExposure"
+          | "valkeyAdminHostname"
+          | "valkeyAdminBasicAuthUsers"
+          | "valkeyAdminAllowedIPs"
+          | "redisExporterEnabled"
+          | "kafkaExporterEnabled"
           | "kafkaMode"
           | "kafkaPreset"
           | "kafkaBrokers"
@@ -377,8 +452,7 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     supabaseDashboardUser: "supabase",
     supabaseDashboardPass: "",
 
-    // Performance - pre-populate from profile
-    tier: profile?.tier ?? null,
+    // Cluster capabilities (populated by the cluster scan)
     nodeArchitecture: null,
     arm64TolerationRequired: false,
     storageClass: "",
@@ -437,8 +511,30 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
 
     // Features - Logging
     loggingSink: "console", // Default to console only
-    loggingBucket: "",
-    loggingRegion: "",
+    loggingPlatformCredential: "",
+    loggingPlatformDetail: "",
+
+    // Features - Distributed Tracing
+    tracingEnabled: false,
+    tracingDestination: "elastic",
+    tracingElasticEndpoint: "",
+    tracingElasticAuthMode: "secret-token",
+    tracingElasticSecretToken: "",
+    tracingElasticApiKey: "",
+    tracingOtlpEndpoint: "",
+    tracingOtlpAuthMode: "none",
+    tracingOtlpHeaderName: "Authorization",
+    tracingOtlpToken: "",
+    tracingAzureConnectionString: "",
+
+    // Features - Application log shipping
+    appLogsEnabled: false,
+    appLogsElasticEndpoint: "",
+    appLogsElasticIndex: "rulebricks-app-logs",
+    appLogsElasticAuthMode: "basic",
+    appLogsElasticUsername: "",
+    appLogsElasticPassword: "",
+    appLogsElasticApiKey: "",
 
     // Features - Custom Email Templates
     customEmailsEnabled: false,
@@ -466,6 +562,13 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     redisHttpApiEnabled: false,
     redisHttpApiUrl: "",
     redisHttpApiToken: "",
+    valkeyAdminEnabled: false,
+    valkeyAdminExposure: "internal",
+    valkeyAdminHostname: "",
+    valkeyAdminBasicAuthUsers: [],
+    valkeyAdminAllowedIPs: [],
+    redisExporterEnabled: false,
+    kafkaExporterEnabled: false,
 
     // External services - Kafka (default to in-cluster)
     kafkaMode: "embedded",
@@ -710,11 +813,78 @@ export function collectConfigIssues(state: WizardState): string[] {
   if (
     state.loggingSink !== "console" &&
     state.loggingSink !== "pending" &&
-    !state.loggingBucket
+    !state.loggingPlatformCredential
   ) {
     issues.push(
       "The selected logging platform is missing its credentials/endpoint.",
     );
+  }
+
+  if (state.tracingEnabled) {
+    if (state.tracingDestination === "elastic") {
+      if (!state.tracingElasticEndpoint) {
+        issues.push(
+          "Distributed tracing is enabled but the Elastic APM endpoint is missing.",
+        );
+      }
+      if (
+        state.tracingElasticAuthMode === "secret-token" &&
+        !state.tracingElasticSecretToken
+      ) {
+        issues.push(
+          "Distributed tracing (secret-token auth) is missing the Elastic APM secret token.",
+        );
+      }
+      if (
+        state.tracingElasticAuthMode === "api-key" &&
+        !state.tracingElasticApiKey
+      ) {
+        issues.push(
+          "Distributed tracing (API key auth) is missing the Elastic APM API key.",
+        );
+      }
+    } else if (state.tracingDestination === "otlp") {
+      if (!state.tracingOtlpEndpoint) {
+        issues.push(
+          "Distributed tracing is enabled but the OTLP endpoint is missing.",
+        );
+      }
+      if (state.tracingOtlpAuthMode !== "none" && !state.tracingOtlpToken) {
+        issues.push(
+          "Distributed tracing (OTLP) is missing its authentication credential.",
+        );
+      }
+    } else if (state.tracingDestination === "azure-monitor") {
+      if (!state.tracingAzureConnectionString) {
+        issues.push(
+          "Distributed tracing is enabled but the Azure Monitor connection string is missing.",
+        );
+      }
+    }
+  }
+
+  if (state.appLogsEnabled) {
+    if (!state.appLogsElasticEndpoint) {
+      issues.push(
+        "Application log shipping is enabled but the Elasticsearch endpoint is missing.",
+      );
+    }
+    if (
+      state.appLogsElasticAuthMode === "basic" &&
+      (!state.appLogsElasticUsername || !state.appLogsElasticPassword)
+    ) {
+      issues.push(
+        "Application log shipping (basic auth) is missing the Elasticsearch username or password.",
+      );
+    }
+    if (
+      state.appLogsElasticAuthMode === "api-key" &&
+      !state.appLogsElasticApiKey
+    ) {
+      issues.push(
+        "Application log shipping (API key auth) is missing the Elasticsearch API key.",
+      );
+    }
   }
 
   if (!state.storageProvider || !state.storageBucket || !state.storageRegion) {
@@ -770,6 +940,16 @@ export function collectConfigIssues(state: WizardState): string[] {
     }
   }
 
+  if (
+    state.valkeyAdminEnabled &&
+    state.valkeyAdminExposure === "ingress" &&
+    state.valkeyAdminBasicAuthUsers.length === 0
+  ) {
+    issues.push(
+      "Valkey Admin ingress exposure requires at least one htpasswd BasicAuth user.",
+    );
+  }
+
   return issues;
 }
 
@@ -814,7 +994,6 @@ export function configToWizardState(
     supabaseDashboardUser:
       config.database.supabaseDashboardUser ?? base.supabaseDashboardUser,
     supabaseDashboardPass: config.database.supabaseDashboardPass ?? "",
-    tier: config.tier,
     nodeArchitecture: config.infrastructure.nodeArchitecture ?? null,
     arm64TolerationRequired:
       config.infrastructure.arm64TolerationRequired ?? false,
@@ -878,8 +1057,47 @@ export function configToWizardState(
       remoteWrite?.bearerTokenSecretRef,
     ),
     loggingSink: config.features.logging.sink,
-    loggingBucket: config.features.logging.bucket ?? "",
-    loggingRegion: config.features.logging.region ?? "",
+    loggingPlatformCredential: config.features.logging.bucket ?? "",
+    loggingPlatformDetail: config.features.logging.region ?? "",
+    // Distributed tracing (Elastic APM / generic OTLP / Azure Monitor)
+    tracingEnabled: config.features.tracing?.enabled ?? false,
+    tracingDestination: config.features.tracing?.destination ?? "elastic",
+    tracingElasticEndpoint: config.features.tracing?.elastic?.endpoint ?? "",
+    tracingElasticAuthMode:
+      config.features.tracing?.elastic?.authMode === "api-key"
+        ? "api-key"
+        : "secret-token",
+    tracingElasticSecretToken:
+      config.features.tracing?.elastic?.secretToken ?? "",
+    tracingElasticApiKey: config.features.tracing?.elastic?.apiKey ?? "",
+    tracingOtlpEndpoint: config.features.tracing?.otlp?.endpoint ?? "",
+    tracingOtlpAuthMode: config.features.tracing?.otlp?.authMode ?? "none",
+    tracingOtlpHeaderName:
+      config.features.tracing?.otlp?.headerName ?? "Authorization",
+    tracingOtlpToken:
+      config.features.tracing?.otlp?.token ??
+      config.features.tracing?.otlp?.apiKey ??
+      config.features.tracing?.otlp?.headerValue ??
+      "",
+    tracingAzureConnectionString:
+      config.features.tracing?.azureMonitor?.connectionString ?? "",
+    // Application log shipping (Elasticsearch via Vector agent)
+    appLogsEnabled: config.features.logging.appLogs?.enabled ?? false,
+    appLogsElasticEndpoint:
+      config.features.logging.appLogs?.elasticsearch?.endpoint ?? "",
+    appLogsElasticIndex:
+      config.features.logging.appLogs?.elasticsearch?.index ??
+      base.appLogsElasticIndex,
+    appLogsElasticAuthMode:
+      config.features.logging.appLogs?.elasticsearch?.authMode === "api-key"
+        ? "api-key"
+        : "basic",
+    appLogsElasticUsername:
+      config.features.logging.appLogs?.elasticsearch?.username ?? "",
+    appLogsElasticPassword:
+      config.features.logging.appLogs?.elasticsearch?.password ?? "",
+    appLogsElasticApiKey:
+      config.features.logging.appLogs?.elasticsearch?.apiKey ?? "",
     customEmailsEnabled: customEmails?.enabled ?? false,
     emailSubjects: customEmails?.subjects ?? base.emailSubjects,
     emailTemplates: customEmails?.templates ?? base.emailTemplates,
@@ -903,6 +1121,24 @@ export function configToWizardState(
       externalRedis?.external?.httpApi?.url ?? base.redisHttpApiUrl,
     redisHttpApiToken:
       externalRedis?.external?.httpApi?.token ?? base.redisHttpApiToken,
+    valkeyAdminEnabled:
+      config.features.cache?.valkeyAdmin?.enabled ?? base.valkeyAdminEnabled,
+    valkeyAdminExposure:
+      config.features.cache?.valkeyAdmin?.exposure ?? base.valkeyAdminExposure,
+    valkeyAdminHostname:
+      config.features.cache?.valkeyAdmin?.hostname ?? base.valkeyAdminHostname,
+    valkeyAdminBasicAuthUsers:
+      config.features.cache?.valkeyAdmin?.basicAuthUsers ??
+      base.valkeyAdminBasicAuthUsers,
+    valkeyAdminAllowedIPs:
+      config.features.cache?.valkeyAdmin?.allowedIPs ??
+      base.valkeyAdminAllowedIPs,
+    redisExporterEnabled:
+      config.features.cache?.redisExporter?.enabled ??
+      base.redisExporterEnabled,
+    kafkaExporterEnabled:
+      config.features.cache?.kafkaExporter?.enabled ??
+      base.kafkaExporterEnabled,
     // External services - Kafka
     kafkaMode: externalKafka?.mode ?? base.kafkaMode,
     kafkaPreset: externalKafka?.external?.preset ?? base.kafkaPreset,
@@ -982,8 +1218,6 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, ...action.config };
     case "SET_SUPABASE_SELF_HOSTED":
       return { ...state, ...action.config };
-    case "SET_TIER":
-      return { ...state, tier: action.tier };
     case "SET_CLUSTER_CAPABILITIES":
       return {
         ...state,
@@ -1016,16 +1250,26 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
     case "SET_PROMETHEUS_REMOTE_WRITE_CONFIG":
       return { ...state, ...action.config };
     case "SET_LOGGING_SINK":
-      // Reset bucket/region if switching to console
+      // Reset the platform credential/detail if switching back to console.
       return {
         ...state,
         loggingSink: action.sink,
-        loggingBucket: action.sink === "console" ? "" : state.loggingBucket,
-        loggingRegion: action.sink === "console" ? "" : state.loggingRegion,
+        loggingPlatformCredential:
+          action.sink === "console" ? "" : state.loggingPlatformCredential,
+        loggingPlatformDetail:
+          action.sink === "console" ? "" : state.loggingPlatformDetail,
       };
     case "SET_STORAGE_CONFIG":
       return { ...state, ...action.config };
     case "SET_LOGGING_CONFIG":
+      return { ...state, ...action.config };
+    case "SET_TRACING_ENABLED":
+      return { ...state, tracingEnabled: action.enabled };
+    case "SET_TRACING_CONFIG":
+      return { ...state, ...action.config };
+    case "SET_APP_LOGS_ENABLED":
+      return { ...state, appLogsEnabled: action.enabled };
+    case "SET_APP_LOGS_CONFIG":
       return { ...state, ...action.config };
     case "SET_BACKUP_ENABLED":
       return { ...state, backupEnabled: action.enabled };
@@ -1069,7 +1313,6 @@ interface WizardContextValue {
   state: WizardState;
   dispatch: React.Dispatch<WizardAction>;
   toConfig: (options?: {
-    tier?: PerformanceTier;
     nodeArchitecture?: NodeArchitecture;
     arm64TolerationRequired?: boolean;
     storageClass?: string;
@@ -1111,7 +1354,6 @@ export function WizardProvider({
 
   const toConfig = (
     options: {
-      tier?: PerformanceTier;
       nodeArchitecture?: NodeArchitecture;
       arm64TolerationRequired?: boolean;
       storageClass?: string;
@@ -1207,7 +1449,6 @@ export function WizardProvider({
         supabaseDashboardUser: state.supabaseDashboardUser || undefined,
         supabaseDashboardPass: state.supabaseDashboardPass || undefined,
       },
-      tier: options.tier || state.tier || "small",
       storage: {
         provider: state.storageProvider,
         cloudAuthMode: state.storageCloudAuthMode,
@@ -1280,14 +1521,120 @@ export function WizardProvider({
             : undefined,
           remoteWrite,
         },
+        // Distributed tracing (self-hosted only). Omitted when disabled. The
+        // destination selects which backend sub-block is emitted.
+        tracing: state.tracingEnabled
+          ? state.tracingDestination === "otlp"
+            ? {
+                enabled: true,
+                destination: "otlp" as const,
+                otlp: {
+                  endpoint: state.tracingOtlpEndpoint || undefined,
+                  authMode: state.tracingOtlpAuthMode,
+                  headerName:
+                    state.tracingOtlpAuthMode === "header"
+                      ? state.tracingOtlpHeaderName || undefined
+                      : undefined,
+                  token:
+                    state.tracingOtlpAuthMode === "bearer"
+                      ? state.tracingOtlpToken || undefined
+                      : undefined,
+                  apiKey:
+                    state.tracingOtlpAuthMode === "api-key"
+                      ? state.tracingOtlpToken || undefined
+                      : undefined,
+                  headerValue:
+                    state.tracingOtlpAuthMode === "header"
+                      ? state.tracingOtlpToken || undefined
+                      : undefined,
+                },
+              }
+            : state.tracingDestination === "azure-monitor"
+              ? {
+                  enabled: true,
+                  destination: "azure-monitor" as const,
+                  azureMonitor: {
+                    connectionString:
+                      state.tracingAzureConnectionString || undefined,
+                  },
+                }
+              : {
+                  enabled: true,
+                  destination: "elastic" as const,
+                  elastic: {
+                    endpoint: state.tracingElasticEndpoint || undefined,
+                    authMode: state.tracingElasticAuthMode,
+                    secretToken:
+                      state.tracingElasticAuthMode === "secret-token"
+                        ? state.tracingElasticSecretToken || undefined
+                        : undefined,
+                    apiKey:
+                      state.tracingElasticAuthMode === "api-key"
+                        ? state.tracingElasticApiKey || undefined
+                        : undefined,
+                  },
+                }
+          : undefined,
+        cache:
+          state.valkeyAdminEnabled ||
+          state.redisExporterEnabled ||
+          state.kafkaExporterEnabled
+            ? {
+                valkeyAdmin: state.valkeyAdminEnabled
+                  ? {
+                      enabled: true,
+                      exposure: state.valkeyAdminExposure,
+                      hostname: state.valkeyAdminHostname || undefined,
+                      basicAuthUsers:
+                        state.valkeyAdminBasicAuthUsers.length > 0
+                          ? state.valkeyAdminBasicAuthUsers
+                          : undefined,
+                      allowedIPs:
+                        state.valkeyAdminAllowedIPs.length > 0
+                          ? state.valkeyAdminAllowedIPs
+                          : undefined,
+                    }
+                  : undefined,
+                redisExporter: state.redisExporterEnabled
+                  ? { enabled: true }
+                  : undefined,
+                kafkaExporter: state.kafkaExporterEnabled
+                  ? { enabled: true }
+                  : undefined,
+              }
+            : undefined,
         logging: {
           // External logging is now a platform-only sink (Datadog, Splunk,
-          // etc.); bucket/region carry the platform credentials/endpoint.
+          // etc.). The persisted bucket/region keys carry the platform
+          // credential and endpoint/detail (not an object-storage bucket).
           // Cloud object storage for decision logs is configured separately
           // under `storage` above.
           sink: state.loggingSink,
-          bucket: state.loggingBucket || undefined,
-          region: state.loggingRegion || undefined,
+          bucket: state.loggingPlatformCredential || undefined,
+          region: state.loggingPlatformDetail || undefined,
+          // Application/container log shipping to Elasticsearch (Vector agent).
+          appLogs: state.appLogsEnabled
+            ? {
+                enabled: true,
+                elasticsearch: {
+                  endpoint: state.appLogsElasticEndpoint || undefined,
+                  index: state.appLogsElasticIndex || undefined,
+                  authMode: state.appLogsElasticAuthMode,
+                  username:
+                    state.appLogsElasticAuthMode === "basic"
+                      ? state.appLogsElasticUsername || undefined
+                      : undefined,
+                  password:
+                    state.appLogsElasticAuthMode === "basic"
+                      ? state.appLogsElasticPassword || undefined
+                      : undefined,
+                  apiKey:
+                    state.appLogsElasticAuthMode === "api-key"
+                      ? state.appLogsElasticApiKey || undefined
+                      : undefined,
+                },
+              }
+            : undefined,
         },
         customEmails: state.customEmailsEnabled
           ? {
@@ -1315,12 +1662,10 @@ export function WizardProvider({
       "smtp",
       "database",
       "database-creds",
-      "tier",
       "external-services",
       "features",
-      "feature-config",
       "storage",
-      "backup",
+      "feature-config",
       "version",
       "review",
     ].indexOf(stepId);

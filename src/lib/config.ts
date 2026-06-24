@@ -400,7 +400,6 @@ export function extractProfileFromConfig(
     licenseKey: config.licenseKey,
 
     // Preferences
-    tier: config.tier,
     databaseType: config.database.type,
     storage: config.storage,
 

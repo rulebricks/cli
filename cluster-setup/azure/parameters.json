@@ -8,8 +8,11 @@
     "nodeCount": { "value": 2 },
     "maxNodeCount": { "value": 4 },
     "nodeVmSize": { "value": "Standard_F4as_v6" },
+    "enableBurstPool": { "value": true },
+    "burstVmSize": { "value": "Standard_F16as_v6" },
+    "burstMaxCount": { "value": 1 },
     "maxPods": { "value": 110 },
-    "osDiskSizeGB": { "value": 30 },
+    "osDiskSizeGB": { "value": 64 },
     "osDiskType": { "value": "Managed" },
 
     "enableExternalDns": { "value": false },

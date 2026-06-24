@@ -37,9 +37,23 @@ The bucket is encrypted and has public access blocked.
 
 `ClusterName` (`rulebricks-cluster`), `KubernetesVersion` (`1.34`),
 `NodeInstanceType` (`c7i.xlarge`), `NodeDesiredCapacity`/`NodeMinSize`/`NodeMaxSize`
-(`2`/`2`/`4`), `NodeVolumeSizeGiB` (`50`). Two 4-vCPU nodes give an 8-vCPU
-baseline that scales to four. Worker pods use soft anti-affinity, so no labels
-or taints are required.
+(`2`/`2`/`4`), `NodeVolumeSizeGiB` (`50`). The standard (core) nodegroup runs
+the always-on services on two to four 4-vCPU nodes; burst capacity lives in
+the dedicated burst nodegroup below.
+
+### Burst worker nodegroup (default on)
+
+`EnableBurstPool` (`"true"`), `BurstInstanceType` (`c7i.4xlarge`, 16 vCPU),
+`BurstNodeMaxSize` (`1`). One large on-demand node that scales 0 -> 1 on
+demand, labeled and tainted `rulebricks.com/pool=burst`: the Rulebricks chart
+makes workers tolerate the taint and softly prefer the label out of the box,
+so the scaled-out worker fleet lands here while core services stay on the
+standard nodegroup. Sizing math: 2 x 4 vCPU core floor + 16 vCPU burst =
+24 vCPU running steady-state at full burst, and exactly 32 vCPU even with
+the core nodegroup at its 4-node max. Note: EKS has no parked-VM equivalent of AKS
+Deallocate, so each burst cold-provisions the node (~2-3 min); the warm
+worker floor on the core nodes carries traffic during provisioning, and a
+Karpenter NodePool carrying the same label/taint is the planned fast path.
 
 > `NodeInstanceType` and the node AMI are coupled: `c7i` is x86, so the template
 > uses `AL2023_x86_64_STANDARD`. If you switch to a Graviton/ARM type (e.g.

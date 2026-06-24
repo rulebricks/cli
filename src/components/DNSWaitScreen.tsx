@@ -1,6 +1,5 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Box, Text, useInput } from "ink";
-import InkSpinner from "ink-spinner";
 import { BorderBox, Spinner, useTheme } from "./common/index.js";
 import { DNSRecord } from "../types/index.js";
 import {
@@ -18,7 +17,7 @@ interface DNSWaitScreenProps {
   onSkip?: () => void;
 }
 
-type Status = "loading-lb" | "waiting-dns" | "complete" | "error";
+type Status = "loading-lb" | "idle" | "checking" | "complete" | "error";
 
 export function DNSWaitScreen({
   domain,
@@ -35,11 +34,29 @@ export function DNSWaitScreen({
   } | null>(null);
   const [records, setRecords] = useState<DNSRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [pollCount, setPollCount] = useState(0);
+  const [hasChecked, setHasChecked] = useState(false);
 
-  // Use ref to avoid stale closure in polling interval
-  const recordsRef = useRef<DNSRecord[]>(records);
-  recordsRef.current = records;
+  const checkRecords = useCallback(async () => {
+    if (status !== "idle" || records.length === 0) return;
+
+    setStatus("checking");
+    setHasChecked(true);
+
+    const updatedRecords = await Promise.all(
+      records.map(async (record) => {
+        if (record.verified) return record;
+
+        const result = await checkDNSRecord(record.hostname, record.target);
+        return {
+          ...record,
+          verified: result.resolved && result.matchesTarget,
+        };
+      }),
+    );
+
+    setRecords(updatedRecords);
+    setStatus(isDNSComplete(updatedRecords) ? "complete" : "idle");
+  }, [records, status]);
 
   useInput((input, key) => {
     if (key.escape || input.toLowerCase() === "s") {
@@ -47,6 +64,8 @@ export function DNSWaitScreen({
     }
     if (key.return && status === "complete") {
       onComplete();
+    } else if (key.return && status === "idle") {
+      void checkRecords();
     }
   });
 
@@ -73,50 +92,21 @@ export function DNSWaitScreen({
       );
 
       setRecords(dnsRecords);
-      setStatus("waiting-dns");
+      setStatus("idle");
     };
 
     fetchLB();
   }, [domain, selfHostedSupabase, namespace]);
 
-  // Poll DNS records
-  useEffect(() => {
-    if (status !== "waiting-dns") return;
-
-    const pollDNS = async () => {
-      // Use ref to get current records, avoiding stale closure
-      const currentRecords = recordsRef.current;
-
-      const updatedRecords = await Promise.all(
-        currentRecords.map(async (record) => {
-          if (record.verified) return record;
-
-          const result = await checkDNSRecord(record.hostname, record.target);
-          return {
-            ...record,
-            verified: result.resolved && result.matchesTarget,
-          };
-        }),
-      );
-
-      setRecords(updatedRecords);
-      setPollCount((c) => c + 1);
-
-      if (isDNSComplete(updatedRecords)) {
-        setStatus("complete");
-      }
-    };
-
-    // Initial check
-    pollDNS();
-
-    // Poll every 5 seconds
-    const interval = setInterval(pollDNS, 5000);
-
-    return () => clearInterval(interval);
-  }, [status]);
-
   const verifiedCount = records.filter((r) => r.verified).length;
+  const footerText =
+    status === "complete"
+      ? "Enter to continue"
+      : status === "checking"
+        ? "Checking DNS records..."
+        : hasChecked
+          ? "We couldn't find one or more DNS records. Please verify they exist and press Enter to try again."
+          : "Press Enter once you've created the DNS records • S or Esc to skip DNS validation";
 
   return (
     <BorderBox title="Configure DNS Records">
@@ -138,80 +128,97 @@ export function DNSWaitScreen({
         </Box>
       )}
 
-      {(status === "waiting-dns" || status === "complete") && loadBalancer && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>Your load balancer address:</Text>
-          <Box marginY={1}>
-            <Text color={colors.accent} bold>
-              {loadBalancer.address}
-            </Text>
-          </Box>
+      {(status === "idle" || status === "checking" || status === "complete") &&
+        loadBalancer && (
+          <Box flexDirection="column" marginY={1}>
+            <Text bold>Your load balancer address:</Text>
+            <Box marginY={1}>
+              <Text color={colors.accent} bold>
+                {loadBalancer.address}
+              </Text>
+            </Box>
 
-          <Text>Please add the following DNS records:</Text>
-          <Box marginTop={1} flexDirection="column">
-            {records.map((record, idx) => (
-              <Box key={idx} flexDirection="column" marginBottom={1}>
-                {/* Line 1: Status + hostname */}
-                <Box>
-                  {record.verified ? (
-                    <Text color={colors.success}>✓</Text>
-                  ) : (
-                    <Text color={colors.accent}>
-                      <InkSpinner type="dots" />
+            <Text>Please add the following DNS records:</Text>
+            <Box marginTop={1} flexDirection="column">
+              {records.map((record, idx) => (
+                <Box key={idx} flexDirection="column" marginBottom={1}>
+                  {/* Line 1: Status + hostname */}
+                  <Box>
+                    {record.verified ? (
+                      <Text color={colors.success}>✓</Text>
+                    ) : hasChecked ? (
+                      <Text color={colors.warning}>○</Text>
+                    ) : (
+                      <Text color={colors.muted}>○</Text>
+                    )}
+                    <Text> </Text>
+                    <Text
+                      color={
+                        record.verified
+                          ? colors.success
+                          : hasChecked
+                            ? colors.warning
+                            : undefined
+                      }
+                    >
+                      {record.hostname}
                     </Text>
-                  )}
-                  <Text> </Text>
-                  <Text color={record.verified ? colors.success : undefined}>
-                    {record.hostname}
-                  </Text>
+                  </Box>
+                  {/* Line 2: Arrow + type + arrow + target (indented) */}
+                  <Box marginLeft={2}>
+                    <Text color={colors.accent}>{record.type}</Text>
+                    <Text color={colors.muted}> → </Text>
+                    <Text color={colors.accent}>{record.target}</Text>
+                  </Box>
                 </Box>
-                {/* Line 2: Arrow + type + arrow + target (indented) */}
-                <Box marginLeft={2}>
-                  <Text color={colors.accent}>{record.type}</Text>
-                  <Text color={colors.muted}> → </Text>
-                  <Text color={colors.accent}>{record.target}</Text>
-                </Box>
-              </Box>
-            ))}
-          </Box>
+              ))}
+            </Box>
 
-          <Box marginTop={2}>
-            {status === "waiting-dns" ? (
-              <Box flexDirection="column">
-                <Box>
-                  <Spinner
-                    label={`Checking DNS propagation... (${verifiedCount}/${records.length} complete)`}
-                  />
-                </Box>
-                <Box marginTop={1}>
-                  <Text color={colors.muted} dimColor>
-                    Poll #{pollCount} • DNS changes can take up to 48 hours to
-                    propagate
+            <Box marginTop={2}>
+              {status === "complete" ? (
+                <Box flexDirection="column">
+                  <Text color={colors.success} bold>
+                    ✓ All DNS records verified!
                   </Text>
+                  <Box marginTop={1}>
+                    <Text color={colors.muted}>
+                      Press Enter to continue with TLS setup
+                    </Text>
+                  </Box>
                 </Box>
-              </Box>
-            ) : (
-              <Box flexDirection="column">
-                <Text color={colors.success} bold>
-                  ✓ All DNS records verified!
-                </Text>
-                <Box marginTop={1}>
+              ) : status === "checking" ? (
+                <Box flexDirection="column">
+                  <Box>
+                    <Spinner label="Checking DNS records..." />
+                  </Box>
+                  <Box marginTop={1}>
+                    <Text color={colors.muted} dimColor>
+                      {verifiedCount}/{records.length} records verified
+                    </Text>
+                  </Box>
+                </Box>
+              ) : hasChecked ? (
+                <Box flexDirection="column">
+                  <Text color={colors.warning}>
+                    We couldn't find one or more DNS records.
+                  </Text>
                   <Text color={colors.muted}>
-                    Press Enter to continue with TLS setup
+                    Please verify they exist and press Enter to try again.
                   </Text>
                 </Box>
-              </Box>
-            )}
+              ) : (
+                <Box flexDirection="column">
+                  <Text color={colors.muted}>
+                    Press Enter once you've created the DNS records.
+                  </Text>
+                </Box>
+              )}
+            </Box>
           </Box>
-        </Box>
-      )}
+        )}
 
       <Box marginTop={1}>
-        <Text color={colors.muted} dimColor>
-          {status === "complete"
-            ? "Enter to continue"
-            : "S or Esc to skip DNS validation (not recommended)"}
-        </Text>
+        <Text color={colors.muted} dimColor>{footerText}</Text>
       </Box>
     </BorderBox>
   );

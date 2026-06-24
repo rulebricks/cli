@@ -3,7 +3,7 @@ import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { useWizard } from '../WizardContext.js';
 import { BorderBox, useTheme } from '../../common/index.js';
-import { TIER_CONFIGS, DNS_PROVIDER_NAMES, CLOUD_PROVIDER_NAMES, LOGGING_SINK_INFO, isSupportedDnsProvider, KafkaPreset } from '../../../types/index.js';
+import { DNS_PROVIDER_NAMES, CLOUD_PROVIDER_NAMES, LOGGING_SINK_INFO, isSupportedDnsProvider, KafkaPreset } from '../../../types/index.js';
 
 interface ReviewStepProps {
   onComplete: () => void;
@@ -69,10 +69,6 @@ export function ReviewStep({
     setEditingName(false);
   };
   
-  const tierConfig = state.tier ? TIER_CONFIGS[state.tier] : null;
-  const tierLabel = state.tier
-    ? `${state.tier.charAt(0).toUpperCase()}${state.tier.slice(1)}`
-    : 'Not selected';
   const externalDnsEnabled = state.dnsAutoManage && isSupportedDnsProvider(state.dnsProvider);
   const clusterCpuCores = state.eligibleCpuCores || Math.ceil(state.totalCpuCores);
   const clusterMemoryGi = state.eligibleMemoryGi || Math.ceil(state.totalMemoryGi);
@@ -189,27 +185,11 @@ export function ReviewStep({
           value={state.databaseType === 'supabase-cloud' ? 'Supabase Cloud' : 'Self-hosted'} 
         />
         
-        <SectionHeader title="Performance" />
-        <Box>
-          <Box width={16}>
-            <Text color={colors.muted}>Tier</Text>
-          </Box>
-          <Text color={colors.accent} bold>
-            {tierLabel}
-          </Text>
-          {tierConfig && <Text color={colors.muted}> ({tierConfig.throughput})</Text>}
-          <Text color={colors.muted}> (used for app sizing)</Text>
-        </Box>
+        <SectionHeader title="Cluster" />
         {state.totalCpuCores > 0 && (
           <ConfigRow
-            label="Cluster"
+            label="Capacity"
             value={`${state.schedulableNodeCount} nodes, ${clusterCpuCores} vCPU, ${clusterMemoryGi} Gi`}
-          />
-        )}
-        {tierConfig && (
-          <ConfigRow
-            label="Requires"
-            value={`${tierConfig.requirements.cpuCores} vCPU, ${tierConfig.requirements.memoryGi} Gi memory, ${tierConfig.requirements.persistentStorageGi} Gi persistent storage`}
           />
         )}
         {state.storageClass && (
@@ -310,11 +290,31 @@ export function ReviewStep({
           <Text>  </Text>
           <Text color={colors.success}>✓ Monitoring</Text>
           <Text>  </Text>
+          <Text color={state.tracingEnabled ? colors.success : colors.muted}>
+            {state.tracingEnabled ? '✓' : '○'} Tracing
+          </Text>
+          <Text>  </Text>
+          <Text color={state.appLogsEnabled ? colors.success : colors.muted}>
+            {state.appLogsEnabled ? '✓' : '○'} App Logs
+          </Text>
+          <Text>  </Text>
           <Text color={state.loggingSink !== 'console' ? colors.success : colors.muted}>
             {state.loggingSink !== 'console' ? '✓' : '○'} Logging
           </Text>
         </Box>
         <ConfigRow label="Monitoring" value={monitoringDestination} />
+        {state.tracingEnabled && (
+          <ConfigRow
+            label="Tracing"
+            value={state.tracingElasticEndpoint || 'enabled'}
+          />
+        )}
+        {state.appLogsEnabled && (
+          <ConfigRow
+            label="App logs"
+            value={state.appLogsElasticEndpoint || 'enabled'}
+          />
+        )}
         {state.loggingSink !== 'console' && (
           <ConfigRow
             label="Logging"

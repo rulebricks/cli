@@ -8,6 +8,7 @@
 import { exec } from "child_process";
 import { promisify } from "util";
 import { CloudProvider, CLOUD_REGIONS } from "../types/index.js";
+import { approveCloudCommandOrThrow } from "./commandApproval.js";
 
 const execAsync = promisify(exec);
 
@@ -98,11 +99,30 @@ export interface GcpServiceAccount {
 /**
  * Execute a CLI command with timeout
  */
+interface ExecCommandOptions {
+  timeout?: number;
+  intent?: string;
+  description?: string;
+  provider?: CloudProvider;
+  mutating?: boolean;
+}
+
 async function execCommand(
   command: string,
-  timeout: number = CLI_TIMEOUT,
+  options: ExecCommandOptions | number = {},
 ): Promise<{ stdout: string; stderr: string }> {
+  const opts: ExecCommandOptions =
+    typeof options === "number" ? { timeout: options } : options;
+  const timeout = opts.timeout ?? CLI_TIMEOUT;
+
   try {
+    await approveCloudCommandOrThrow({
+      intent: opts.intent ?? inferCommandIntent(command),
+      command,
+      description: opts.description,
+      provider: opts.provider ?? inferProvider(command),
+      mutating: opts.mutating,
+    });
     const result = await execAsync(command, { timeout });
     return result;
   } catch (error: unknown) {
@@ -120,6 +140,64 @@ async function execCommand(
     }
     throw error;
   }
+}
+
+function inferProvider(command: string): CloudProvider | undefined {
+  if (command.startsWith("aws ")) return "aws";
+  if (command.startsWith("gcloud ")) return "gcp";
+  if (command.startsWith("az ")) return "azure";
+  return undefined;
+}
+
+function inferCommandIntent(command: string): string {
+  if (
+    command.includes("--version") ||
+    command.includes("get-caller-identity") ||
+    command.includes("gcloud config list") ||
+    command.includes("az account show")
+  ) {
+    return "Detect cloud CLIs";
+  }
+  if (
+    command.includes("describe-regions") ||
+    command.includes("compute regions list") ||
+    command.includes("list-locations")
+  ) {
+    return "List available regions";
+  }
+  if (
+    command.includes("eks list-clusters") ||
+    command.includes("eks describe-cluster") ||
+    command.includes("container clusters list") ||
+    command.includes("az aks list")
+  ) {
+    return "Discover clusters";
+  }
+  if (
+    command.includes("update-kubeconfig") ||
+    command.includes("get-credentials")
+  ) {
+    return "Refresh kubeconfig";
+  }
+  if (
+    command.includes("s3api") ||
+    command.includes("storage buckets") ||
+    command.includes("storage account") ||
+    command.includes("storage container")
+  ) {
+    return "Discover storage resources";
+  }
+  if (
+    command.includes("iam list-roles") ||
+    command.includes("service-accounts list") ||
+    command.includes("identity list")
+  ) {
+    return "List workload identities";
+  }
+  if (command.includes("amp ") || command.includes("monitor data-collection")) {
+    return "Discover monitoring destinations";
+  }
+  return "Run cloud CLI command";
 }
 
 // ============================================================================
@@ -276,6 +354,10 @@ export async function listEksClusters(region: string): Promise<string[]> {
   try {
     const result = await execCommand(
       `aws eks list-clusters --region ${region} --output json`,
+      {
+        intent: `Discover clusters in ${region}`,
+        provider: "aws",
+      },
     );
     if (result.stderr && !result.stdout) {
       return [];
@@ -295,6 +377,10 @@ async function describeEksCluster(
   try {
     const result = await execCommand(
       `aws eks describe-cluster --name ${name} --region ${region} --query "cluster.{name:name,status:status,version:version}" --output json`,
+      {
+        intent: `Discover clusters in ${region}`,
+        provider: "aws",
+      },
     );
     if (result.stderr && !result.stdout) {
       return null;
@@ -341,6 +427,22 @@ export async function listAllEksClusters(): Promise<DiscoveredCluster[]> {
       (a, b) =>
         a.region.localeCompare(b.region) || a.name.localeCompare(b.name),
     );
+}
+
+/**
+ * Discover active EKS clusters in one region.
+ */
+export async function discoverEksClustersInRegion(
+  region: string,
+): Promise<DiscoveredCluster[]> {
+  const names = await listEksClusters(region);
+  const clusters = await Promise.all(
+    names.map((name) => describeEksCluster(name, region)),
+  );
+
+  return clusters
+    .filter((cluster): cluster is DiscoveredCluster => cluster !== null)
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
@@ -563,6 +665,10 @@ export async function listGkeClusters(region: string): Promise<string[]> {
     // List clusters in the specified region (includes both regional and zonal clusters in that region)
     const result = await execCommand(
       `gcloud container clusters list --region ${region} --format="json(name)" 2>/dev/null || gcloud container clusters list --filter="location~^${region}" --format="json(name)"`,
+      {
+        intent: `Discover clusters in ${region}`,
+        provider: "gcp",
+      },
     );
     if (result.stderr && !result.stdout) {
       return [];
@@ -612,6 +718,51 @@ export async function listAllGkeClusters(): Promise<DiscoveredCluster[]> {
         (a, b) =>
           a.region.localeCompare(b.region) || a.name.localeCompare(b.name),
       );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Discover running GKE clusters in a selected region/location.
+ */
+export async function discoverGkeClustersInRegion(
+  region: string,
+): Promise<DiscoveredCluster[]> {
+  const projectId = await getGcpProjectId();
+
+  try {
+    const result = await execCommand(
+      `gcloud container clusters list --region ${region} --format="json(name,location,status,currentMasterVersion,currentNodeCount)" 2>/dev/null || gcloud container clusters list --filter="location~^${region}" --format="json(name,location,status,currentMasterVersion,currentNodeCount)"`,
+      {
+        intent: `Discover clusters in ${region}`,
+        provider: "gcp",
+      },
+    );
+    if (result.stderr && !result.stdout) {
+      return [];
+    }
+
+    const clusters = JSON.parse(result.stdout) as Array<{
+      name: string;
+      location: string;
+      status?: string;
+      currentMasterVersion?: string;
+      currentNodeCount?: number;
+    }>;
+
+    return clusters
+      .filter((cluster) => cluster.status === "RUNNING")
+      .map((cluster) => ({
+        provider: "gcp" as const,
+        name: cluster.name,
+        region: cluster.location,
+        projectId: projectId || undefined,
+        status: cluster.status,
+        version: cluster.currentMasterVersion,
+        nodeCount: cluster.currentNodeCount,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
   } catch {
     return [];
   }
@@ -1002,6 +1153,56 @@ export async function listAllAksClusters(): Promise<DiscoveredCluster[]> {
   }
 }
 
+/**
+ * Discover running AKS clusters in a selected Azure location.
+ */
+export async function discoverAksClustersInRegion(
+  region: string,
+): Promise<DiscoveredCluster[]> {
+  try {
+    const result = await execCommand(
+      'az aks list --query "[].{name:name,resourceGroup:resourceGroup,location:location,kubernetesVersion:kubernetesVersion,powerState:powerState,agentPoolProfiles:agentPoolProfiles}" --output json',
+      {
+        intent: `Discover clusters in ${region}`,
+        provider: "azure",
+      },
+    );
+    if (result.stderr && !result.stdout) {
+      return [];
+    }
+
+    const clusters = JSON.parse(result.stdout) as Array<{
+      name: string;
+      resourceGroup?: string;
+      location: string;
+      kubernetesVersion?: string;
+      powerState?: { code?: string };
+      agentPoolProfiles?: Array<{ count?: number }>;
+    }>;
+
+    return clusters
+      .filter(
+        (cluster) =>
+          cluster.location === region && cluster.powerState?.code === "Running",
+      )
+      .map((cluster) => ({
+        provider: "azure" as const,
+        name: cluster.name,
+        region: cluster.location,
+        resourceGroup: cluster.resourceGroup,
+        status: cluster.powerState?.code,
+        version: cluster.kubernetesVersion,
+        nodeCount: cluster.agentPoolProfiles?.reduce(
+          (sum, pool) => sum + (pool.count || 0),
+          0,
+        ),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
 // ============================================================================
 // Aggregated Functions
 // ============================================================================
@@ -1094,6 +1295,26 @@ export async function listManagedClusters(
 }
 
 /**
+ * List managed Kubernetes clusters discoverable through a provider CLI in a
+ * selected region/location. This is used by init to avoid account-wide fan-out.
+ */
+export async function discoverClustersInRegion(
+  provider: CloudProvider,
+  region: string,
+): Promise<DiscoveredCluster[]> {
+  switch (provider) {
+    case "aws":
+      return discoverEksClustersInRegion(region);
+    case "gcp":
+      return discoverGkeClustersInRegion(region);
+    case "azure":
+      return discoverAksClustersInRegion(region);
+    default:
+      return [];
+  }
+}
+
+/**
  * Refresh kubeconfig credentials for a selected managed Kubernetes cluster.
  */
 export async function updateKubeconfig(
@@ -1110,7 +1331,12 @@ export async function updateKubeconfig(
       {
         const result = await execCommand(
           `aws eks update-kubeconfig --name ${clusterName} --region ${region}`,
-          30000,
+          {
+            timeout: 30000,
+            intent: `Refresh kubeconfig for ${clusterName}`,
+            provider: "aws",
+            mutating: true,
+          },
         );
         if (result.stderr && !result.stdout) throw new Error(result.stderr);
       }
@@ -1122,7 +1348,12 @@ export async function updateKubeconfig(
       {
         const result = await execCommand(
           `gcloud container clusters get-credentials ${clusterName} --location ${region} --project ${options.gcpProjectId}`,
-          30000,
+          {
+            timeout: 30000,
+            intent: `Refresh kubeconfig for ${clusterName}`,
+            provider: "gcp",
+            mutating: true,
+          },
         );
         if (result.stderr && !result.stdout) throw new Error(result.stderr);
       }
@@ -1134,7 +1365,12 @@ export async function updateKubeconfig(
       {
         const result = await execCommand(
           `az aks get-credentials --name ${clusterName} --resource-group ${options.azureResourceGroup} --overwrite-existing`,
-          30000,
+          {
+            timeout: 30000,
+            intent: `Refresh kubeconfig for ${clusterName}`,
+            provider: "azure",
+            mutating: true,
+          },
         );
         if (result.stderr && !result.stdout) throw new Error(result.stderr);
       }

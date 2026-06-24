@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import SelectInput from "ink-select-input";
 import TextInput from "ink-text-input";
 import { useWizard } from "../WizardContext.js";
-import { BorderBox, useTheme } from "../../common/index.js";
+import { BorderBox, useGatedInput, useTheme } from "../../common/index.js";
 import { Spinner } from "../../common/Spinner.js";
 import {
   ObjectStorageProvider,
@@ -43,6 +43,19 @@ const AZURE_AUTH = [
   { label: "Workload identity (recommended)", value: "workload-identity" },
   { label: "Connection string Secret (fallback)", value: "secret" },
 ];
+
+// Healthy cron presets so users don't hand-write cron for DB backups.
+const BACKUP_FREQUENCY_PRESETS: { label: string; value: string }[] = [
+  { label: "Every 30 minutes", value: "*/30 * * * *" },
+  { label: "Hourly", value: "0 * * * *" },
+  { label: "Every 6 hours", value: "0 */6 * * *" },
+  { label: "Every 12 hours", value: "0 */12 * * *" },
+  { label: "Daily (02:00 UTC)", value: "0 2 * * *" },
+  { label: "Weekly (Sun 02:00 UTC)", value: "0 2 * * 0" },
+  { label: "Custom cron…", value: "__custom__" },
+];
+
+const CUSTOM_CRON = "__custom__";
 
 function providerToCloud(provider: ObjectStorageProvider): CloudProvider {
   if (provider === "azure-blob") return "azure";
@@ -87,7 +100,13 @@ type Field =
   | "gcp-sa-loading"
   | "gcp-sa"
   | "gcp-sa-manual"
-  | "done";
+  | "done"
+  // Database backup policy (self-hosted Postgres only); same bucket, db-backups/ prefix.
+  | "backup-enabled"
+  | "backup-frequency"
+  | "backup-frequency-custom"
+  | "backup-retention"
+  | "backup-done";
 
 export function StorageStep({ onComplete, onBack }: StorageStepProps) {
   const { state, dispatch } = useWizard();
@@ -132,6 +151,17 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
   );
   const [gcpServiceAccount, setGcpServiceAccount] = useState(
     state.storageGcpServiceAccountEmail || "",
+  );
+
+  // Database backups are configured in this same step (self-hosted only); they
+  // share the bucket above and land under the db-backups/ prefix.
+  const isSelfHosted = state.databaseType === "self-hosted";
+  const [backupEnabled, setBackupEnabled] = useState(state.backupEnabled);
+  const [backupSchedule, setBackupSchedule] = useState(
+    state.backupSchedule || "0 2 * * *",
+  );
+  const [backupRetentionDays, setBackupRetentionDays] = useState(
+    String(state.backupRetentionDays || 7),
   );
 
   // Dynamic resource lists (empty => manual entry fallback).
@@ -286,7 +316,7 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
   };
 
   // ===== Persistence =====
-  const persistAndContinue = () => {
+  const persistStorage = () => {
     dispatch({
       type: "SET_STORAGE_CONFIG",
       config: {
@@ -313,6 +343,31 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
         storageGcpServiceAccountEmail:
           provider === "gcs" ? gcpServiceAccount : "",
       },
+    });
+  };
+
+  // After object storage is configured, self-hosted deployments continue into
+  // the database backup policy (same bucket); managed-database deployments are
+  // done here.
+  const completeFromStorage = () => {
+    persistStorage();
+    if (isSelfHosted) {
+      setField("backup-enabled");
+    } else {
+      onComplete();
+    }
+  };
+
+  const finishBackups = () => {
+    const parsedRetention = Number.parseInt(backupRetentionDays, 10);
+    dispatch({ type: "SET_BACKUP_ENABLED", enabled: backupEnabled });
+    dispatch({
+      type: "SET_BACKUP_SCHEDULE",
+      schedule: backupSchedule || "0 2 * * *",
+    });
+    dispatch({
+      type: "SET_BACKUP_RETENTION_DAYS",
+      retentionDays: Number.isFinite(parsedRetention) ? parsedRetention : 7,
     });
     onComplete();
   };
@@ -368,10 +423,23 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
         else if (provider === "gcs") setField("gcp-sa");
         else setField(authMode === "secret" ? "azure-secret" : "azure-tenant");
         break;
+      case "backup-enabled":
+        setField("done");
+        break;
+      case "backup-frequency":
+      case "backup-frequency-custom":
+        setField("backup-enabled");
+        break;
+      case "backup-retention":
+        setField("backup-frequency");
+        break;
+      case "backup-done":
+        setField("backup-retention");
+        break;
     }
   };
 
-  useInput((input, key) => {
+  useGatedInput((input, key) => {
     if (key.escape) {
       handleBack();
       return;
@@ -384,7 +452,23 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
       return;
     }
     if (field === "done" && key.return) {
-      persistAndContinue();
+      completeFromStorage();
+      return;
+    }
+    if (field === "backup-enabled") {
+      if (input === " " || input.toLowerCase() === "x") {
+        setBackupEnabled((value) => !value);
+      } else if (key.return) {
+        if (backupEnabled) {
+          setField("backup-frequency");
+        } else {
+          finishBackups();
+        }
+      }
+      return;
+    }
+    if (field === "backup-done" && key.return) {
+      finishBackups();
     }
   });
 
@@ -512,6 +596,35 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
     setField("done");
   };
 
+  // ===== Backup handlers =====
+  const handleBackupFrequencySelect = (item: { value: string }) => {
+    if (item.value === CUSTOM_CRON) {
+      setField("backup-frequency-custom");
+      return;
+    }
+    setBackupSchedule(item.value);
+    setField("backup-retention");
+  };
+
+  const handleBackupFrequencyCustomSubmit = () => {
+    if (!backupSchedule.trim()) {
+      setError("Enter a cron expression or go back to pick a preset");
+      return;
+    }
+    setError(null);
+    setField("backup-retention");
+  };
+
+  const handleBackupRetentionSubmit = () => {
+    const parsed = Number.parseInt(backupRetentionDays, 10);
+    if (!Number.isFinite(parsed) || parsed < 2) {
+      setError("Retention must be greater than 1 (at least 2 days)");
+      return;
+    }
+    setError(null);
+    setField("backup-done");
+  };
+
   // ===== Item builders =====
   const withManual = (
     items: { label: string; value: string }[],
@@ -566,8 +679,10 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
     </Box>
   );
 
+  const storageTitle = isSelfHosted ? "Storage & Backups" : "Object Storage";
+
   return (
-    <BorderBox title="Object Storage">
+    <BorderBox title={storageTitle}>
       <Box flexDirection="column" marginBottom={1}>
         <Text>Configure one bucket/container for all Rulebricks data.</Text>
         <Text color="gray" dimColor>
@@ -691,7 +806,7 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
                 availableRoles.map((r, idx) => ({
                   label:
                     idx === recommendedIndex
-                      ? `${r.name}  — recommended`
+                      ? `${r.name}  - recommended`
                       : r.name,
                   value: r.arn,
                 })),
@@ -744,7 +859,7 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
                 availableServiceAccounts.map((s, idx) => ({
                   label:
                     idx === recommendedIndex
-                      ? `${s.email}  — recommended`
+                      ? `${s.email}  - recommended`
                       : s.email,
                   value: s.email,
                 })),
@@ -869,7 +984,7 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
                 availableIdentities.map((i, idx) => ({
                   label:
                     idx === recommendedIndex
-                      ? `${i.name} (${i.clientId})  — recommended`
+                      ? `${i.name} (${i.clientId})  - recommended`
                       : `${i.name} (${i.clientId})`,
                   value: i.clientId,
                 })),
@@ -900,7 +1015,7 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
           <Text bold>Azure Tenant ID</Text>
           <Text color="gray" dimColor>
             {tenantAutoDetected
-              ? "Auto-detected from your Azure CLI session — edit if needed."
+              ? "Auto-detected from your Azure CLI session - edit if needed."
               : "Tenant ID used by Azure Workload Identity."}
           </Text>
           <Box marginTop={1}>
@@ -946,6 +1061,96 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
               <Text>Container: {azureContainer}</Text>
             )}
           </Box>
+          <Box marginTop={1}>
+            <Text color={colors.muted}>
+              {isSelfHosted
+                ? "Press Enter to configure database backups"
+                : "Press Enter to continue"}
+            </Text>
+          </Box>
+        </Box>
+      )}
+
+      {field === "backup-enabled" && (
+        <Box flexDirection="column">
+          <Text bold>Database Backups</Text>
+          <Text color="gray" dimColor>
+            Logical pg_dump backups of the in-cluster Postgres are written to the
+            same bucket under the db-backups/ prefix. Restore any time with
+            `rulebricks restore {state.name}`.
+          </Text>
+          <Box marginTop={1}>
+            <Text color={colors.accent}>
+              {backupEnabled ? "[x]" : "[ ]"} Enable database backups
+            </Text>
+          </Box>
+          <Text color={colors.muted}>Space toggles backups. Enter continues.</Text>
+        </Box>
+      )}
+
+      {field === "backup-frequency" && (
+        <Box flexDirection="column">
+          <Text bold>Backup frequency</Text>
+          <Text color="gray" dimColor>
+            How often a backup is taken (UTC cron).
+          </Text>
+          {renderSelect(
+            BACKUP_FREQUENCY_PRESETS,
+            handleBackupFrequencySelect,
+            Math.max(
+              0,
+              BACKUP_FREQUENCY_PRESETS.findIndex(
+                (p) => p.value === backupSchedule,
+              ),
+            ),
+          )}
+        </Box>
+      )}
+
+      {field === "backup-frequency-custom" && (
+        <Box flexDirection="column">
+          <Text bold>Custom cron schedule</Text>
+          <Text color="gray" dimColor>
+            Standard cron format (UTC).
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={backupSchedule}
+              onChange={setBackupSchedule}
+              onSubmit={handleBackupFrequencyCustomSubmit}
+              placeholder="0 2 * * *"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {field === "backup-retention" && (
+        <Box flexDirection="column">
+          <Text bold>Retention days</Text>
+          <Text color="gray" dimColor>
+            Backups older than this are pruned from object storage (must be
+            greater than 1).
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={backupRetentionDays}
+              onChange={setBackupRetentionDays}
+              onSubmit={handleBackupRetentionSubmit}
+              placeholder="7"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {field === "backup-done" && (
+        <Box flexDirection="column">
+          <Text color={colors.success}>Database backups configured.</Text>
+          <Text>
+            Frequency:{" "}
+            {BACKUP_FREQUENCY_PRESETS.find((p) => p.value === backupSchedule)
+              ?.label || backupSchedule}
+          </Text>
+          <Text>Retention: {backupRetentionDays} days</Text>
           <Box marginTop={1}>
             <Text color={colors.muted}>Press Enter to continue</Text>
           </Box>

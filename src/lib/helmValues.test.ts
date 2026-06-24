@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildHelmValues } from "./helmValues.js";
-import { validateHelmValues } from "./validateValues.js";
+import {
+  validateHelmValues,
+  validateValuesInvariants,
+} from "./validateValues.js";
 import { buildConfigMatrix } from "./configFixtures.js";
 import {
   DeploymentConfig,
@@ -11,6 +14,44 @@ import {
 } from "../types/index.js";
 
 const matrix = buildConfigMatrix();
+
+type Toleration = Record<string, string>;
+
+const BURST_POOL_TOLERATION: Toleration = {
+  key: "rulebricks.com/pool",
+  operator: "Equal",
+  value: "burst",
+  effect: "NoSchedule",
+};
+
+function cloneFixture(name: string): DeploymentConfig {
+  const entry = matrix.find((c) => c.name === name);
+  assert.ok(entry, `missing matrix fixture ${name}`);
+  return JSON.parse(JSON.stringify(entry.config)) as DeploymentConfig;
+}
+
+function assertNoBareExistsToleration(
+  label: string,
+  tolerations: Toleration[],
+): void {
+  assert.ok(
+    tolerations.every((tol) => !(tol.operator === "Exists" && !tol.key)),
+    `${label}: must not contain a bare operator: Exists toleration`,
+  );
+}
+
+function assertIncludesToleration(
+  label: string,
+  tolerations: Toleration[],
+  expected: Toleration,
+): void {
+  assert.ok(
+    tolerations.some((tol) =>
+      Object.entries(expected).every(([key, value]) => tol[key] === value),
+    ),
+    `${label}: expected toleration ${JSON.stringify(expected)}, got ${JSON.stringify(tolerations)}`,
+  );
+}
 
 test("config matrix parses against the deployment schema", () => {
   for (const { name, config } of matrix) {
@@ -48,6 +89,161 @@ test("generated values are valid both with and without TLS", () => {
       );
     }
   }
+});
+
+interface KafkaTopicValues {
+  name: string;
+  partitions: number;
+  replicationFactor: number;
+  config: Record<string, string>;
+}
+
+interface GeneratedKafkaValues {
+  rulebricks: {
+    hps: {
+      workers: {
+        solutionPartitions?: number;
+        // Sizing (resources, keda min/max) is no longer emitted by the CLI; it
+        // falls back to the chart defaults, so these are optional here.
+        resources?: {
+          requests: { cpu: string };
+          limits: { cpu: string };
+        };
+        keda: { maxReplicaCount?: number; lagThreshold: number };
+      };
+    };
+    app: { logging: { kafkaTopicPrefix?: string } };
+  };
+  kafka: {
+    enabled: boolean;
+    overrideConfiguration: Record<string, string>;
+    provisioning: {
+      enabled: boolean;
+      topics?: KafkaTopicValues[];
+    };
+  };
+}
+
+function tierFixture(name: string): GeneratedKafkaValues {
+  const entry = matrix.find((c) => c.name === name);
+  assert.ok(entry, `missing matrix fixture ${name}`);
+  return buildHelmValues(entry!.config) as unknown as GeneratedKafkaValues;
+}
+
+test("in-cluster provisioning uses baseline partitions and the (empty) prefix", () => {
+  // Tiers were removed: partition sizing is now a fixed baseline that mirrors
+  // the chart defaults, identical across every in-cluster deployment.
+  for (const fixtureName of [
+    "aws-self-hosted-minimal",
+    "gcp-self-hosted",
+    "azure-workload-identity",
+  ] as const) {
+    const values = tierFixture(fixtureName);
+
+    // In-cluster installs run UNPREFIXED; provisioning names must match.
+    assert.equal(values.rulebricks.app.logging.kafkaTopicPrefix, "");
+    assert.equal(values.kafka.provisioning.enabled, true);
+
+    const topics = values.kafka.provisioning.topics!;
+    const byName = Object.fromEntries(topics.map((t) => [t.name, t]));
+    assert.deepEqual(
+      Object.keys(byName).sort(),
+      ["logs", "solution", "solution-response"],
+      `${fixtureName}: topic names must be unprefixed`,
+    );
+
+    // Baseline partitions: the structural contract between provisioning,
+    // workers.solutionPartitions, and the chart defaults.
+    assert.equal(byName["solution"].partitions, 128);
+    assert.equal(byName["solution-response"].partitions, 128);
+    assert.equal(byName["logs"].partitions, 24);
+
+    // Single in-cluster broker: every topic stays RF 1.
+    assert.equal(byName["solution"].replicationFactor, 1);
+    assert.equal(byName["logs"].replicationFactor, 1);
+
+    // MAX_WORKERS source must match the solution topic exactly.
+    assert.equal(values.rulebricks.hps.workers.solutionPartitions, 128);
+
+    // Sizing (worker replicas/resources, keda min/max) is no longer emitted;
+    // it falls back to the chart defaults.
+    assert.equal(values.rulebricks.hps.workers.resources, undefined);
+    assert.equal(values.rulebricks.hps.workers.keda.maxReplicaCount, undefined);
+
+    // Non-tier scale-out tuning is still emitted (aggressive early scale-out).
+    assert.equal(values.rulebricks.hps.workers.keda.lagThreshold, 50);
+
+    // num.partitions is decoupled from worker count (auto-create default only).
+    assert.equal(
+      values.kafka.overrideConfiguration["num.partitions"],
+      "12",
+      `${fixtureName}: num.partitions must no longer track max workers`,
+    );
+  }
+});
+
+test("external Kafka disables provisioning (topics are customer-managed)", () => {
+  for (const name of ["gcp-external-kafka", "aws-external-kafka-msk"]) {
+    const values = tierFixture(name);
+    assert.equal(values.kafka.enabled, false, `${name}: kafka subchart off`);
+    assert.equal(
+      values.kafka.provisioning.enabled,
+      false,
+      `${name}: provisioning must be disabled for external Kafka`,
+    );
+  }
+});
+
+test("invariant checker catches partition/worker and prefix drift", () => {
+  const base = tierFixture("aws-self-hosted-minimal");
+
+  // Healthy values pass.
+  assert.deepEqual(validateValuesInvariants(base), []);
+
+  // Workers above the partition ceiling.
+  const tooManyWorkers = JSON.parse(JSON.stringify(base));
+  tooManyWorkers.rulebricks.hps.workers.keda.maxReplicaCount =
+    tooManyWorkers.rulebricks.hps.workers.solutionPartitions + 1;
+  assert.ok(
+    validateValuesInvariants(tooManyWorkers).some((e) =>
+      e.includes("maxReplicaCount"),
+    ),
+  );
+
+  // Prefixed provisioning names while the app runs unprefixed (the original
+  // CLI/chart drift this guard exists for).
+  const wrongPrefix = JSON.parse(JSON.stringify(base));
+  for (const topic of wrongPrefix.kafka.provisioning.topics) {
+    topic.name = `com.rulebricks.${topic.name}`;
+  }
+  assert.ok(
+    validateValuesInvariants(wrongPrefix).some((e) =>
+      e.includes('must include "solution"'),
+    ),
+  );
+
+  // Solution topic partitions diverging from solutionPartitions (MAX_WORKERS).
+  const divergedPartitions = JSON.parse(JSON.stringify(base));
+  divergedPartitions.kafka.provisioning.topics[0].partitions += 8;
+  assert.ok(
+    validateValuesInvariants(divergedPartitions).some((e) =>
+      e.includes("MAX_WORKERS"),
+    ),
+  );
+
+  // Worker CPU request exceeding the limit is rejected (K8s would reject it).
+  // The CLI no longer emits worker resources (chart defaults apply), but the
+  // invariant must still catch a hand-edited values file that sets them wrong.
+  const requestOverLimit = JSON.parse(JSON.stringify(base));
+  requestOverLimit.rulebricks.hps.workers.resources = {
+    requests: { cpu: "4000m" },
+    limits: { cpu: "1000m" },
+  };
+  assert.ok(
+    validateValuesInvariants(requestOverLimit).some((e) =>
+      e.includes("must not exceed limit"),
+    ),
+  );
 });
 
 test("self-hosted deployments emit supabase.db.enabled so backup validation holds", () => {
@@ -317,4 +513,161 @@ test("no vector sink uses the unsupported parquet codec or extension", () => {
       );
     }
   }
+});
+
+test("tracing disabled by default: no global.tracing, traefik.tracing empty", () => {
+  const values = buildHelmValues(
+    matrix.find((c) => c.name === "aws-self-hosted-minimal")!.config,
+  ) as Record<string, any>;
+  assert.equal(values.global.tracing, undefined);
+  assert.deepEqual(values.traefik.tracing, {});
+  assert.equal(values["vector-agent"].enabled, false);
+});
+
+test("tracing enabled wires global.tracing, traefik OTLP, and Elastic auth", () => {
+  const values = buildHelmValues(
+    matrix.find((c) => c.name === "aws-tracing-elastic")!.config,
+  ) as Record<string, any>;
+
+  assert.equal(values.global.tracing.enabled, true);
+  assert.equal(
+    values.global.tracing.elastic.endpoint,
+    "https://rb-deployment.apm.us-east-1.aws.elastic-cloud.com:443",
+  );
+  assert.equal(values.global.tracing.elastic.authMode, "secret-token");
+  assert.equal(
+    values.global.tracing.elastic.secretToken,
+    "elastic-apm-secret-token",
+  );
+
+  // Default destination is elastic when none is specified.
+  assert.equal(values.global.tracing.destination, "elastic");
+
+  // Traefik becomes the root span and points at the in-cluster collector.
+  assert.equal(values.traefik.tracing.otlp.enabled, true);
+  assert.match(
+    values.traefik.tracing.otlp.http.endpoint as string,
+    /-otel-collector:4318\/v1\/traces$/,
+  );
+});
+
+test("tracing destination otlp wires a generic OTLP backend with bearer auth", () => {
+  const values = buildHelmValues(
+    matrix.find((c) => c.name === "aws-tracing-otlp")!.config,
+  ) as Record<string, any>;
+
+  assert.equal(values.global.tracing.enabled, true);
+  assert.equal(values.global.tracing.destination, "otlp");
+  assert.equal(values.global.tracing.elastic, undefined);
+  assert.equal(
+    values.global.tracing.otlp.endpoint,
+    "https://otlp-gateway.example.com/otlp",
+  );
+  assert.equal(values.global.tracing.otlp.authMode, "bearer");
+  assert.equal(values.global.tracing.otlp.token, "otlp-bearer-token");
+
+  // Collector is still the in-cluster receiver; only the export target differs.
+  assert.equal(values.traefik.tracing.otlp.enabled, true);
+});
+
+test("tracing destination azure-monitor wires the Application Insights backend", () => {
+  const values = buildHelmValues(
+    matrix.find((c) => c.name === "azure-tracing-azure-monitor")!.config,
+  ) as Record<string, any>;
+
+  assert.equal(values.global.tracing.enabled, true);
+  assert.equal(values.global.tracing.destination, "azure-monitor");
+  assert.equal(values.global.tracing.elastic, undefined);
+  assert.match(
+    values.global.tracing.azureMonitor.connectionString as string,
+    /^InstrumentationKey=/,
+  );
+});
+
+test("appLogs enabled produces a vector-agent with an elasticsearch sink", () => {
+  const values = buildHelmValues(
+    matrix.find((c) => c.name === "aws-app-logs-elasticsearch")!.config,
+  ) as Record<string, any>;
+
+  const agent = values["vector-agent"];
+  assert.equal(agent.enabled, true);
+  assert.equal(agent.role, "Agent");
+  assertNoBareExistsToleration("vector-agent", agent.tolerations);
+  assert.deepEqual(agent.tolerations, [BURST_POOL_TOLERATION]);
+  assert.equal(
+    agent.customConfig.sources.kubernetes_logs.type,
+    "kubernetes_logs",
+  );
+  // The agent must not scrape the Vector pods: the aggregator re-emits decision
+  // logs on stdout (ClickHouse-only) and self-scraping the agent would loop.
+  assert.match(
+    agent.customConfig.sources.kubernetes_logs.extra_label_selector as string,
+    /notin \(vector,vector-agent\)/,
+  );
+  const sink = agent.customConfig.sinks.elasticsearch;
+  assert.equal(sink.type, "elasticsearch");
+  assert.deepEqual(sink.endpoints, [
+    "https://rb-deployment.es.us-east-1.aws.elastic-cloud.com:9243",
+  ]);
+  assert.equal(sink.auth.strategy, "basic");
+  assert.equal(sink.auth.user, "elastic");
+});
+
+test("operational DaemonSets use explicit safe tolerations", () => {
+  const values = buildHelmValues(
+    matrix.find((c) => c.name === "aws-self-hosted-minimal")!.config,
+  ) as Record<string, any>;
+
+  const prepullTolerations = values.rulebricks.hps.imagePrepull
+    .tolerations as Toleration[];
+  assertNoBareExistsToleration("imagePrepull", prepullTolerations);
+  assert.deepEqual(prepullTolerations, [BURST_POOL_TOLERATION]);
+});
+
+test("operational DaemonSet tolerations include ARM and burst pools explicitly", () => {
+  const config = cloneFixture("azure-workload-identity");
+  const appLogsConfig = cloneFixture("aws-app-logs-elasticsearch");
+  config.infrastructure.arm64TolerationRequired = true;
+  config.features.logging.appLogs = appLogsConfig.features.logging.appLogs;
+
+  const values = buildHelmValues(config) as Record<string, any>;
+  const expectedTolerations: Toleration[] = [
+    {
+      key: "kubernetes.io/arch",
+      operator: "Equal",
+      value: "arm64",
+      effect: "NoSchedule",
+    },
+    BURST_POOL_TOLERATION,
+  ];
+
+  for (const [label, tolerations] of [
+    ["imagePrepull", values.rulebricks.hps.imagePrepull.tolerations],
+    ["vector-agent", values["vector-agent"].tolerations],
+  ] as Array<[string, Toleration[]]>) {
+    assertNoBareExistsToleration(label, tolerations);
+    for (const expected of expectedTolerations) {
+      assertIncludesToleration(label, tolerations, expected);
+    }
+  }
+});
+
+test("worker metrics path/port are emitted for the worker ServiceMonitor", () => {
+  const values = buildHelmValues(
+    matrix.find((c) => c.name === "aws-self-hosted-minimal")!.config,
+  ) as Record<string, any>;
+  assert.equal(values.rulebricks.metrics.worker.path, "/metrics");
+  assert.equal(values.rulebricks.metrics.worker.port, 3000);
+});
+
+test("invariant rejects enabled tracing without an Elastic endpoint", () => {
+  const values = buildHelmValues(
+    matrix.find((c) => c.name === "aws-tracing-elastic")!.config,
+  ) as Record<string, any>;
+  values.global.tracing.elastic.endpoint = "";
+  const errors = validateValuesInvariants(values);
+  assert.ok(
+    errors.some((e) => e.includes("tracing.elastic.endpoint")),
+    `expected a tracing endpoint invariant error, got: ${errors.join("; ")}`,
+  );
 });

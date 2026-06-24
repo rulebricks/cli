@@ -16,7 +16,13 @@
  */
 import { exec } from "child_process";
 import { promisify } from "util";
-import { DeploymentConfig, getNamespace, getReleaseName } from "../types/index.js";
+import {
+  CloudProvider,
+  DeploymentConfig,
+  getNamespace,
+  getReleaseName,
+} from "../types/index.js";
+import { approveCloudCommandOrThrow } from "./commandApproval.js";
 
 const execAsync = promisify(exec);
 const CLI_TIMEOUT = 60000;
@@ -33,7 +39,20 @@ interface ExecResult {
   code: number;
 }
 
-async function run(command: string): Promise<ExecResult> {
+interface RunOptions {
+  intent: string;
+  provider: CloudProvider;
+  mutating?: boolean;
+}
+
+async function run(command: string, options: RunOptions): Promise<ExecResult> {
+  await approveCloudCommandOrThrow({
+    command,
+    intent: options.intent,
+    provider: options.provider,
+    mutating: options.mutating,
+  });
+
   try {
     const { stdout, stderr } = await execAsync(command, { timeout: CLI_TIMEOUT });
     return { stdout, stderr, code: 0 };
@@ -161,8 +180,10 @@ async function ensureAzure(
     );
   }
 
+  const intent = "Configure workload identity (Azure)";
   const issuerRes = await run(
     `az aks show --name ${shq(cluster)} --resource-group ${shq(rg)} --query oidcIssuerProfile.issuerUrl --output tsv`,
+    { intent, provider: "azure" },
   );
   const issuer = issuerRes.stdout.trim();
   if (!issuer) {
@@ -182,6 +203,7 @@ async function ensureAzure(
     if (!identityName) {
       const nameRes = await run(
         `az identity list --resource-group ${shq(rg)} --query "[?clientId=='${clientId}'].name | [0]" --output tsv`,
+        { intent, provider: "azure" },
       );
       identityName = nameRes.stdout.trim();
       if (!identityName) {
@@ -198,6 +220,7 @@ async function ensureAzure(
 
     const listRes = await run(
       `az identity federated-credential list --identity-name ${shq(identityName)} --resource-group ${shq(rg)} --query "[?subject=='${subject}'] | length(@)" --output tsv`,
+      { intent, provider: "azure" },
     );
     if (listRes.stdout.trim() !== "0" && listRes.stdout.trim() !== "") {
       existing.push(subject);
@@ -209,6 +232,7 @@ async function ensureAzure(
         `--identity-name ${shq(identityName)} --resource-group ${shq(rg)} ` +
         `--issuer ${shq(issuer)} --subject ${shq(subject)} ` +
         `--audiences api://AzureADTokenExchange`,
+      { intent, provider: "azure", mutating: true },
     );
     if (createRes.code !== 0) {
       throw new Error(
@@ -239,6 +263,7 @@ async function ensureAws(
 
   const created: string[] = [];
   const existing: string[] = [];
+  const intent = "Configure workload identity (AWS)";
 
   for (const binding of bindings) {
     const roleArn = binding.principal;
@@ -248,6 +273,7 @@ async function ensureAws(
       `aws eks list-pod-identity-associations --cluster-name ${shq(cluster)} ` +
         `--namespace ${shq(namespace)} --service-account ${shq(binding.serviceAccount)} ` +
         `--region ${shq(region)} --query "associations | length(@)" --output text`,
+      { intent, provider: "aws" },
     );
     if (listRes.code === 0 && listRes.stdout.trim() !== "0" && listRes.stdout.trim() !== "") {
       existing.push(subject);
@@ -258,6 +284,7 @@ async function ensureAws(
       `aws eks create-pod-identity-association --cluster-name ${shq(cluster)} ` +
         `--namespace ${shq(namespace)} --service-account ${shq(binding.serviceAccount)} ` +
         `--role-arn ${shq(roleArn)} --region ${shq(region)}`,
+      { intent, provider: "aws", mutating: true },
     );
     if (createRes.code !== 0) {
       // Treat an existing association as success (race / prior run).
@@ -291,6 +318,7 @@ async function ensureGcp(
   }
 
   const created: string[] = [];
+  const intent = "Configure workload identity (GCP)";
 
   for (const binding of bindings) {
     const gsa = binding.principal;
@@ -301,6 +329,7 @@ async function ensureGcp(
       `gcloud iam service-accounts add-iam-policy-binding ${shq(gsa)} ` +
         `--project ${shq(project)} --role roles/iam.workloadIdentityUser ` +
         `--member ${shq(member)} --quiet`,
+      { intent, provider: "gcp", mutating: true },
     );
     if (res.code !== 0) {
       throw new Error(

@@ -100,7 +100,7 @@ SUB_NAME=""
 SUB_ID=""
 
 if ! az_run account show --query "{n:name,i:id}" -o tsv; then
-  row "Azure CLI signed in" "FAIL — not signed in"
+  row "Azure CLI signed in" "FAIL - not signed in"
   add_action "Run: az login"
   mark_blocker
 else
@@ -110,10 +110,10 @@ else
 
   if ! az_run account get-access-token --query expiresOn -o tsv; then
     if is_auth_error; then
-      row "Azure session valid" "FAIL — session expired"
+      row "Azure session valid" "FAIL - session expired"
       add_action "Run: az login   # your refresh token has expired"
     else
-      row "Azure session valid" "FAIL — ${AZ_STDERR%%$'\n'*}"
+      row "Azure session valid" "FAIL - ${AZ_STDERR%%$'\n'*}"
       add_action "Run: az login   # could not obtain an ARM access token"
     fi
     mark_blocker
@@ -126,7 +126,7 @@ fi
 # Without a valid session, every other check is guaranteed to fail with the
 # same auth error. Skip to the summary so the output stays useful.
 if [[ $AUTH_OK -eq 0 ]]; then
-  printf "\nRemaining checks skipped — fix authentication first.\n"
+  printf "\nRemaining checks skipped - fix authentication first.\n"
   printf "\n========================================\n"
   printf "RESULT: NOT READY\n"
   printf "========================================\n"
@@ -158,12 +158,12 @@ registered=$((total - ${#missing_providers[@]} - ${#unknown_providers[@]}))
 if [[ ${#missing_providers[@]} -eq 0 && ${#unknown_providers[@]} -eq 0 ]]; then
   row "Resource providers registered" "OK ($registered/$total)"
 elif [[ ${#unknown_providers[@]} -gt 0 ]]; then
-  row "Resource providers registered" "WARN — could not read ${#unknown_providers[@]} provider(s)"
+  row "Resource providers registered" "WARN - could not read ${#unknown_providers[@]} provider(s)"
   add_action "Ask your Azure admin to grant you Reader on the subscription, then re-run."
 else
   row "Resource providers registered" "WARN ($registered/$total registered)"
   reg_cmd="for ns in ${missing_providers[*]}; do az provider register --namespace \$ns; done"
-  add_action "Register missing providers (takes 1–5 min):"
+  add_action "Register missing providers (takes 1-5 min):"
   add_action "    $reg_cmd"
 fi
 
@@ -179,7 +179,7 @@ fi
 if [[ $ACCESS_OK -eq 1 ]]; then
   row "Subscription access (AKS + deployments)" "OK"
 else
-  row "Subscription access (AKS + deployments)" "WARN — read access missing"
+  row "Subscription access (AKS + deployments)" "WARN - read access missing"
   add_action "Ask the subscription owner to grant you 'Contributor' on subscription $SUB_NAME."
 fi
 
@@ -196,11 +196,11 @@ if az_run role assignment list --assignee "$SUB_ID" --scope "/subscriptions/$SUB
      && [[ -n "$AZ_STDOUT" ]]; then
     row "Role-assignment rights (Owner / UAA)" "OK ($AZ_STDOUT)"
   else
-    row "Role-assignment rights (Owner / UAA)" "WARN — not detected"
+    row "Role-assignment rights (Owner / UAA)" "WARN - not detected"
     add_action "The deploy creates role assignments, which needs 'Owner' or 'User Access Administrator' (Contributor alone is NOT enough). Ask an admin to grant one of these on the target resource group, or to run the deploy."
   fi
 else
-  row "Role-assignment rights (Owner / UAA)" "WARN — could not read role assignments"
+  row "Role-assignment rights (Owner / UAA)" "WARN - could not read role assignments"
   add_action "Could not verify role-assignment rights. The deploy creates role assignments and needs 'Owner' or 'User Access Administrator' on the target scope."
 fi
 
@@ -209,7 +209,7 @@ if [[ -n "$RESOURCE_GROUP" ]]; then
   if az_run group show --name "$RESOURCE_GROUP" --output none; then
     row "Resource group '$RESOURCE_GROUP'" "OK"
   else
-    row "Resource group '$RESOURCE_GROUP'" "WARN — not found or no access"
+    row "Resource group '$RESOURCE_GROUP'" "WARN - not found or no access"
     add_action "Create or get access to resource group '$RESOURCE_GROUP'."
   fi
 fi
@@ -227,7 +227,7 @@ if az_run vm list-usage --location "$LOCATION" \
 fi
 
 if [[ -z "$usage" || -z "$limit" ]]; then
-  row "$quota_label" "WARN — could not read quota"
+  row "$quota_label" "WARN - could not read quota"
   add_action "Manually check vCPU quota in the Azure Portal: Subscriptions → $SUB_NAME → Usage + quotas."
 else
   available=$((limit - usage))
@@ -251,7 +251,7 @@ fi
 # ---------- summary ----------
 printf "\n========================================\n"
 if [[ $BLOCKERS -eq 0 && ${#ACTIONS[@]} -eq 0 ]]; then
-  printf "RESULT: READY — you can run the Bicep deploy.\n"
+  printf "RESULT: READY - you can run the Bicep deploy.\n"
   printf "========================================\n"
   exit 0
 elif [[ $BLOCKERS -eq 0 ]]; then

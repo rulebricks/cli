@@ -44,10 +44,31 @@ Defaults are turnkey: `createStorage`, `createMonitorWorkspace`, and all `enable
 
 `clusterName` (`rulebricks-cluster`), `location` (`eastus`), `kubernetesVersion`
 (`1.34`), `nodeCount`/`maxNodeCount` (`2`/`4`), `nodeVmSize`
-(`Standard_F4as_v6`), `maxPods` (`110`), `osDiskSizeGB` (`30`), `osDiskType`
-(`Managed`). Two 4-vCPU nodes give an 8-vCPU baseline that scales to four; the
-`110` max-pods avoids the legacy 30/node limit. Worker pods use soft
-anti-affinity, so no labels or taints are required.
+(`Standard_F4as_v6`), `maxPods` (`110`), `osDiskSizeGB` (`64`), `osDiskType`
+(`Managed`). The default (core) pool runs the always-on services on two to
+four 4-vCPU nodes; burst capacity lives in the dedicated burst pool below.
+The `110` max-pods avoids the legacy 30/node limit, and the autoscaler
+profile is tuned for bursts (`scan-interval` 10s, `least-waste` expander).
+Both pools use `Deallocate` scale-down: removed nodes are parked (disk-only
+cost, container images cached) and resume in ~30-60s instead of
+reprovisioning.
+
+### Burst worker pool (default on)
+
+`enableBurstPool` (`true`), `burstVmSize` (`Standard_F16as_v6`, 16 vCPU -
+the Fas_v6 family has no 24-vCPU size), `burstMaxCount` (`1`). One large
+`User`-mode node that scales 0 -> 1 on demand and parks between bursts. It
+is labeled and tainted `rulebricks.com/pool=burst`: the Rulebricks chart
+makes workers tolerate the taint and softly prefer the label out of the box,
+so the entire scaled-out worker fleet lands on this node while core services
+stay on the default pool. Sizing math: 2 x 4 vCPU core floor + 16 vCPU burst
+= 24 vCPU running steady-state at full burst, and exactly 32 vCPU even with
+the core pool at its 4-node max - sized to a 32-vCPU family quota.
+First-ever burst
+cold-provisions the VM (~2-4 min); every burst after resumes the parked VM
+(~30-60s). Note deallocated VMs resume into their original zone/SKU - in a
+capacity-constrained region a resume can fail and the autoscaler retries;
+the warm worker floor on the core pool carries traffic in the meantime.
 
 ## Check access
 

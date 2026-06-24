@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import SelectInput from "ink-select-input";
 import TextInput from "ink-text-input";
 import { useWizard } from "../WizardContext.js";
-import { BorderBox, useTheme } from "../../common/index.js";
+import { BorderBox, useGatedInput, useTheme } from "../../common/index.js";
 import { Spinner } from "../../common/Spinner.js";
 import {
   CloudProvider,
@@ -15,7 +15,7 @@ import {
   AllCloudCliStatus,
   CloudCliStatus,
   DiscoveredCluster,
-  listManagedClusters,
+  discoverClustersInRegion,
   listRegions,
   getGcpProjectId,
   updateKubeconfig,
@@ -32,6 +32,8 @@ type SubStep =
   | "checking"
   | "no-cli"
   | "provider"
+  | "region-loading"
+  | "region"
   | "cluster"
   | "cluster-loading"
   | "cluster-select"
@@ -90,7 +92,7 @@ export function CloudProviderStep({
     checkClis();
   }, []);
 
-  useInput((input, key) => {
+  useGatedInput((input, key) => {
     if (key.escape) {
       if (
         subStep === "provider" ||
@@ -98,6 +100,8 @@ export function CloudProviderStep({
         subStep === "checking"
       ) {
         onBack();
+      } else if (subStep === "region" || subStep === "region-loading") {
+        setSubStep("provider");
       } else if (
         subStep === "manual-region" ||
         subStep === "manual-region-loading"
@@ -112,7 +116,7 @@ export function CloudProviderStep({
         subStep === "cluster-select" ||
         subStep === "kubeconfig-loading"
       ) {
-        setSubStep("provider");
+        setSubStep("region");
       }
     }
   });
@@ -146,15 +150,28 @@ export function CloudProviderStep({
     const provider = item.value as CloudProvider;
     setSelectedProvider(provider);
     setClusterName("rulebricks-cluster");
+    setManualRegion("");
+    setManualResourceGroup("");
     dispatch({ type: "SET_PROVIDER", provider });
-    loadClusters(provider);
+    loadProviderRegions(provider);
   };
 
-  const loadClusters = async (provider: CloudProvider) => {
+  const loadProviderRegions = async (provider: CloudProvider) => {
+    setSubStep("region-loading");
+    try {
+      const regions = await listRegions(provider);
+      setManualRegions(regions.length > 0 ? regions : CLOUD_REGIONS[provider]);
+    } catch {
+      setManualRegions(CLOUD_REGIONS[provider]);
+    }
+    setSubStep("region");
+  };
+
+  const loadClusters = async (provider: CloudProvider, region: string) => {
     setSubStep("cluster-loading");
 
     try {
-      const availableClusters = await listManagedClusters(provider);
+      const availableClusters = await discoverClustersInRegion(provider, region);
 
       setClusters(availableClusters);
 
@@ -203,13 +220,23 @@ export function CloudProviderStep({
 
   const handleClusterSubmit = () => {
     dispatch({ type: "SET_CLUSTER_NAME", clusterName });
-    loadManualRegions();
+
+    const provider = selectedProvider || state.provider;
+    if (!manualRegion) {
+      loadManualRegions();
+      return;
+    }
+    if (provider === "azure" && !manualResourceGroup.trim()) {
+      setSubStep("manual-rg");
+      return;
+    }
+    completeManual(manualRegion, manualResourceGroup.trim());
   };
 
   // Manual path: the cluster wasn't discovered, so the region (and Azure
-  // resource group) are collected explicitly before refreshing kubeconfig —
-  // otherwise the tier scan runs against whatever kubectl happens to point at
-  // and storage/monitoring discovery start without a region.
+  // resource group) are collected explicitly before refreshing kubeconfig
+  // otherwise the cluster capability scan runs against whatever kubectl happens
+  // to point at and storage/monitoring discovery start without a region.
   const loadManualRegions = async () => {
     const provider = selectedProvider || state.provider;
     if (!provider) {
@@ -236,6 +263,15 @@ export function CloudProviderStep({
     } else {
       completeManual(item.value, "");
     }
+  };
+
+  const handleRegionSelect = (item: { value: string }) => {
+    const provider = selectedProvider || state.provider;
+    if (!provider) return;
+
+    setManualRegion(item.value);
+    dispatch({ type: "SET_REGION", region: item.value });
+    loadClusters(provider, item.value);
   };
 
   const handleManualResourceGroupSubmit = () => {
@@ -414,15 +450,49 @@ export function CloudProviderStep({
         </>
       )}
 
+      {subStep === "region-loading" && (
+        <Box flexDirection="column" marginY={1}>
+          <Spinner label="Loading available regions..." />
+        </Box>
+      )}
+
+      {subStep === "region" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text>Select the cluster's region:</Text>
+          <Text color="gray" dimColor>
+            Rulebricks will only search {providerName} clusters in this region.
+          </Text>
+          <Box
+            marginTop={1}
+            height={10}
+            flexDirection="column"
+            overflowY="hidden"
+          >
+            <SelectInput
+              items={manualRegions.map((r) => ({ label: r, value: r }))}
+              onSelect={handleRegionSelect}
+              limit={8}
+              initialIndex={Math.max(0, manualRegions.indexOf(manualRegion))}
+              indicatorComponent={() => null}
+              itemComponent={({ isSelected, label }) => (
+                <Text color={isSelected ? colors.accent : undefined}>
+                  {isSelected ? "> " : "  "}
+                  {label}
+                </Text>
+              )}
+            />
+          </Box>
+        </Box>
+      )}
+
       {subStep === "cluster-loading" && (
         <Box flexDirection="column" marginY={1}>
           <Spinner
-            label={`Fetching ${providerName} clusters...`}
+            label={`Fetching ${providerName} clusters in ${manualRegion}...`}
           />
           <Box marginTop={1}>
             <Text color="gray" dimColor>
-              This may take a moment while the cloud CLI checks accessible
-              locations.
+              This keeps discovery targeted to the selected region.
             </Text>
           </Box>
         </Box>
@@ -434,7 +504,7 @@ export function CloudProviderStep({
             <Text>Select your Kubernetes cluster:</Text>
             <Text color="gray" dimColor>
               {clusters.length} cluster{clusters.length !== 1 ? "s" : ""} found
-              for {providerName}
+              for {providerName} in {manualRegion}
             </Text>
           </Box>
           <Text color="gray" dimColor>

@@ -69,11 +69,13 @@ function vectorRunner() {
 // Run `vector validate` (WITHOUT --no-environment, so transforms/VRL are
 // actually compiled) on a config file. Dummy SASL env so external direct-SASL
 // configs that reference ${KAFKA_SASL_USERNAME} don't fail on an unset var.
+// The kubernetes_logs source also requires its node name outside Kubernetes.
 function runVectorValidate(mode, file) {
   const env = {
     ...process.env,
     KAFKA_SASL_USERNAME: "ci-validate",
     KAFKA_SASL_PASSWORD: "ci-validate",
+    VECTOR_SELF_NODE_NAME: "ci-validate-node",
   };
   if (mode === "local") {
     run("vector", ["validate", file], { env });
@@ -82,10 +84,22 @@ function runVectorValidate(mode, file) {
       "run", "--rm",
       "-e", "KAFKA_SASL_USERNAME=ci-validate",
       "-e", "KAFKA_SASL_PASSWORD=ci-validate",
+      "-e", "VECTOR_SELF_NODE_NAME=ci-validate-node",
       "-v", `${file}:/c/vector.yaml:ro`,
       VECTOR_IMAGE, "validate", "/c/vector.yaml",
     ]);
   }
+}
+
+function offlineSources(sources) {
+  return Object.fromEntries(
+    Object.entries(sources ?? {}).map(([name, source]) => {
+      if (source?.type === "kubernetes_logs") {
+        return [name, { type: "demo_logs", format: "json" }];
+      }
+      return [name, source];
+    }),
+  );
 }
 
 // Pull every rendered ConfigMap that carries a Vector config (data["vector.yaml"]).
@@ -134,9 +148,10 @@ function checkVectorConfig(name, renderedYaml, runner) {
     if (Object.keys(transforms).length === 0) continue;
 
     // Isolate sources + transforms with a console sink so VRL compiles without
-    // needing cloud-storage credentials/network.
+    // needing cloud-storage credentials/network. Sources that need Kubernetes
+    // API access are replaced by offline dummy sources with the same input name.
     const minimal = {
-      sources: parsed.sources ?? {},
+      sources: offlineSources(parsed.sources),
       transforms,
       sinks: {
         _ci_validate: {

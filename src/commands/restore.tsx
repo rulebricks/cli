@@ -9,9 +9,11 @@ import {
   StatusLine,
   ThemeProvider,
   useTheme,
+  CommandApprovalProvider,
 } from "../components/common/index.js";
 import { loadDeploymentConfig } from "../lib/config.js";
 import { updateKubeconfig } from "../lib/cloudCli.js";
+import { CommandDeniedError } from "../lib/commandApproval.js";
 import {
   checkClusterAccessible,
   getDeploymentReplicas,
@@ -234,15 +236,21 @@ function RestoreCommandInner({ name }: RestoreCommandProps) {
       cfg.infrastructure.region &&
       cfg.infrastructure.clusterName
     ) {
-      await updateKubeconfig(
-        cfg.infrastructure.provider,
-        cfg.infrastructure.clusterName,
-        cfg.infrastructure.region,
-        {
-          gcpProjectId: cfg.infrastructure.gcpProjectId,
-          azureResourceGroup: cfg.infrastructure.azureResourceGroup,
-        },
-      );
+      try {
+        await updateKubeconfig(
+          cfg.infrastructure.provider,
+          cfg.infrastructure.clusterName,
+          cfg.infrastructure.region,
+          {
+            gcpProjectId: cfg.infrastructure.gcpProjectId,
+            azureResourceGroup: cfg.infrastructure.azureResourceGroup,
+          },
+        );
+      } catch (err) {
+        if (!(err instanceof CommandDeniedError)) {
+          throw err;
+        }
+      }
       clusterError = await checkClusterAccessible();
     }
 
@@ -496,7 +504,9 @@ export function RestoreCommand(props: RestoreCommandProps) {
   return (
     <ThemeProvider theme="status">
       <Logo />
-      <RestoreCommandInner {...props} />
+      <CommandApprovalProvider>
+        <RestoreCommandInner {...props} />
+      </CommandApprovalProvider>
     </ThemeProvider>
   );
 }

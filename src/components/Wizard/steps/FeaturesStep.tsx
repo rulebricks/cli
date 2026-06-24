@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useWizard } from '../WizardContext.js';
 import { BorderBox, useTheme } from '../../common/index.js';
-import { LOGGING_SINK_INFO } from '../../../types/index.js';
 
 interface FeaturesStepProps {
   onComplete: () => void;
@@ -39,17 +38,31 @@ const FEATURES: Feature[] = [
     description: 'Send Prometheus metrics to an external backend via remote_write (AWS Managed Prometheus, Azure Monitor, Grafana Cloud, etc.). In-cluster monitoring is always on.',
     requiresConfig: true
   },
-  // Additional log forwarding to third-party platforms (Datadog, Splunk, etc.)
-  // is intentionally hidden for now: it was confusing alongside the always-on
-  // decision-log archive to object storage. The Vector sink generation
-  // (helmValues.generateVectorSinks) and the FeatureConfigStep logging sub-flow
-  // are left in place so this can be re-enabled by uncommenting this entry.
-  // {
-  //   id: 'logging',
-  //   label: 'Additional Log Forwarding',
-  //   description: 'Optional: forward a copy of logs to a third-party platform (Datadog, Splunk, Elasticsearch, Loki, New Relic, Axiom). Decision logs are always archived to your object storage regardless of this.',
-  //   requiresConfig: true
-  // },
+  // Distributed tracing: in-cluster OTel collector -> customer-managed Elastic APM.
+  {
+    id: 'tracing',
+    label: 'Distributed Tracing',
+    description: 'Emit OpenTelemetry traces to a backend of your choice (Elastic APM, a generic OTLP/HTTP endpoint, or Azure Monitor) for end-to-end request lineage across the app, HPS, and workers. Self-hosted only.',
+    requiresConfig: true
+  },
+  // Application/container log shipping to a customer-managed Elasticsearch.
+  {
+    id: 'appLogs',
+    label: 'Application Log Shipping',
+    description: 'Optional BYO log shipping via Vector for Elasticsearch, Loki, or generic HTTP. On AWS/Azure, prefer the cloud-native container log agent unless you need a separate backend.',
+    requiresConfig: true
+  },
+  {
+    id: 'valkeyObservability',
+    label: 'Valkey Admin + Cache Metrics',
+    description: 'Deploy the official Apache-2.0 Valkey Admin console internally (port-forward by default) and export Valkey/Kafka lag metrics to Prometheus.',
+    requiresConfig: false
+  },
+  // NOTE: Forwarding a copy of decision logs to a third-party platform
+  // (Datadog, Splunk, Elasticsearch, Loki, New Relic, Axiom) is no longer
+  // offered in the wizard - it was confusing alongside the always-on
+  // decision-log archive to object storage. The capability still exists for
+  // config-file/redeploy users (features.logging.sink + generateVectorSinks).
   {
     id: 'customEmails',
     label: 'Custom Email Templates',
@@ -67,7 +80,9 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
     ai: state.aiEnabled,
     sso: state.ssoEnabled,
     metricsExport: state.metricsExportEnabled,
-    logging: state.loggingSink !== 'console', // External logging is "enabled" if not console-only (includes 'pending')
+    tracing: state.tracingEnabled,
+    appLogs: state.appLogsEnabled,
+    valkeyObservability: state.valkeyAdminEnabled,
     customEmails: state.customEmailsEnabled
   };
   
@@ -112,27 +127,33 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
           enabled: !state.metricsExportEnabled
         });
         break;
-      // Log forwarding toggle is disabled while the feature is hidden (see the
-      // commented FEATURES entry above). Kept for easy re-enablement.
-      // case 'logging':
-      //   if (state.loggingSink === 'console') {
-      //     dispatch({ type: 'SET_LOGGING_SINK', sink: 'pending' });
-      //   } else {
-      //     dispatch({ type: 'SET_LOGGING_SINK', sink: 'console' });
-      //   }
-      //   break;
+      case 'tracing':
+        dispatch({
+          type: 'SET_TRACING_ENABLED',
+          enabled: !state.tracingEnabled
+        });
+        break;
+      case 'appLogs':
+        dispatch({
+          type: 'SET_APP_LOGS_ENABLED',
+          enabled: !state.appLogsEnabled
+        });
+        break;
+      case 'valkeyObservability':
+        dispatch({
+          type: 'SET_EXTERNAL_SERVICES',
+          config: {
+            valkeyAdminEnabled: !state.valkeyAdminEnabled,
+            redisExporterEnabled: !state.valkeyAdminEnabled,
+            kafkaExporterEnabled: !state.valkeyAdminEnabled,
+            valkeyAdminExposure: 'internal'
+          }
+        });
+        break;
       case 'customEmails':
         dispatch({ type: 'SET_CUSTOM_EMAILS_ENABLED', enabled: !state.customEmailsEnabled });
         break;
     }
-  };
-  
-  // Get current logging sink description
-  const getLoggingStatusText = () => {
-    if (state.loggingSink === 'console') {
-      return 'Console only (default)';
-    }
-    return LOGGING_SINK_INFO[state.loggingSink]?.name || state.loggingSink;
   };
   
   return (
@@ -161,9 +182,6 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
                 <Text color={isSelected ? colors.accent : undefined}>
                   {' '}{feature.label}
                 </Text>
-                {feature.id === 'logging' && state.loggingSink !== 'console' && state.loggingSink !== 'pending' && (
-                  <Text color={colors.accent}> → {getLoggingStatusText()}</Text>
-                )}
               </Box>
               {isSelected && (
                 <Box marginLeft={6}>
@@ -191,6 +209,9 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
         {(state.aiEnabled ||
           state.ssoEnabled ||
           state.metricsExportEnabled ||
+          state.tracingEnabled ||
+          state.appLogsEnabled ||
+          state.valkeyAdminEnabled ||
           state.loggingSink !== 'console' ||
           state.customEmailsEnabled) && (
           <Text color="yellow" dimColor>

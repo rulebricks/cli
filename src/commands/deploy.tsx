@@ -8,6 +8,7 @@ import {
   ThemeProvider,
   useTheme,
   Logo,
+  CommandApprovalProvider,
 } from "../components/common/index.js";
 import { DNSWaitScreen } from "../components/DNSWaitScreen.js";
 import {
@@ -34,6 +35,7 @@ import {
   generateHelmValues,
   updateHelmValuesForTLS,
 } from "../lib/helmValues.js";
+import { CommandDeniedError } from "../lib/commandApproval.js";
 import {
   DeploymentConfig,
   DeploymentState,
@@ -90,6 +92,7 @@ function DeployCommandInner({
   const [error, setError] = useState<string | null>(null);
   const [useExternalDns, setUseExternalDns] = useState(false);
   const [tlsWarning, setTlsWarning] = useState<string | null>(null);
+  const [federationWarning, setFederationWarning] = useState<string | null>(null);
   const [status, setStatus] = useState<StepStatus>({
     preflight: "pending",
     federation: "pending",
@@ -197,11 +200,24 @@ function DeployCommandInner({
       // deployment's ServiceAccounts so one cluster can host many deployments.
       setStep("federation");
       markRunning("federation");
-      const federation = await ensureWorkloadIdentityFederation(cfg);
-      setStatus((s) => ({
-        ...s,
-        federation: federation.skipped ? "skipped" : "success",
-      }));
+      try {
+        const federation = await ensureWorkloadIdentityFederation(cfg);
+        setStatus((s) => ({
+          ...s,
+          federation: federation.skipped ? "skipped" : "success",
+        }));
+      } catch (federationError) {
+        if (!(federationError instanceof CommandDeniedError)) {
+          throw federationError;
+        }
+        setFederationWarning(
+          "Workload identity setup was skipped because a cloud CLI command was denied. Continuing assumes you created the trust manually.",
+        );
+        setStatus((s) => ({
+          ...s,
+          federation: "skipped",
+        }));
+      }
 
       setStep("helm-install");
       markRunning("helmInstall");
@@ -346,6 +362,13 @@ function DeployCommandInner({
           markSuccess("kubeconfig");
         }
       } catch (kubeconfigError) {
+        if (kubeconfigError instanceof CommandDeniedError) {
+          clusterError = await checkClusterAccessible();
+          if (!clusterError) {
+            markSuccess("kubeconfig");
+            return;
+          }
+        }
         const kubeconfigMsg =
           kubeconfigError instanceof Error
             ? kubeconfigError.message
@@ -484,6 +507,11 @@ function DeployCommandInner({
                 <Text color={colors.warning}>⚠ {tlsWarning}</Text>
               </Box>
             )}
+            {federationWarning && (
+              <Box marginTop={1}>
+                <Text color={colors.warning}>⚠ {federationWarning}</Text>
+              </Box>
+            )}
           </Box>
 
           <Box marginTop={1} flexDirection="column">
@@ -539,6 +567,11 @@ function DeployCommandInner({
           label="Kubernetes configuration"
         />
         <StatusLine status={status.federation} label={federationLabel} />
+        {federationWarning && (
+          <Box marginLeft={2}>
+            <Text color={colors.warning}>{federationWarning}</Text>
+          </Box>
+        )}
         <StatusLine status={status.helmInstall} label={helmInstallLabel} />
         {!useExternalDns && (
           <>
@@ -600,7 +633,9 @@ export function DeployCommand(props: DeployCommandProps) {
   return (
     <ThemeProvider theme="deploy">
       <Logo />
-      <DeployCommandInner {...props} />
+      <CommandApprovalProvider>
+        <DeployCommandInner {...props} />
+      </CommandApprovalProvider>
     </ThemeProvider>
   );
 }

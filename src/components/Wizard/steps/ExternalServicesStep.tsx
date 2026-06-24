@@ -502,8 +502,8 @@ export function ExternalServicesStep({
         renderSelect(
           "Redis TLS",
           yesNo(
-            "Yes — connect using rediss:// (TLS)",
-            "No — plaintext redis://",
+            "Yes - connect using rediss:// (TLS)",
+            "No - plaintext redis://",
           ),
           handleRedisTlsSelect,
           redisTls ? 1 : 0,
@@ -594,7 +594,7 @@ export function ExternalServicesStep({
       {field === "kafka-custom-ssl" &&
         renderSelect(
           "Kafka TLS/SSL",
-          yesNo("Yes — connect over TLS", "No — plaintext connection"),
+          yesNo("Yes - connect over TLS", "No - plaintext connection"),
           handleCustomSslSelect,
           customSsl ? 1 : 0,
         )}

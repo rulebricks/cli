@@ -46,9 +46,10 @@ export function VersionStep({ onComplete, onBack }: VersionStepProps) {
     setLoadError(null);
 
     try {
-      // The Tier step already scanned the cluster and stored its capabilities
-      // in wizard state; only re-scan when that didn't happen (e.g. the user
-      // skipped past a failed scan).
+      // Scan the cluster for its capabilities (node architecture, storage
+      // class, ARM tolerations) and store them in wizard state, unless an
+      // earlier scan already populated them. The architecture is needed to
+      // fetch the matching image versions below.
       let architecture: NodeArchitecture | undefined;
       if (
         state.nodeArchitecture === "amd64" ||

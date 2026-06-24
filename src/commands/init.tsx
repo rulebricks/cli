@@ -11,10 +11,8 @@ import {
   SMTPStep,
   DatabaseStep,
   SupabaseCredentialsStep,
-  TierStep,
   FeaturesStep,
   StorageStep,
-  BackupStep,
   ExternalServicesStep,
   FeatureConfigStep,
   VersionStep,
@@ -27,6 +25,7 @@ import {
   useTheme,
   Logo,
   LOGO_LINES,
+  CommandApprovalProvider,
 } from "../components/common/index.js";
 import {
   saveDeploymentConfig,
@@ -60,11 +59,9 @@ type StepId =
   | "smtp"
   | "database"
   | "database-creds"
-  | "tier"
   | "external-services"
   | "features"
   | "storage"
-  | "backup"
   | "feature-config"
   | "version"
   | "review";
@@ -78,10 +75,6 @@ const STEP_INFO: Record<StepId, { title: string; description: string }> = {
     title: "Database Credentials",
     description: "Configure database access",
   },
-  tier: {
-    title: "Performance Tier",
-    description: "Select your deployment size",
-  },
   "external-services": {
     title: "External Services",
     description: "Use managed Redis/Kafka (optional)",
@@ -91,12 +84,8 @@ const STEP_INFO: Record<StepId, { title: string; description: string }> = {
     description: "Enable additional features",
   },
   storage: {
-    title: "Storage Backend",
-    description: "Configure object storage",
-  },
-  backup: {
-    title: "Database Backups",
-    description: "Configure database backups",
+    title: "Storage & Backups",
+    description: "Configure object storage and database backups",
   },
   "feature-config": {
     title: "Feature Settings",
@@ -156,30 +145,31 @@ function WizardStepController({
       steps.push("database-creds");
     }
 
-    steps.push("tier");
     // External services (managed Redis/Kafka) is always offered; it defaults to
     // in-cluster and only depends on the selected cloud provider, not the cloud step.
     steps.push("external-services");
     steps.push("features");
 
-    // Feature config runs first so the user makes concrete choices (logging sink,
-    // metrics export destination, etc.) before we decide whether shared object
-    // storage is required. It is only included when an enabled feature actually
-    // needs configuration.
+    // Object storage (plus self-hosted DB backup policy, configured in the same
+    // step) is the canonical destination for decision logs and backups. It runs
+    // before the per-feature configuration so the user sees where their data
+    // lands first, then configures observability exports (metrics, traces, app
+    // logs) against that context.
+    steps.push("storage");
+
+    // Feature config collects the concrete settings for every enabled feature
+    // (AI key, SSO, metrics remote_write, tracing endpoint, app-log shipping,
+    // custom emails). Only included when an enabled feature needs configuration.
     if (
       state.aiEnabled ||
       state.ssoEnabled ||
       state.metricsExportEnabled ||
+      state.tracingEnabled ||
+      state.appLogsEnabled ||
       state.loggingSink !== "console" ||
       state.customEmailsEnabled
     ) {
       steps.push("feature-config");
-    }
-
-    steps.push("storage");
-
-    if (state.databaseType === "self-hosted") {
-      steps.push("backup");
     }
 
     steps.push("version", "review");
@@ -191,6 +181,8 @@ function WizardStepController({
     state.aiEnabled,
     state.ssoEnabled,
     state.metricsExportEnabled,
+    state.tracingEnabled,
+    state.appLogsEnabled,
     state.loggingSink,
     state.customEmailsEnabled,
   ]);
@@ -224,7 +216,6 @@ function WizardStepController({
 
   const handleSave = useCallback(async () => {
     const config = toConfig({
-      tier: state.tier || "small",
       nodeArchitecture: state.nodeArchitecture || undefined,
       arm64TolerationRequired:
         state.arm64TolerationRequired,
@@ -399,16 +390,12 @@ function WizardStepController({
         return <DatabaseStep onComplete={goNext} onBack={goBack} />;
       case "database-creds":
         return <SupabaseCredentialsStep onComplete={goNext} onBack={goBack} />;
-      case "tier":
-        return <TierStep onComplete={goNext} onBack={goBack} />;
       case "external-services":
         return <ExternalServicesStep onComplete={goNext} onBack={goBack} />;
       case "features":
         return <FeaturesStep onComplete={goNext} onBack={goBack} />;
       case "storage":
         return <StorageStep onComplete={goNext} onBack={goBack} />;
-      case "backup":
-        return <BackupStep onComplete={goNext} onBack={goBack} />;
       case "feature-config":
         return (
           <FeatureConfigStep
@@ -482,13 +469,15 @@ export function InitWizard({
   return (
     <ThemeProvider theme="init">
       <Logo />
-      <WizardProvider
-        initialName={initialName}
-        initialState={initialState}
-        profile={profile}
-      >
-        <WizardStepController mode={mode} onSaveComplete={onSaveComplete} />
-      </WizardProvider>
+      <CommandApprovalProvider>
+        <WizardProvider
+          initialName={initialName}
+          initialState={initialState}
+          profile={profile}
+        >
+          <WizardStepController mode={mode} onSaveComplete={onSaveComplete} />
+        </WizardProvider>
+      </CommandApprovalProvider>
     </ThemeProvider>
   );
 }

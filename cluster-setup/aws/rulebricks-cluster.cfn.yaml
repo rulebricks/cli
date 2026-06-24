@@ -30,6 +30,9 @@ Parameters:
     Default: 2
   NodeMaxSize:
     Type: Number
+    # Core services need only 2-4 small nodes; burst capacity lives in the
+    # dedicated burst nodegroup, and a low core ceiling steers the autoscaler
+    # there when the worker fleet scales out.
     Default: 4
   NodeVolumeSizeGiB:
     Type: Number
@@ -37,6 +40,27 @@ Parameters:
   VpcCidr:
     Type: String
     Default: 10.0.0.0/16
+  EnableBurstPool:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: >-
+      Add a dedicated burst nodegroup: one large on-demand node (scales
+      0->BurstNodeMaxSize) labeled and tainted rulebricks.com/pool=burst.
+      The Rulebricks chart makes workers tolerate and softly prefer it out
+      of the box, keeping the scaled-out fleet off the core nodes.
+  BurstInstanceType:
+    Type: String
+    Default: c7i.4xlarge
+    Description: >-
+      Instance type for the burst nodegroup. Default 16 vCPU: 2x4 vCPU core
+      floor + 16 = 24 vCPU running steady-state at full burst, and exactly
+      32 vCPU even with the core nodegroup at its 4-node max.
+  BurstNodeMaxSize:
+    Type: Number
+    Default: 1
+Conditions:
+  BurstPoolEnabled: !Equals [!Ref EnableBurstPool, "true"]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -182,6 +206,36 @@ Resources:
         DesiredSize: !Ref NodeDesiredCapacity
         MinSize: !Ref NodeMinSize
         MaxSize: !Ref NodeMaxSize
+
+  # Dedicated burst nodegroup: one large on-demand node for the scaled-out
+  # worker fleet. The taint keeps everything except workers off it; the label
+  # is what the chart's soft worker affinity targets. EKS has no parked-VM
+  # (Deallocate) equivalent, so bursts cold-provision (~2-3 min); a Karpenter
+  # NodePool with the same label/taint is the future fast path.
+  BurstNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Condition: BurstPoolEnabled
+    Properties:
+      ClusterName: !Ref Cluster
+      NodegroupName: burst-workers
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      InstanceTypes:
+        - !Ref BurstInstanceType
+      AmiType: AL2023_x86_64_STANDARD
+      DiskSize: !Ref NodeVolumeSizeGiB
+      Labels:
+        rulebricks.com/pool: burst
+      Taints:
+        - Key: rulebricks.com/pool
+          Value: burst
+          Effect: NO_SCHEDULE
+      ScalingConfig:
+        DesiredSize: 0
+        MinSize: 0
+        MaxSize: !Ref BurstNodeMaxSize
 
   # ---------------------------------------------------------------------------
   # OBJECT STORAGE (all Rulebricks data)

@@ -1,7 +1,6 @@
 import {
   DeploymentConfig,
-  TIER_CONFIGS,
-  TierConfig,
+  getReleaseName,
   isSupportedDnsProvider,
   RemoteWriteConfig,
   SecretKeyRef,
@@ -20,6 +19,22 @@ interface GenerateOptions {
   tlsEnabled?: boolean;
 }
 
+// Baseline Kafka topic partitioning. These are NOT user-tunable sizing knobs
+// (tiers were removed); they are a structural contract that must stay
+// consistent across three places at once: the kafka.provisioning topic
+// partitions, rulebricks.hps.workers.solutionPartitions (the worker-fleet
+// concurrency ceiling the chart cross-checks), and the worker KEDA
+// maxReplicaCount (validated to be <= solutionPartitions). They mirror the Helm
+// chart's own defaults, so operators who need a different size tune the chart
+// values directly. Partitions can never be decreased, so solution is sized with
+// generous headroom up front; idle partitions are effectively free.
+const SOLUTION_TOPIC_PARTITIONS = 128;
+const LOGS_TOPIC_PARTITIONS = 24;
+// RPC + log topics: replication factor 1. RPC traffic is transient and
+// latency-sensitive (the HPS producer's acks=-1 would otherwise wait on full
+// ISR replication); the in-cluster broker is single-replica by default.
+const TOPIC_REPLICATION_FACTOR = 1;
+
 // global.version must be empty or a semantic version per the chart schema. The
 // CLI normally pins a real version, but migrated/legacy configs can carry
 // "latest"; emitting that would fail chart validation, so we omit it instead
@@ -27,15 +42,23 @@ interface GenerateOptions {
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 
 // Healthy defaults for the decision-log archive that ClickHouse reads:
-// flush a gzipped NDJSON file at ~256 MiB (uncompressed) or after 5 minutes,
+// flush a gzipped NDJSON file at ~64 MiB (uncompressed) or after 5 minutes,
 // whichever comes first. Users can override these in their Helm values.
-const DECISION_LOG_BATCH = { max_bytes: 268435456, timeout_secs: 300 } as const;
+//
+// max_bytes MUST stay well below the Vector pod's memory limit
+// (vector.resources.limits.memory in the chart): the object-storage sink buffers
+// the whole uncompressed batch in memory before it flushes, so a batch sized at
+// or above the pod limit gets OOMKilled before it can ever write a blob - which
+// silently disables decision-log export entirely. 64 MiB leaves comfortable
+// headroom under the chart's 1 GiB Vector limit while still producing large,
+// scan-efficient files for ClickHouse.
+const DECISION_LOG_BATCH = { max_bytes: 67108864, timeout_secs: 300 } as const;
 
 // VRL that normalizes the Kafka decision-log envelope into the ClickHouse column
 // types. Inlined as a real multi-line string (not a chart `{{ include }}`) so
 // that YAML.stringify / Helm's toYaml emit it as a block scalar. A templated
 // single-line include gets rendered into a single-quoted YAML scalar, whose
-// newlines YAML folds into spaces — collapsing the statements onto one line and
+// newlines YAML folds into spaces - collapsing the statements onto one line and
 // breaking VRL parsing. Keep in sync with rulebricks.vector.normalizeLogs.
 const VECTOR_NORMALIZE_LOGS_VRL = [
   "parsed, err = parse_json(string!(.message))",
@@ -57,6 +80,8 @@ const VECTOR_NORMALIZE_LOGS_VRL = [
   ".operation = to_string(.operation) ?? null",
   '.level = to_string(.level) ?? "info"',
   ".error = to_string(.error) ?? null",
+  ".trace_id = to_string(.trace_id) ?? null",
+  ".span_id = to_string(.span_id) ?? null",
   '.request = to_string(.request) ?? "null"',
   '.response = to_string(.response) ?? "null"',
   '.decision = to_string(.decision) ?? "{}"',
@@ -519,7 +544,7 @@ function generateAzureMonitorRemoteWrite(
       );
     }
     // The prometheus-operator AzureAD schema supports only managedIdentity,
-    // oauth, and sdk (there is no "workloadIdentity" field — emitting it makes
+    // oauth, and sdk (there is no "workloadIdentity" field - emitting it makes
     // the operator reject the whole remoteWrite with "must provide Azure Managed
     // Identity or Azure OAuth or Azure SDK", which silently prevents the
     // Prometheus StatefulSet from being created). For AKS workload identity we
@@ -591,7 +616,8 @@ function generateGenericRemoteWrite(
 }
 
 /**
- * Generates Kafka extra environment variables for tuning
+ * Generates Kafka extra environment variables for tuning.
+ * Kept in lockstep with the chart's values.yaml controller.extraEnvVars.
  */
 function generateKafkaExtraEnvVars(): Array<{ name: string; value: string }> {
   return [
@@ -606,14 +632,103 @@ function generateKafkaExtraEnvVars(): Array<{ name: string; value: string }> {
     { name: "KAFKA_CFG_SOCKET_SEND_BUFFER_BYTES", value: "1048576" },
     { name: "KAFKA_CFG_SOCKET_RECEIVE_BUFFER_BYTES", value: "1048576" },
     { name: "KAFKA_CFG_SOCKET_REQUEST_MAX_BYTES", value: "209715200" },
-    { name: "KAFKA_CFG_LOG_RETENTION_BYTES", value: "4294967296" },
+    // Broker-wide max record size; must exceed every per-topic
+    // max.message.bytes set by the provisioning block.
+    { name: "KAFKA_CFG_MESSAGE_MAX_BYTES", value: "2097152" },
+    { name: "KAFKA_CFG_REPLICA_FETCH_MAX_BYTES", value: "4194304" },
+    // Broker-wide default retention bytes per partition; the application
+    // topics carry tighter per-topic caps via provisioning.
+    { name: "KAFKA_CFG_LOG_RETENTION_BYTES", value: "536870912" },
     { name: "KAFKA_CFG_LOG_SEGMENT_BYTES", value: "1073741824" },
     { name: "KAFKA_CFG_NUM_REPLICA_FETCHERS", value: "4" },
     { name: "KAFKA_CFG_REPLICA_SOCKET_RECEIVE_BUFFER_BYTES", value: "1048576" },
     { name: "KAFKA_CFG_LOG_CLEANER_DEDUPE_BUFFER_SIZE", value: "268435456" },
     { name: "KAFKA_CFG_LOG_CLEANER_IO_BUFFER_SIZE", value: "1048576" },
-    { name: "KAFKA_CFG_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION", value: "10" },
+    // (KAFKA_CFG_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION removed: that is a
+    // producer-client config; the broker ignores it.)
   ];
+}
+
+/**
+ * Effective Kafka topic prefix as HPS/Vector/KEDA will see it.
+ * Mirrors generateAppLogging: in-cluster Kafka runs UNPREFIXED (dedicated
+ * broker, and prefixing would desync chart-side consumers from producers);
+ * external Kafka uses the explicit prefix, falling back to the chart default.
+ */
+function effectiveTopicPrefix(config: DeploymentConfig): string {
+  if (!isExternalKafka(config)) {
+    return "";
+  }
+  const ext = config.externalServices?.kafka?.external ?? {};
+  return ext.topicPrefix !== undefined ? ext.topicPrefix : "com.rulebricks.";
+}
+
+/**
+ * Explicit topic management for in-cluster Kafka.
+ *
+ * Generates the kafka.provisioning block consumed by BOTH the subchart
+ * provisioning Job (creates topics) and the chart's kafka-topic-align Job
+ * (idempotently converges pre-existing topics on upgrade). Topic names are
+ * derived from the SAME prefix written to app.logging.kafkaTopicPrefix - the
+ * chart fails the render if these ever diverge.
+ *
+ * Sizing policy (baseline constants, mirroring the chart defaults):
+ * - solution/solution-response: SOLUTION_TOPIC_PARTITIONS (the worker-fleet
+ *   concurrency CEILING; partitions can never be decreased, workers are sized
+ *   separately by the cluster autoscaler). RF stays 1: RPC traffic is transient
+ *   and latency-sensitive, and the HPS producer's acks=-1 would otherwise wait
+ *   on full ISR replication.
+ * - logs: LOGS_TOPIC_PARTITIONS (durable data feeding the Vector -> object
+ *   storage pipeline).
+ */
+function generateKafkaProvisioning(
+  config: DeploymentConfig,
+): Record<string, unknown> {
+  if (isExternalKafka(config)) {
+    // External/managed Kafka: topics are customer-managed (the kafka
+    // subchart is disabled, so neither provisioning nor align jobs render).
+    return { enabled: false };
+  }
+
+  const prefix = effectiveTopicPrefix(config);
+  const rpcTopicConfig = {
+    "retention.ms": "300000",
+    "segment.ms": "300000",
+    "segment.bytes": "67108864",
+    "retention.bytes": "67108864",
+    "max.message.bytes": "2097152",
+  };
+
+  return {
+    enabled: true,
+    replicationFactor: TOPIC_REPLICATION_FACTOR,
+    numPartitions: 12,
+    podLabels: { "rulebricks.com/workload-group": "infrastructure" },
+    topics: [
+      {
+        name: `${prefix}solution`,
+        partitions: SOLUTION_TOPIC_PARTITIONS,
+        replicationFactor: TOPIC_REPLICATION_FACTOR,
+        config: rpcTopicConfig,
+      },
+      {
+        name: `${prefix}solution-response`,
+        partitions: SOLUTION_TOPIC_PARTITIONS,
+        replicationFactor: TOPIC_REPLICATION_FACTOR,
+        config: rpcTopicConfig,
+      },
+      {
+        name: `${prefix}logs`,
+        partitions: LOGS_TOPIC_PARTITIONS,
+        replicationFactor: TOPIC_REPLICATION_FACTOR,
+        config: {
+          "retention.ms": "86400000",
+          "retention.bytes": "268435456",
+          "max.message.bytes": "2097152",
+        },
+      },
+    ],
+  };
 }
 
 function generateWorkerPodAntiAffinity(): Record<string, unknown> {
@@ -649,6 +764,30 @@ function generateScheduling(
     ...(tolerations ? { tolerations } : {}),
   };
 }
+
+/**
+ * Burst-pool scheduling, always on. Cluster-setup provisions a dedicated
+ * worker pool labeled and tainted rulebricks.com/pool=burst (one big
+ * Deallocate-parked node on Azure or an on-demand nodegroup on AWS); workers
+ * tolerate the taint and SOFTLY prefer the label. On clusters without such a
+ * pool both are inert, so BYO clusters schedule exactly as before - zero
+ * configuration required either way.
+ */
+const BURST_POOL_TOLERATION: Record<string, string> = {
+  key: "rulebricks.com/pool",
+  operator: "Equal",
+  value: "burst",
+  effect: "NoSchedule",
+};
+
+const BURST_POOL_NODE_PREFERENCE: Record<string, unknown> = {
+  weight: 100,
+  preference: {
+    matchExpressions: [
+      { key: "rulebricks.com/pool", operator: "In", values: ["burst"] },
+    ],
+  },
+};
 
 function generateBackupValues(config: DeploymentConfig): Record<string, unknown> {
   const enabled =
@@ -709,19 +848,18 @@ function kafkaUsesDirectSasl(config: DeploymentConfig): boolean {
  */
 function generateRedisBlock(
   config: DeploymentConfig,
-  tierConfig: TierConfig,
   storageClass: string,
   infrastructurePodLabels: Record<string, string>,
   coreScheduling: Record<string, unknown>,
 ): Record<string, unknown> {
   if (!isExternalRedis(config)) {
+    // Sizing (resources, persistence size) falls back to the chart defaults;
+    // only the deployment-specific storage class is set here.
     return {
       podLabels: infrastructurePodLabels,
-      resources: tierConfig.redisResources,
       ...coreScheduling,
       persistence: {
         enabled: true,
-        size: tierConfig.redisPersistenceSize,
         storageClass,
       },
     };
@@ -751,6 +889,51 @@ function generateRedisBlock(
   return {
     enabled: false,
     external,
+  };
+}
+
+function generateCacheObservabilityBlock(
+  config: DeploymentConfig,
+  infrastructurePodLabels: Record<string, string>,
+): Record<string, unknown> {
+  const cache = config.features.cache;
+  const valkeyAdmin = cache?.valkeyAdmin;
+  const redisExporter = cache?.redisExporter;
+
+  return {
+    valkeyAdmin: {
+      enabled: valkeyAdmin?.enabled ?? false,
+      exposure: valkeyAdmin?.exposure ?? "internal",
+      podLabels: infrastructurePodLabels,
+      ingress: {
+        enabled: valkeyAdmin?.exposure === "ingress",
+        hostname: valkeyAdmin?.hostname || "",
+        basicAuth: {
+          users: valkeyAdmin?.basicAuthUsers ?? [],
+          existingSecret: valkeyAdmin?.basicAuthExistingSecret ?? "",
+        },
+        allowedIPs: valkeyAdmin?.allowedIPs ?? [],
+      },
+    },
+    redisExporter: {
+      enabled: redisExporter?.enabled ?? true,
+      podLabels: infrastructurePodLabels,
+    },
+  };
+}
+
+function generateKafkaExporterBlock(
+  config: DeploymentConfig,
+  infrastructurePodLabels: Record<string, string>,
+): Record<string, unknown> {
+  const requested = config.features.cache?.kafkaExporter?.enabled;
+  const canUseKafkaExporter = !isExternalKafka(config);
+  return {
+    enabled: requested ?? canUseKafkaExporter,
+    podLabels: infrastructurePodLabels,
+    brokers: isExternalKafka(config)
+      ? config.externalServices?.kafka?.external?.brokers ?? ""
+      : "",
   };
 }
 
@@ -876,6 +1059,206 @@ function generateVectorExtraContainers(
   ];
 }
 
+// VRL for the Vector agent: parse JSON app/HPS log lines, lift trace_id/span_id
+// for logs<->traces correlation, and flatten useful Kubernetes metadata. Kept
+// in sync with charts/.../values.yaml vector-agent.customConfig.transforms.
+const VECTOR_APP_LOGS_VRL = [
+  'parsed, err = parse_json(to_string(.message) ?? "")',
+  "if err == null && is_object(parsed) {",
+  "  .log = parsed",
+  "  .trace_id = parsed.trace_id",
+  "  .span_id = parsed.span_id",
+  '  if exists(parsed.level) { .level = to_string(parsed.level) ?? "info" }',
+  "}",
+  ".pod = .kubernetes.pod_name",
+  ".namespace = .kubernetes.pod_namespace",
+  ".container = .kubernetes.container_name",
+  ".node = .kubernetes.pod_node_name",
+].join("\n");
+
+/**
+ * global.tracing block (in-cluster OTel Collector -> pluggable trace backend).
+ * Emits the destination-specific sub-block (elastic | otlp | azure-monitor) and
+ * returns undefined when tracing is disabled so it is omitted entirely.
+ */
+function generateTracingGlobal(
+  config: DeploymentConfig,
+): Record<string, unknown> | undefined {
+  const tracing = config.features.tracing;
+  if (!tracing?.enabled) return undefined;
+
+  const destination = tracing.destination ?? "elastic";
+  const base: Record<string, unknown> = {
+    enabled: true,
+    destination,
+    samplingRatio: tracing.samplingRatio ?? 1,
+  };
+
+  if (destination === "elastic") {
+    const elastic = tracing.elastic ?? {};
+    const authMode = elastic.authMode ?? "secret-token";
+    const elasticBlock: Record<string, unknown> = {
+      endpoint: elastic.endpoint ?? "",
+      authMode,
+      tlsInsecureSkipVerify: false,
+    };
+    if (authMode === "secret-token" && elastic.secretToken) {
+      elasticBlock.secretToken = elastic.secretToken;
+    }
+    if (authMode === "api-key" && elastic.apiKey) {
+      elasticBlock.apiKey = elastic.apiKey;
+    }
+    return { ...base, elastic: elasticBlock };
+  }
+
+  if (destination === "otlp") {
+    const otlp = tracing.otlp ?? {};
+    const authMode = otlp.authMode ?? "none";
+    const otlpBlock: Record<string, unknown> = {
+      endpoint: otlp.endpoint ?? "",
+      authMode,
+      tlsInsecureSkipVerify: otlp.tlsInsecureSkipVerify ?? false,
+    };
+    if (authMode === "bearer" && otlp.token) otlpBlock.token = otlp.token;
+    if (authMode === "api-key" && otlp.apiKey) otlpBlock.apiKey = otlp.apiKey;
+    if (authMode === "header") {
+      otlpBlock.headerName = otlp.headerName ?? "Authorization";
+      if (otlp.headerValue) otlpBlock.headerValue = otlp.headerValue;
+    }
+    if (otlp.headers && Object.keys(otlp.headers).length > 0) {
+      otlpBlock.headers = otlp.headers;
+    }
+    return { ...base, otlp: otlpBlock };
+  }
+
+  // azure-monitor
+  const azure = tracing.azureMonitor ?? {};
+  return {
+    ...base,
+    azureMonitor: { connectionString: azure.connectionString ?? "" },
+  };
+}
+
+/**
+ * traefik.tracing block: makes Traefik the root span and propagates the W3C
+ * traceparent to backends. Empty object when tracing is disabled.
+ */
+function generateTraefikTracing(
+  config: DeploymentConfig,
+  releaseName: string,
+): Record<string, unknown> {
+  if (!config.features.tracing?.enabled) return {};
+  return {
+    otlp: {
+      enabled: true,
+      http: {
+        enabled: true,
+        endpoint: `http://${releaseName}-otel-collector:4318/v1/traces`,
+      },
+    },
+  };
+}
+
+/**
+ * vector-agent block: a second Vector deployment (role Agent / DaemonSet) that
+ * tails all pod logs and ships them to a customer-managed Elasticsearch. Decision
+ * logs are unaffected (they stay in ClickHouse via the `vector` aggregator).
+ */
+function generateVectorAgent(
+  config: DeploymentConfig,
+  podLabels: Record<string, string>,
+  tolerations: Array<Record<string, string>>,
+): Record<string, unknown> {
+  const appLogs = config.features.logging.appLogs;
+  if (!appLogs?.enabled) {
+    return { enabled: false };
+  }
+
+  const destination = appLogs.destination ?? "elasticsearch";
+  let sinkName = "elasticsearch";
+  let sink: Record<string, unknown>;
+
+  if (destination === "loki") {
+    const loki = appLogs.loki ?? {};
+    sinkName = "loki";
+    sink = {
+      type: "loki",
+      inputs: ["app_logs"],
+      endpoint: loki.endpoint,
+      labels: loki.labels ?? {
+        app: "rulebricks",
+        namespace: "{{ namespace }}",
+        pod: "{{ pod }}",
+        container: "{{ container }}",
+      },
+      encoding: { codec: "json" },
+    };
+  } else if (destination === "generic") {
+    const generic = appLogs.generic ?? {};
+    sinkName = "generic_http";
+    sink = {
+      type: "http",
+      inputs: ["app_logs"],
+      uri: generic.endpoint,
+      method: "post",
+      encoding: { codec: "json" },
+    };
+    if (generic.authHeader) {
+      sink.request = { headers: { Authorization: generic.authHeader } };
+    }
+  } else {
+    const es = appLogs.elasticsearch ?? {};
+    const authMode = es.authMode ?? "basic";
+    sink = {
+      type: "elasticsearch",
+      inputs: ["app_logs"],
+      endpoints: [es.endpoint],
+      mode: "bulk",
+      bulk: { index: es.index || "rulebricks-app-logs" },
+      tls: { verify_certificate: es.verifyCertificate ?? true },
+    };
+    if (authMode === "basic") {
+      sink.auth = { strategy: "basic", user: es.username, password: es.password };
+    } else if (authMode === "api-key") {
+      sink.request = { headers: { Authorization: `ApiKey ${es.apiKey}` } };
+    }
+  }
+
+  return {
+    enabled: true,
+    role: "Agent",
+    podLabels,
+    // Follow active worker pools without tolerating shutdown, out-of-service,
+    // or unreachable node taints.
+    tolerations,
+    resources: {
+      requests: { cpu: "100m", memory: "256Mi" },
+      limits: { cpu: "500m", memory: "512Mi" },
+    },
+    customConfig: {
+      data_dir: "/vector-data-dir",
+      sources: {
+        kubernetes_logs: {
+          type: "kubernetes_logs",
+          // Skip both Vector deployments: the aggregator
+          // (app.kubernetes.io/name=vector) re-emits decision logs on stdout
+          // (those belong in ClickHouse, not Elasticsearch) and the agent
+          // itself (vector-agent) to avoid a self-scrape loop.
+          extra_label_selector: "app.kubernetes.io/name notin (vector,vector-agent)",
+        },
+      },
+      transforms: {
+        app_logs: {
+          type: "remap",
+          inputs: ["kubernetes_logs"],
+          source: VECTOR_APP_LOGS_VRL,
+        },
+      },
+      sinks: { [sinkName]: sink },
+    },
+  };
+}
+
 /**
  * Builds Helm values from the deployment configuration.
  */
@@ -883,7 +1266,6 @@ export function buildHelmValues(
   config: DeploymentConfig,
   options: GenerateOptions = {},
 ): Record<string, unknown> {
-  const tierConfig = TIER_CONFIGS[config.tier];
   const { tlsEnabled = true } = options;
   const useLocalGrafana =
     config.features.monitoring.destination === "local-grafana";
@@ -922,10 +1304,22 @@ export function buildHelmValues(
       ]
     : undefined;
   const coreScheduling = generateScheduling(architectureTolerations);
-  const workerScheduling = generateScheduling(
-    architectureTolerations,
-    generateWorkerPodAntiAffinity(),
-  );
+  // Workers always tolerate + softly prefer the optional burst pool
+  // (rulebricks.com/pool=burst). The preference is soft, so clusters without a
+  // burst pool schedule workers on ordinary capacity exactly as before.
+  const workerTolerations = [
+    ...(architectureTolerations ?? []),
+    BURST_POOL_TOLERATION,
+  ];
+  const operationalDaemonSetTolerations = workerTolerations;
+  const workerScheduling = generateScheduling(workerTolerations, {
+    ...generateWorkerPodAntiAffinity(),
+    nodeAffinity: {
+      preferredDuringSchedulingIgnoredDuringExecution: [
+        BURST_POOL_NODE_PREFERENCE,
+      ],
+    },
+  });
   const infrastructurePodLabels = {
     "rulebricks.com/workload-group": "infrastructure",
   };
@@ -933,6 +1327,25 @@ export function buildHelmValues(
     "rulebricks.com/workload-group": "application",
   };
   const productVersion = config.version;
+
+  // Scheduling priority tiers. The chart creates release-scoped
+  // PriorityClasses (<release>-critical / <release>-burst); stateful
+  // infrastructure references the critical class so it can always preempt
+  // burst workers to reschedule, and workers reference the burst class so
+  // they are strictly the first preemption victims. Subchart values cannot
+  // template release names, so the CLI emits them as literals.
+  const releaseName = getReleaseName(config.name);
+  const criticalPriorityClass = `${releaseName}-critical`;
+  const burstPriorityClass = `${releaseName}-burst`;
+  // Distributed tracing (self-hosted only). Lives under global so the
+  // rulebricks subchart deployments can read it; the collector + traefik are
+  // wired below from the same source.
+  const tracingGlobal = generateTracingGlobal(config);
+  // Never let the cluster-autoscaler evict single-replica stateful pods
+  // during node scale-down; an evicted broker/db stalls the whole pipeline.
+  const safeToEvictAnnotations = {
+    "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
+  };
 
   // Build global.supabase configuration
   const supabaseGlobalConfig: Record<string, unknown> =
@@ -985,6 +1398,10 @@ export function buildHelmValues(
         ? { version: productVersion }
         : {}),
       externalDnsEnabled,
+
+      // Scheduling priority tiers (the chart renders release-scoped
+      // <release>-critical and <release>-burst PriorityClasses).
+      priorityClasses: { enabled: true },
 
       // SMTP Configuration
       smtp: {
@@ -1054,6 +1471,9 @@ export function buildHelmValues(
             },
           }
         : undefined,
+
+      // Distributed tracing (omitted entirely when disabled).
+      ...(tracingGlobal ? { tracing: tracingGlobal } : {}),
     },
 
     backup: generateBackupValues(config),
@@ -1075,14 +1495,17 @@ export function buildHelmValues(
         hps: {
           path: "/metrics",
         },
+        worker: {
+          path: "/metrics",
+          port: 3000,
+        },
       },
       app: {
         image: {
           repository: "index.docker.io/rulebricks/app",
           pullPolicy: "IfNotPresent",
         },
-        replicas: tierConfig.appReplicas,
-        resources: tierConfig.appResources,
+        // Replica count and resources fall back to the chart defaults.
         podLabels: infrastructurePodLabels,
         ...coreScheduling,
 
@@ -1097,10 +1520,43 @@ export function buildHelmValues(
           repository: "index.docker.io/rulebricks/hps",
           pullPolicy: "Always",
         },
-        replicas: tierConfig.hpsReplicas,
-        resources: tierConfig.hpsResources,
+        // Replica count and resources fall back to the chart defaults.
         podLabels: applicationPodLabels,
         ...coreScheduling,
+        // Gather-plane autoscaling: HPS parses every chunk response, so its
+        // capacity scales with request rate (load testing showed a fixed
+        // gather plane plateaus throughput while workers idle). Conservative
+        // one-pod-at-a-time scaling - each scale event rebalances the
+        // response consumer group and can time out in-flight requests. Only the
+        // enable flag is set here; min/max and thresholds use the chart
+        // defaults.
+        keda: {
+          enabled: true,
+        },
+        // Warm the hps/worker images onto active worker-capable nodes so burst
+        // scale-outs skip the image pull without targeting shutdown nodes.
+        imagePrepull: {
+          enabled: true,
+          tolerations: operationalDaemonSetTolerations,
+        },
+        extraEnv: [
+          // FLOW_CHUNK_MAX_ITEMS is the #1 throughput dial. Each chunk is one
+          // Kafka round-trip (gather -> solution -> worker -> solution-response
+          // -> gather), so throughput ~= (broker messages/sec) x (payloads per
+          // message). Bigger chunks = fewer messages per solution = less broker
+          // and coordination overhead. Benchmarks: 10 -> 50 gave +27%, and on
+          // small payloads 100 -> 1000 gave another ~1.6x (22k -> 35k sol/s),
+          // until the bottleneck moved off the broker onto worker CPU.
+          // 500 keeps typical bulk requests to 1-2 messages. The byte bound
+          // (CHUNK_MAX_BYTES, default 256 KiB in HPS) caps message size
+          // regardless, so large payloads stay under Kafka's 2 MiB
+          // max.message.bytes. High-throughput, small-payload deployments can
+          // raise this much higher (and CHUNK_MAX_BYTES with it); the only costs
+          // are per-request latency (one worker processes a whole chunk) and the
+          // 2 MiB cap on the larger response message (avg output x chunk size
+          // must stay < 2 MiB, so lower this for output-heavy flows).
+          { name: "FLOW_CHUNK_MAX_ITEMS", value: "500" },
+        ],
 
         // Service account (annotated with the MSK IAM role for external Kafka)
         serviceAccount: generateHpsServiceAccount(config),
@@ -1108,18 +1564,31 @@ export function buildHelmValues(
         // HPS Workers with KEDA autoscaling
         workers: {
           enabled: true,
-          replicas: tierConfig.hpsWorkerReplicas.min,
+          // Partition count of the solution request topic (also exported to
+          // HPS as MAX_WORKERS). Must match kafka.provisioning above; it is
+          // the fleet-concurrency ceiling, NOT a worker count. Replica count
+          // and resources fall back to the chart defaults.
+          solutionPartitions: SOLUTION_TOPIC_PARTITIONS,
           keda: {
             enabled: true,
-            minReplicaCount: tierConfig.hpsWorkerReplicas.min,
-            maxReplicaCount: tierConfig.hpsWorkerReplicas.max,
-            pollingInterval: 10,
+            // Poll fast so bursts are detected within seconds; the chart's
+            // ScaledObject defaults add exponential scale-up (double every
+            // 15s) and smooth scale-down (5-min window, -25%/min) behavior.
+            // min/max replica counts fall back to the chart defaults.
+            pollingInterval: 5,
             cooldownPeriod: 300,
+            // Lag is measured in MESSAGES; with chunked bulk dispatch each
+            // message is a bounded unit of work (~50-150ms), so 50 messages
+            // approximates 5-8s of backlog for a single worker - one replica
+            // is added per ~5s of fleet backlog, biasing toward early
+            // scale-out for bursty traffic.
             lagThreshold: 50,
             cpuThreshold: 25,
           },
-          resources: tierConfig.hpsWorkerResources,
           podLabels: applicationPodLabels,
+          // Burst tier: first preemption victims, so critical infrastructure
+          // can always reschedule during an aggressive scale-out.
+          priorityClassName: burstPriorityClass,
           ...workerScheduling,
         },
       },
@@ -1134,11 +1603,12 @@ export function buildHelmValues(
       // Redis configuration (in-cluster sizing or external connection settings)
       redis: generateRedisBlock(
         config,
-        tierConfig,
         storageClass,
         infrastructurePodLabels,
         coreScheduling,
       ),
+      cache: generateCacheObservabilityBlock(config, infrastructurePodLabels),
+      kafkaExporter: generateKafkaExporterBlock(config, infrastructurePodLabels),
     },
 
     // =============================================================================
@@ -1155,23 +1625,33 @@ export function buildHelmValues(
       },
       // Kafka broker configuration
       overrideConfiguration: {
+        // Safety net only: the application topics are created explicitly by
+        // kafka.provisioning below with per-topic partitions/retention/size.
         "auto.create.topics.enable": "true",
         "log.retention.hours": "24",
-        "default.replication.factor": String(tierConfig.kafkaReplication),
-        "offsets.topic.replication.factor": String(tierConfig.kafkaReplication),
-        "num.partitions": String(tierConfig.hpsWorkerReplicas.max), // Match max workers for parallel consumption
+        "default.replication.factor": String(TOPIC_REPLICATION_FACTOR),
+        "offsets.topic.replication.factor": String(TOPIC_REPLICATION_FACTOR),
+        // Default for auto-created topics only; no longer coupled to worker
+        // count (partitions are a ceiling, sized via solutionPartitions).
+        "num.partitions": "12",
       },
+      // Explicit topic management (creation + idempotent alignment on
+      // upgrade). Names derive from the same prefix as app.logging.
+      provisioning: generateKafkaProvisioning(config),
       controller: {
-        replicaCount: tierConfig.kafkaReplication,
+        // Single in-cluster broker; resources, persistence size, and heapOpts
+        // fall back to the chart defaults.
+        replicaCount: TOPIC_REPLICATION_FACTOR,
+        // Critical tier: the broker must always be able to preempt burst
+        // workers to reschedule; never autoscaler-evicted on scale-down.
+        priorityClassName: criticalPriorityClass,
+        podAnnotations: safeToEvictAnnotations,
         podLabels: infrastructurePodLabels,
-        resources: tierConfig.kafkaResources,
         ...coreScheduling,
         persistence: {
           enabled: true,
-          size: tierConfig.kafkaStorage,
           storageClass: storageClass,
         },
-        heapOpts: tierConfig.kafkaHeapOpts,
         extraEnvVars: generateKafkaExtraEnvVars(),
       },
       listeners: {
@@ -1202,6 +1682,10 @@ export function buildHelmValues(
 
     clickhouse: {
       enabled: true,
+      // Critical tier: single replica must preempt burst workers to
+      // reschedule; never autoscaler-evicted on scale-down.
+      priorityClassName: criticalPriorityClass,
+      podAnnotations: safeToEvictAnnotations,
       auth: {
         username: "rulebricks",
         password: "",
@@ -1248,8 +1732,12 @@ export function buildHelmValues(
           '{{ include "rulebricks.clickhouse.userAccessXml" . }}',
       },
       initdbScripts: {
-        "01-decision-logs-view.sql":
-          '{{ include "rulebricks.clickhouse.decisionLogsViewSql" . }}',
+        // Bitnami ClickHouse only executes *.sh init scripts (it skips *.sql),
+        // so this must be a shell script, not raw SQL. The chart helper renders
+        // a single-line clickhouse-client invocation that idempotently creates
+        // the rulebricks database + decision_logs view on every fresh pod.
+        "01-decision-logs-view.sh":
+          '{{ include "rulebricks.clickhouse.decisionLogsViewScript" . }}',
       },
     },
 
@@ -1265,7 +1753,9 @@ export function buildHelmValues(
       autoscaling: {
         enabled: true,
         minReplicas: 1,
-        maxReplicas: 2,
+        // Headroom for colocated clients pushing multi-hundred-RPS bulk
+        // traffic through the ingress.
+        maxReplicas: 4,
       },
       resources: {
         requests: {
@@ -1301,6 +1791,9 @@ export function buildHelmValues(
           },
         },
       },
+      // OTLP tracing: ingress becomes the root span and propagates traceparent
+      // to backends. Empty object when tracing is disabled.
+      tracing: generateTraefikTracing(config, releaseName),
       persistence: {
         enabled: false,
       },
@@ -1345,8 +1838,7 @@ export function buildHelmValues(
     vector: {
       enabled: true,
       role: "Stateless-Aggregator",
-      replicas: tierConfig.vectorReplicas,
-      resources: tierConfig.vectorResources,
+      // Replica count and resources fall back to the chart defaults.
       ...coreScheduling,
       serviceAccount: generateVectorServiceAccount(config),
       podLabels: generateVectorPodLabels(config),
@@ -1401,6 +1893,15 @@ export function buildHelmValues(
     },
 
     // =============================================================================
+    // VECTOR AGENT (Application / container logs -> Elasticsearch)
+    // =============================================================================
+    "vector-agent": generateVectorAgent(
+      config,
+      infrastructurePodLabels,
+      operationalDaemonSetTolerations,
+    ),
+
+    // =============================================================================
     // SUPABASE (Self-hosted Database)
     // =============================================================================
     supabase: {
@@ -1432,11 +1933,14 @@ export function buildHelmValues(
                 pullPolicy: "IfNotPresent",
               },
               podLabels: infrastructurePodLabels,
-              resources: tierConfig.dbResources,
+              // Critical tier: the primary datastore must preempt burst
+              // workers to reschedule; never autoscaler-evicted. Resources and
+              // persistence size fall back to the chart defaults.
+              priorityClassName: criticalPriorityClass,
+              podAnnotations: safeToEvictAnnotations,
               ...coreScheduling,
               persistence: {
                 enabled: true,
-                size: tierConfig.dbPersistenceSize,
                 storageClassName: storageClass,
               },
             },
@@ -1480,6 +1984,23 @@ export function buildHelmValues(
       },
       grafana: {
         enabled: useLocalGrafana,
+        // Dashboard sidecar imports the provisioned Rulebricks dashboards
+        // (ConfigMaps labeled grafana_dashboard="1") when in-cluster Grafana
+        // is enabled.
+        ...(useLocalGrafana
+          ? {
+              sidecar: {
+                dashboards: {
+                  enabled: true,
+                  label: "grafana_dashboard",
+                  labelValue: "1",
+                  searchNamespace: "ALL",
+                  folderAnnotation: "grafana_folder",
+                  provider: { foldersFromFilesStructure: true },
+                },
+              },
+            }
+          : {}),
       },
       prometheus: {
         enabled: true,

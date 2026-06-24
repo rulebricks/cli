@@ -87,7 +87,7 @@ printf "  Project: %s\n" "${PROJECT_ID:-<unset>}"
 printf "\n"
 
 if [[ -z "$PROJECT_ID" ]]; then
-  row "GCP project configured" "FAIL — no project set"
+  row "GCP project configured" "FAIL - no project set"
   add_action "Set a project: gcloud config set project <PROJECT_ID>"
   printf "\n========================================\n"
   printf "RESULT: NOT READY\n"
@@ -103,35 +103,35 @@ ACTIVE_ACCOUNT=""
 if gc_run auth list --filter=status:ACTIVE --format="value(account)"; then
   ACTIVE_ACCOUNT="$(printf '%s' "$GC_STDOUT" | head -n 1)"
   if [[ -z "$ACTIVE_ACCOUNT" ]]; then
-    row "gcloud user signed in" "FAIL — no active account"
+    row "gcloud user signed in" "FAIL - no active account"
     add_action "Run: gcloud auth login"
     mark_blocker
   else
     row "gcloud user signed in" "OK ($ACTIVE_ACCOUNT)"
 
-    # Now verify ADC actually works against Google APIs — this is what
+    # Now verify ADC actually works against Google APIs - this is what
     # the deploy tooling uses, and the most common breakage.
     if gc_run auth application-default print-access-token; then
       row "Application Default Credentials" "OK"
       AUTH_OK=1
     else
       if is_auth_error; then
-        row "Application Default Credentials" "FAIL — ADC missing or expired"
+        row "Application Default Credentials" "FAIL - ADC missing or expired"
       else
-        row "Application Default Credentials" "FAIL — ${GC_STDERR%%$'\n'*}"
+        row "Application Default Credentials" "FAIL - ${GC_STDERR%%$'\n'*}"
       fi
       add_action "Run: gcloud auth application-default login"
       mark_blocker
     fi
   fi
 else
-  row "gcloud user signed in" "FAIL — ${GC_STDERR%%$'\n'*}"
+  row "gcloud user signed in" "FAIL - ${GC_STDERR%%$'\n'*}"
   add_action "Run: gcloud auth login && gcloud auth application-default login"
   mark_blocker
 fi
 
 if [[ $AUTH_OK -eq 0 ]]; then
-  printf "\nRemaining checks skipped — fix authentication first.\n"
+  printf "\nRemaining checks skipped - fix authentication first.\n"
   printf "\n========================================\n"
   printf "RESULT: NOT READY\n"
   printf "========================================\n"
@@ -148,7 +148,7 @@ fi
 if gc_run projects describe "$PROJECT_ID" --format="value(projectId)"; then
   row "Project '$PROJECT_ID' accessible" "OK"
 else
-  row "Project '$PROJECT_ID' accessible" "FAIL — ${GC_STDERR%%$'\n'*}"
+  row "Project '$PROJECT_ID' accessible" "FAIL - ${GC_STDERR%%$'\n'*}"
   add_action "Ensure '$ACTIVE_ACCOUNT' has at least roles/viewer on project '$PROJECT_ID', or fix the project id."
   mark_blocker
 fi
@@ -170,7 +170,7 @@ fi
 total=${#REQUIRED_APIS[@]}
 
 if [[ ${#unknown_apis[@]} -gt 0 ]]; then
-  row "Required APIs enabled" "WARN — could not list enabled services"
+  row "Required APIs enabled" "WARN - could not list enabled services"
   add_action "Verify 'serviceusage.services.list' permission, then re-run."
 elif [[ ${#missing_apis[@]} -eq 0 ]]; then
   row "Required APIs enabled" "OK ($total/$total)"
@@ -186,7 +186,7 @@ fi
 REGION_OK=1
 if ! gc_run compute regions describe "$REGION" --project "$PROJECT_ID" --format="value(name)"; then
   REGION_OK=0
-  row "Region '$REGION' accessible" "FAIL — ${GC_STDERR%%$'\n'*}"
+  row "Region '$REGION' accessible" "FAIL - ${GC_STDERR%%$'\n'*}"
   add_action "Verify region name '$REGION' and that the Compute Engine API is enabled."
   mark_blocker
 fi
@@ -195,7 +195,7 @@ if [[ $REGION_OK -eq 1 ]]; then
   if gc_run container clusters list --region "$REGION" --project "$PROJECT_ID" --format="value(name)"; then
     row "Region + GKE list access" "OK"
   else
-    row "Region + GKE list access" "WARN — ${GC_STDERR%%$'\n'*}"
+    row "Region + GKE list access" "WARN - ${GC_STDERR%%$'\n'*}"
     add_action "Ensure '$ACTIVE_ACCOUNT' has roles/container.viewer (or higher) on '$PROJECT_ID'."
   fi
 fi
@@ -209,7 +209,7 @@ if gc_run compute regions describe "$REGION" --project "$PROJECT_ID" \
 fi
 
 if [[ -z "$quota_line" ]]; then
-  row "$quota_label" "WARN — could not read quota"
+  row "$quota_label" "WARN - could not read quota"
   add_action "Manually check CPU quota in Console → IAM & Admin → Quotas (region: $REGION)."
 else
   limit="${quota_line%,*}"
@@ -235,7 +235,7 @@ fi
 # ---------- summary ----------
 printf "\n========================================\n"
 if [[ $BLOCKERS -eq 0 && ${#ACTIONS[@]} -eq 0 ]]; then
-  printf "RESULT: READY — you can run the GKE deploy.\n"
+  printf "RESULT: READY - you can run the GKE deploy.\n"
   printf "========================================\n"
   exit 0
 elif [[ $BLOCKERS -eq 0 ]]; then

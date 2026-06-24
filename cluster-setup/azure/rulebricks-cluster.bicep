@@ -12,7 +12,7 @@ param kubernetesVersion string = '1.34'
 @description('Number of nodes in the default node pool.')
 param nodeCount int = 2
 
-@description('Maximum number of nodes when cluster autoscaling adds capacity.')
+@description('Maximum number of nodes in the default (core) pool. Core services need only 2-4 small nodes; burst capacity lives in the dedicated burst pool, so keeping this ceiling low also steers the autoscaler toward the burst pool when the worker fleet scales out.')
 param maxNodeCount int = 4
 
 @description('VM size for the default node pool.')
@@ -23,10 +23,10 @@ param nodeVmSize string = 'Standard_F4as_v6'
 @maxValue(250)
 param maxPods int = 110
 
-@description('OS disk size in GB for the default node pool.')
+@description('OS disk size in GB for the default node pool. 64+ keeps image churn and container ephemeral usage safely under the kubelet disk-pressure eviction threshold (~85%); 30GB disks ran at 65-82% under load.')
 @minValue(30)
 @maxValue(2048)
-param osDiskSizeGB int = 30
+param osDiskSizeGB int = 64
 
 @description('OS disk type for the default node pool.')
 @allowed([
@@ -34,6 +34,15 @@ param osDiskSizeGB int = 30
   'Ephemeral'
 ])
 param osDiskType string = 'Managed'
+
+@description('Provision the dedicated burst worker pool: one large VM, scale 0->burstMaxCount, Deallocate scale-down (parked at disk-only cost with images cached, ~30-60s resume). Labeled and tainted rulebricks.com/pool=burst; the Rulebricks chart makes workers tolerate and softly prefer it out of the box.')
+param enableBurstPool bool = true
+
+@description('VM size for the burst worker pool. Default 16 vCPU (the Fas_v6 family has no 24-vCPU size): 2x4 vCPU core floor + 16 = 24 vCPU running steady-state at full burst, and exactly 32 vCPU even with the core pool at its 4-node max - sized to a 32-vCPU family quota. One big node beats many small ones for bang-bang scaling: one start event, one image set, no straggler tail.')
+param burstVmSize string = 'Standard_F16as_v6'
+
+@description('Maximum nodes in the burst pool.')
+param burstMaxCount int = 1
 
 // This template is deployment-independent: it provisions the shared identity,
 // storage, and Azure Monitor resources but NOT the federated identity
@@ -239,23 +248,69 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-05-01' = {
   properties: {
     dnsPrefix: clusterName
     kubernetesVersion: kubernetesVersion
-    agentPoolProfiles: [
-      {
-        name: 'default'
-        count: nodeCount
-        enableAutoScaling: true
-        minCount: nodeCount
-        maxCount: maxNodeCount
-        vmSize: nodeVmSize
-        maxPods: maxPods
-        osDiskSizeGB: osDiskSizeGB
-        osDiskType: osDiskType
-        osType: 'Linux'
-        type: 'VirtualMachineScaleSets'
-        mode: 'System'
-        vnetSubnetID: subnet.id
-      }
-    ]
+    agentPoolProfiles: concat(
+      [
+        {
+          name: 'default'
+          count: nodeCount
+          enableAutoScaling: true
+          minCount: nodeCount
+          maxCount: maxNodeCount
+          vmSize: nodeVmSize
+          maxPods: maxPods
+          osDiskSizeGB: osDiskSizeGB
+          osDiskType: osDiskType
+          osType: 'Linux'
+          type: 'VirtualMachineScaleSets'
+          mode: 'System'
+          // Scale-down parks VMs (stopped, disk-only cost) instead of
+          // deleting them; resume is ~30-60s with container images cached.
+          scaleDownMode: 'Deallocate'
+          vnetSubnetID: subnet.id
+        }
+      ],
+      enableBurstPool
+        ? [
+            {
+              // Dedicated burst capacity for the stateless worker fleet:
+              // one large VM that parks (Deallocate) between bursts. The
+              // taint keeps everything except workers off it; the label is
+              // what the chart's soft node affinity targets. First-ever
+              // burst cold-provisions (~2-4 min); thereafter resume is
+              // ~30-60s with images cached.
+              name: 'burst'
+              count: 0
+              enableAutoScaling: true
+              minCount: 0
+              maxCount: burstMaxCount
+              vmSize: burstVmSize
+              maxPods: maxPods
+              osDiskSizeGB: osDiskSizeGB
+              osDiskType: osDiskType
+              osType: 'Linux'
+              type: 'VirtualMachineScaleSets'
+              mode: 'User'
+              scaleDownMode: 'Deallocate'
+              nodeLabels: {
+                'rulebricks.com/pool': 'burst'
+              }
+              nodeTaints: [
+                'rulebricks.com/pool=burst:NoSchedule'
+              ]
+              vnetSubnetID: subnet.id
+            }
+          ]
+        : [],
+    )
+    // Tuned for bursty traffic: detect pending pods quickly and pick the
+    // node pool that wastes the least capacity. With the core pool capped at
+    // maxNodeCount (4), a scaled-out worker fleet overflows to the burst
+    // pool within 1-2 autoscaler iterations. Scale-down keeps defaults -
+    // gaps between bursts should not thrash nodes.
+    autoScalerProfile: {
+      'scan-interval': '10s'
+      expander: 'least-waste'
+    }
     networkProfile: {
       networkPlugin: 'azure'
       networkPolicy: 'calico'

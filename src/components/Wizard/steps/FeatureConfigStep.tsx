@@ -1,15 +1,16 @@
 import React, { useState, useEffect } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import SelectInput from "ink-select-input";
 import TextInput from "ink-text-input";
 import { useWizard } from "../WizardContext.js";
-import { BorderBox, useTheme } from "../../common/index.js";
+import { BorderBox, useGatedInput, useTheme } from "../../common/index.js";
 import { Spinner } from "../../common/Spinner.js";
 import {
   SSOProvider,
   LoggingSink,
   RemoteWriteAuthType,
   RemoteWriteDestination,
+  TracingDestination,
   CLOUD_REGIONS,
   DEFAULT_EMAIL_SUBJECTS,
 } from "../../../types/index.js";
@@ -64,6 +65,23 @@ type SubStep =
   | "logging-loki-config"
   | "logging-newrelic-config"
   | "logging-axiom-config"
+  // Distributed tracing (pluggable backend)
+  | "tracing-destination"
+  // Elastic APM
+  | "tracing-endpoint"
+  | "tracing-token"
+  // Generic OTLP/HTTP
+  | "tracing-otlp-endpoint"
+  | "tracing-otlp-auth"
+  | "tracing-otlp-cred"
+  // Azure Monitor
+  | "tracing-azure-connection"
+  // Application log shipping (BYO Elasticsearch via Vector agent; Loki/generic
+  // remain config-file options, while AWS/Azure native logs are provider-level).
+  | "applogs-endpoint"
+  | "applogs-user"
+  | "applogs-pass"
+  | "applogs-index"
   // Custom email template steps
   | "email-subject-invite"
   | "email-subject-confirm"
@@ -143,22 +161,40 @@ export function FeatureConfigStep({
   const needsSSO = state.ssoEnabled;
   const needsMonitoring = state.metricsExportEnabled;
   const needsLogging = state.loggingSink !== "console";
+  const needsTracing = state.tracingEnabled;
+  const needsAppLogs = state.appLogsEnabled;
   const needsCustomEmails = state.customEmailsEnabled;
 
-  // Configuration order: AI -> SSO -> Monitoring -> Logging -> Custom Emails
+  // Configuration order:
+  // AI -> SSO -> Monitoring -> Logging -> Tracing -> AppLogs -> Custom Emails
   const getInitialStep = (): SubStep => {
     if (needsAI) return "openai-key";
     if (needsSSO) return "sso-provider";
     if (needsMonitoring) return "monitoring-remote-write-destination";
     if (needsLogging) return "logging-sink";
+    if (needsTracing) return "tracing-destination";
+    if (needsAppLogs) return "applogs-endpoint";
     if (needsCustomEmails) return "email-subject-invite";
     return "done";
   };
 
   // Terminal sub-step of the last enabled section. Used when navigating *back*
   // into this step so the user resumes at the end instead of the very start.
+  const tracingFinalStep = (): SubStep => {
+    const destination = state.tracingDestination || "elastic";
+    if (destination === "otlp") {
+      return state.tracingOtlpAuthMode && state.tracingOtlpAuthMode !== "none"
+        ? "tracing-otlp-cred"
+        : "tracing-otlp-auth";
+    }
+    if (destination === "azure-monitor") return "tracing-azure-connection";
+    return "tracing-token";
+  };
+
   const getFinalStep = (): SubStep => {
     if (needsCustomEmails) return "email-template-change";
+    if (needsAppLogs) return "applogs-index";
+    if (needsTracing) return tracingFinalStep();
     if (needsLogging) {
       switch (state.loggingSink) {
         case "datadog":
@@ -247,6 +283,48 @@ export function FeatureConfigStep({
   const [axiomApiToken, setAxiomApiToken] = useState("");
   const [axiomDataset, setAxiomDataset] = useState("rulebricks");
 
+  // Distributed tracing. The wizard supports three destinations (Elastic APM,
+  // generic OTLP/HTTP, Azure Monitor). For Elastic it collects endpoint + secret
+  // token (api-key auth remains available via config file).
+  const [tracingDestination, setTracingDestination] =
+    useState<TracingDestination>(state.tracingDestination || "elastic");
+  const [tracingEndpoint, setTracingEndpoint] = useState(
+    state.tracingElasticEndpoint || "",
+  );
+  const [tracingToken, setTracingToken] = useState(
+    state.tracingElasticSecretToken || "",
+  );
+  const [tracingOtlpEndpoint, setTracingOtlpEndpoint] = useState(
+    state.tracingOtlpEndpoint || "",
+  );
+  const [tracingOtlpAuthMode, setTracingOtlpAuthMode] = useState<
+    "none" | "bearer" | "api-key"
+  >(
+    state.tracingOtlpAuthMode === "bearer" ||
+      state.tracingOtlpAuthMode === "api-key"
+      ? state.tracingOtlpAuthMode
+      : "none",
+  );
+  const [tracingOtlpToken, setTracingOtlpToken] = useState(
+    state.tracingOtlpToken || "",
+  );
+  const [tracingAzureConnectionString, setTracingAzureConnectionString] =
+    useState(state.tracingAzureConnectionString || "");
+
+  // Application log shipping (BYO Elasticsearch via Vector agent). Basic auth.
+  const [appLogsEndpoint, setAppLogsEndpoint] = useState(
+    state.appLogsElasticEndpoint || "",
+  );
+  const [appLogsUser, setAppLogsUser] = useState(
+    state.appLogsElasticUsername || "",
+  );
+  const [appLogsPass, setAppLogsPass] = useState(
+    state.appLogsElasticPassword || "",
+  );
+  const [appLogsIndex, setAppLogsIndex] = useState(
+    state.appLogsElasticIndex || "rulebricks-app-logs",
+  );
+
   // Dynamic resource lists for remote-write identity selection.
   const [rwRegions, setRwRegions] = useState<string[]>([]);
   const [rwIdentities, setRwIdentities] = useState<AzureManagedIdentity[]>([]);
@@ -295,13 +373,15 @@ export function FeatureConfigStep({
       !needsSSO &&
       !needsMonitoring &&
       !needsLogging &&
+      !needsTracing &&
+      !needsAppLogs &&
       !needsCustomEmails
     ) {
       onComplete();
     }
   }, []);
 
-  useInput((input, key) => {
+  useGatedInput((input, key) => {
     if (key.escape) {
       setError(null);
       handleBack();
@@ -409,6 +489,29 @@ export function FeatureConfigStep({
       case "logging-axiom-config":
         setSubStep("logging-sink");
         break;
+      // Distributed tracing steps
+      case "tracing-destination":
+        if (needsLogging) setSubStep("logging-sink");
+        else if (needsMonitoring)
+          setSubStep("monitoring-remote-write-destination");
+        else if (needsSSO) setSubStep("sso-client-secret");
+        else if (needsAI) setSubStep("openai-key");
+        else onBack();
+        break;
+      case "tracing-endpoint":
+      case "tracing-otlp-endpoint":
+      case "tracing-azure-connection":
+        setSubStep("tracing-destination");
+        break;
+      case "tracing-token":
+        setSubStep("tracing-endpoint");
+        break;
+      case "tracing-otlp-auth":
+        setSubStep("tracing-otlp-endpoint");
+        break;
+      case "tracing-otlp-cred":
+        setSubStep("tracing-otlp-auth");
+        break;
       // Email template steps
       case "email-subject-invite":
         if (needsLogging) setSubStep("logging-sink");
@@ -442,21 +545,38 @@ export function FeatureConfigStep({
     }
   };
 
+  // Section sequencing helpers. Each "goTo<Section>OrAfter" advances to the next
+  // enabled section, so adding a section only required inserting it into this
+  // chain (Logging -> Tracing -> AppLogs -> Custom Emails).
+  const goToCustomEmailsOrDone = () => {
+    if (needsCustomEmails) setSubStep("email-subject-invite");
+    else onComplete();
+  };
+  const goToAppLogsOrAfter = () => {
+    if (needsAppLogs) setSubStep("applogs-endpoint");
+    else goToCustomEmailsOrDone();
+  };
+  const goToTracingOrAfter = () => {
+    if (needsTracing) setSubStep("tracing-destination");
+    else goToAppLogsOrAfter();
+  };
+  const goToLoggingOrAfter = () => {
+    if (needsLogging) setSubStep("logging-sink");
+    else goToTracingOrAfter();
+  };
+  const goToMonitoringOrAfter = () => {
+    if (needsMonitoring) setSubStep("monitoring-remote-write-destination");
+    else goToLoggingOrAfter();
+  };
+
   const advanceToNext = (from: SubStep) => {
     switch (from) {
       case "openai-key":
         if (needsSSO) setSubStep("sso-provider");
-        else if (needsMonitoring)
-          setSubStep("monitoring-remote-write-destination");
-        else if (needsLogging) setSubStep("logging-sink");
-        else if (needsCustomEmails) setSubStep("email-subject-invite");
-        else onComplete();
+        else goToMonitoringOrAfter();
         break;
       case "sso-client-secret":
-        if (needsMonitoring) setSubStep("monitoring-remote-write-destination");
-        else if (needsLogging) setSubStep("logging-sink");
-        else if (needsCustomEmails) setSubStep("email-subject-invite");
-        else onComplete();
+        goToMonitoringOrAfter();
         break;
       case "monitoring-remote-write-destination":
       case "monitoring-remote-write-url":
@@ -469,9 +589,7 @@ export function FeatureConfigStep({
       case "monitoring-remote-write-username-secret-ref":
       case "monitoring-remote-write-password-secret-ref":
       case "monitoring-remote-write-bearer-secret-ref":
-        if (needsLogging) setSubStep("logging-sink");
-        else if (needsCustomEmails) setSubStep("email-subject-invite");
-        else onComplete();
+        goToLoggingOrAfter();
         break;
       case "logging-datadog-config":
       case "logging-splunk-config":
@@ -479,9 +597,16 @@ export function FeatureConfigStep({
       case "logging-loki-config":
       case "logging-newrelic-config":
       case "logging-axiom-config":
-        // Platform config complete, check for custom emails
-        if (needsCustomEmails) setSubStep("email-subject-invite");
-        else onComplete();
+        // Decision-log platform config complete -> tracing/appLogs/emails.
+        goToTracingOrAfter();
+        break;
+      case "tracing-token":
+      case "tracing-otlp-cred":
+      case "tracing-azure-connection":
+        goToAppLogsOrAfter();
+        break;
+      case "applogs-index":
+        goToCustomEmailsOrDone();
         break;
       case "email-template-change":
         // All email config complete
@@ -948,8 +1073,8 @@ export function FeatureConfigStep({
     dispatch({
       type: "SET_LOGGING_CONFIG",
       config: {
-        loggingBucket: datadogApiKey, // Repurpose bucket field for API key
-        loggingRegion: datadogSite, // Repurpose region field for site
+        loggingPlatformCredential: datadogApiKey, // platform API key
+        loggingPlatformDetail: datadogSite, // platform site
       },
     });
     advanceToNext("logging-datadog-config");
@@ -974,8 +1099,8 @@ export function FeatureConfigStep({
     dispatch({
       type: "SET_LOGGING_CONFIG",
       config: {
-        loggingBucket: splunkHecToken,
-        loggingRegion: splunkUrl,
+        loggingPlatformCredential: splunkHecToken,
+        loggingPlatformDetail: splunkUrl,
       },
     });
     advanceToNext("logging-splunk-config");
@@ -993,20 +1118,189 @@ export function FeatureConfigStep({
       return;
     }
     setError(null);
-    // Store as JSON in bucket field for complex config
+    // Store the connection as JSON in the credential field for complex config.
     dispatch({
       type: "SET_LOGGING_CONFIG",
       config: {
-        loggingBucket: JSON.stringify({
+        loggingPlatformCredential: JSON.stringify({
           url: elasticsearchUrl,
           user: elasticsearchUser,
           password: elasticsearchPass,
           index: elasticsearchIndex,
         }),
-        loggingRegion: elasticsearchIndex,
+        loggingPlatformDetail: elasticsearchIndex,
       },
     });
     advanceToNext("logging-elasticsearch-config");
+  };
+
+  // === Distributed Tracing (Elastic APM) ===
+  const handleTracingEndpointSubmit = () => {
+    if (!tracingEndpoint) {
+      setError("Elastic APM OTLP endpoint is required");
+      return;
+    }
+    try {
+      new URL(tracingEndpoint);
+    } catch {
+      setError("Invalid URL format");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_TRACING_CONFIG",
+      config: {
+        tracingElasticEndpoint: tracingEndpoint,
+        tracingElasticAuthMode: "secret-token",
+      },
+    });
+    setSubStep("tracing-token");
+  };
+
+  const handleTracingTokenSubmit = () => {
+    if (!tracingToken) {
+      setError("Elastic APM secret token is required");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_TRACING_CONFIG",
+      config: { tracingElasticSecretToken: tracingToken },
+    });
+    advanceToNext("tracing-token");
+  };
+
+  const handleTracingDestinationSelect = (item: { value: string }) => {
+    const destination = item.value as TracingDestination;
+    setTracingDestination(destination);
+    dispatch({
+      type: "SET_TRACING_CONFIG",
+      config: { tracingDestination: destination },
+    });
+    setError(null);
+    if (destination === "elastic") setSubStep("tracing-endpoint");
+    else if (destination === "otlp") setSubStep("tracing-otlp-endpoint");
+    else setSubStep("tracing-azure-connection");
+  };
+
+  const handleTracingOtlpEndpointSubmit = () => {
+    if (!tracingOtlpEndpoint) {
+      setError("OTLP endpoint is required");
+      return;
+    }
+    try {
+      new URL(tracingOtlpEndpoint);
+    } catch {
+      setError("Invalid URL format");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_TRACING_CONFIG",
+      config: { tracingOtlpEndpoint },
+    });
+    setSubStep("tracing-otlp-auth");
+  };
+
+  const handleTracingOtlpAuthSelect = (item: { value: string }) => {
+    const mode = item.value as "none" | "bearer" | "api-key";
+    setTracingOtlpAuthMode(mode);
+    dispatch({
+      type: "SET_TRACING_CONFIG",
+      config: { tracingOtlpAuthMode: mode },
+    });
+    setError(null);
+    if (mode === "none") {
+      // No credential needed; the section is complete.
+      goToAppLogsOrAfter();
+    } else {
+      setSubStep("tracing-otlp-cred");
+    }
+  };
+
+  const handleTracingOtlpCredSubmit = () => {
+    if (!tracingOtlpToken) {
+      setError("A credential is required for the selected OTLP auth mode");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_TRACING_CONFIG",
+      config: { tracingOtlpToken },
+    });
+    advanceToNext("tracing-otlp-cred");
+  };
+
+  const handleTracingAzureConnectionSubmit = () => {
+    if (!tracingAzureConnectionString) {
+      setError("Azure Monitor connection string is required");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_TRACING_CONFIG",
+      config: { tracingAzureConnectionString },
+    });
+    advanceToNext("tracing-azure-connection");
+  };
+
+  // === Application Log Shipping (BYO Elasticsearch) ===
+  const handleAppLogsEndpointSubmit = () => {
+    if (!appLogsEndpoint) {
+      setError("Elasticsearch endpoint is required");
+      return;
+    }
+    try {
+      new URL(appLogsEndpoint);
+    } catch {
+      setError("Invalid URL format");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_APP_LOGS_CONFIG",
+      config: {
+        appLogsElasticEndpoint: appLogsEndpoint,
+        appLogsElasticAuthMode: "basic",
+      },
+    });
+    setSubStep("applogs-user");
+  };
+
+  const handleAppLogsUserSubmit = () => {
+    if (!appLogsUser) {
+      setError("Elasticsearch username is required");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_APP_LOGS_CONFIG",
+      config: { appLogsElasticUsername: appLogsUser },
+    });
+    setSubStep("applogs-pass");
+  };
+
+  const handleAppLogsPassSubmit = () => {
+    if (!appLogsPass) {
+      setError("Elasticsearch password is required");
+      return;
+    }
+    setError(null);
+    dispatch({
+      type: "SET_APP_LOGS_CONFIG",
+      config: { appLogsElasticPassword: appLogsPass },
+    });
+    setSubStep("applogs-index");
+  };
+
+  const handleAppLogsIndexSubmit = () => {
+    const index = appLogsIndex || "rulebricks-app-logs";
+    setError(null);
+    dispatch({
+      type: "SET_APP_LOGS_CONFIG",
+      config: { appLogsElasticIndex: index },
+    });
+    advanceToNext("applogs-index");
   };
 
   const handleLokiConfigSubmit = () => {
@@ -1024,8 +1318,8 @@ export function FeatureConfigStep({
     dispatch({
       type: "SET_LOGGING_CONFIG",
       config: {
-        loggingBucket: lokiUrl,
-        loggingRegion: "",
+        loggingPlatformCredential: lokiUrl,
+        loggingPlatformDetail: "",
       },
     });
     advanceToNext("logging-loki-config");
@@ -1044,8 +1338,8 @@ export function FeatureConfigStep({
     dispatch({
       type: "SET_LOGGING_CONFIG",
       config: {
-        loggingBucket: newrelicLicenseKey,
-        loggingRegion: newrelicAccountId,
+        loggingPlatformCredential: newrelicLicenseKey,
+        loggingPlatformDetail: newrelicAccountId,
       },
     });
     advanceToNext("logging-newrelic-config");
@@ -1064,8 +1358,8 @@ export function FeatureConfigStep({
     dispatch({
       type: "SET_LOGGING_CONFIG",
       config: {
-        loggingBucket: axiomApiToken,
-        loggingRegion: axiomDataset,
+        loggingPlatformCredential: axiomApiToken,
+        loggingPlatformDetail: axiomDataset,
       },
     });
     advanceToNext("logging-axiom-config");
@@ -1438,7 +1732,7 @@ export function FeatureConfigStep({
                 <SelectInput
                   items={[
                     ...sorted.map((t) => ({
-                      label: isRec(t.name) ? `${t.name}  — recommended` : t.name,
+                      label: isRec(t.name) ? `${t.name}  - recommended` : t.name,
                       value: t.url,
                     })),
                     { label: "↻ Refresh list", value: REFRESH },
@@ -1495,7 +1789,7 @@ export function FeatureConfigStep({
                     ...sorted.map((t) => ({
                       label:
                         t.name.toLowerCase() === recommendedName
-                          ? `${t.name}  — recommended`
+                          ? `${t.name}  - recommended`
                           : t.name,
                       value: t.url,
                     })),
@@ -1636,7 +1930,7 @@ export function FeatureConfigStep({
           <Text bold>Azure Tenant ID</Text>
           <Text color="gray" dimColor>
             {rwTenantAutoDetected
-              ? "Auto-detected from your Azure CLI session — edit if needed."
+              ? "Auto-detected from your Azure CLI session - edit if needed."
               : "Required for workload identity and OAuth client-secret auth."}
           </Text>
           <Box marginTop={1}>
@@ -2228,6 +2522,219 @@ export function FeatureConfigStep({
               <Text color={colors.success}>✓</Text>
               <Text color="gray"> Recovery: {emailTemplateRecovery}</Text>
             </Box>
+          </Box>
+        </Box>
+      )}
+
+      {/* Distributed Tracing - destination picker */}
+      {subStep === "tracing-destination" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Distributed Tracing - destination</Text>
+          <Text color="gray" dimColor>
+            Where the in-cluster OpenTelemetry Collector exports traces. Works on
+            AWS and Azure.
+          </Text>
+          <Box marginTop={1}>
+            <SelectInput
+              items={[
+                { label: "Elastic APM (Elastic Cloud / self-hosted)", value: "elastic" },
+                { label: "Generic OTLP/HTTP (Tempo, Honeycomb, Jaeger, ...)", value: "otlp" },
+                { label: "Azure Monitor / Application Insights", value: "azure-monitor" },
+              ]}
+              initialIndex={Math.max(
+                0,
+                ["elastic", "otlp", "azure-monitor"].indexOf(tracingDestination),
+              )}
+              onSelect={handleTracingDestinationSelect}
+            />
+          </Box>
+        </Box>
+      )}
+
+      {/* Distributed Tracing - generic OTLP endpoint */}
+      {subStep === "tracing-otlp-endpoint" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Distributed Tracing - OTLP/HTTP endpoint</Text>
+          <Text color="gray" dimColor>
+            Full OTLP/HTTP traces endpoint of your backend (e.g. a Grafana Cloud
+            OTLP gateway or Honeycomb).
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={tracingOtlpEndpoint}
+              onChange={setTracingOtlpEndpoint}
+              onSubmit={handleTracingOtlpEndpointSubmit}
+              placeholder="https://otlp-gateway.example.com/otlp"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {/* Distributed Tracing - generic OTLP auth mode */}
+      {subStep === "tracing-otlp-auth" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Distributed Tracing - OTLP authentication</Text>
+          <Text color="gray" dimColor>
+            How the collector authenticates to the OTLP endpoint. (For a custom
+            header name, configure tracing in your config file.)
+          </Text>
+          <Box marginTop={1}>
+            <SelectInput
+              items={[
+                { label: "None", value: "none" },
+                { label: "Bearer token (Authorization: Bearer)", value: "bearer" },
+                { label: "API key (Authorization: ApiKey)", value: "api-key" },
+              ]}
+              initialIndex={Math.max(
+                0,
+                ["none", "bearer", "api-key"].indexOf(tracingOtlpAuthMode),
+              )}
+              onSelect={handleTracingOtlpAuthSelect}
+            />
+          </Box>
+        </Box>
+      )}
+
+      {/* Distributed Tracing - generic OTLP credential */}
+      {subStep === "tracing-otlp-cred" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Distributed Tracing - OTLP credential</Text>
+          <Text color="gray" dimColor>
+            Sent as Authorization:{" "}
+            {tracingOtlpAuthMode === "api-key" ? "ApiKey" : "Bearer"} &lt;value&gt;.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={tracingOtlpToken}
+              onChange={setTracingOtlpToken}
+              onSubmit={handleTracingOtlpCredSubmit}
+              placeholder="otlp-credential"
+              mask="*"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {/* Distributed Tracing - Azure Monitor connection string */}
+      {subStep === "tracing-azure-connection" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Distributed Tracing - Azure Monitor connection string</Text>
+          <Text color="gray" dimColor>
+            Application Insights connection string (carries the ingestion
+            endpoint + instrumentation key).
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={tracingAzureConnectionString}
+              onChange={setTracingAzureConnectionString}
+              onSubmit={handleTracingAzureConnectionSubmit}
+              placeholder="InstrumentationKey=...;IngestionEndpoint=https://..."
+              mask="*"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {/* Distributed Tracing - Elastic APM endpoint */}
+      {subStep === "tracing-endpoint" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Distributed Tracing - Elastic APM endpoint</Text>
+          <Text color="gray" dimColor>
+            OTLP endpoint of your (customer-managed) Elastic APM. The in-cluster
+            OpenTelemetry Collector forwards traces here.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={tracingEndpoint}
+              onChange={setTracingEndpoint}
+              onSubmit={handleTracingEndpointSubmit}
+              placeholder="https://<deployment>.apm.<region>.cloud.es.io:443"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "tracing-token" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Distributed Tracing - Elastic APM secret token</Text>
+          <Text color="gray" dimColor>
+            Sent as Authorization: Bearer &lt;token&gt; to Elastic APM. (For API
+            key auth, configure tracing in your config file instead.)
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={tracingToken}
+              onChange={setTracingToken}
+              onSubmit={handleTracingTokenSubmit}
+              placeholder="elastic-apm-secret-token"
+              mask="*"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {/* Application Log Shipping - BYO Elasticsearch */}
+      {subStep === "applogs-endpoint" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Application Log Shipping - BYO Elasticsearch endpoint</Text>
+          <Text color="gray" dimColor>
+            Optional BYO sink via Vector. For AWS/Azure native log collection,
+            enable the provider's cluster logging agent instead. Decision logs stay
+            in ClickHouse.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={appLogsEndpoint}
+              onChange={setAppLogsEndpoint}
+              onSubmit={handleAppLogsEndpointSubmit}
+              placeholder="https://<host>.es.<region>.cloud.es.io:9243"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "applogs-user" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Application Log Shipping - Elasticsearch username</Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={appLogsUser}
+              onChange={setAppLogsUser}
+              onSubmit={handleAppLogsUserSubmit}
+              placeholder="elastic"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "applogs-pass" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Application Log Shipping - Elasticsearch password</Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={appLogsPass}
+              onChange={setAppLogsPass}
+              onSubmit={handleAppLogsPassSubmit}
+              placeholder="password"
+              mask="*"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "applogs-index" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Application Log Shipping - index name</Text>
+          <Text color="gray" dimColor>
+            Elasticsearch index (data stream) for app logs.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={appLogsIndex}
+              onChange={setAppLogsIndex}
+              onSubmit={handleAppLogsIndexSubmit}
+              placeholder="rulebricks-app-logs"
+            />
           </Box>
         </Box>
       )}

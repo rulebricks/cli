@@ -36,6 +36,13 @@
           "type": "boolean",
           "description": "Enable external-dns integration for automatic DNS record management"
         },
+        "priorityClasses": {
+          "type": "object",
+          "description": "Release-scoped scheduling priority tiers: <release>-critical (1000000) for stateful infrastructure and <release>-burst (-5) for the worker fleet, so critical pods always preempt burst workers.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true }
+          }
+        },
         "storage": {
           "type": "object",
           "description": "Shared object storage: one provider, one identity, and one bucket/container with per-purpose path prefixes",
@@ -168,6 +175,134 @@
               "description": "URL-path prefixes that bypass the token check"
             }
           }
+        },
+        "tracing": {
+          "type": "object",
+          "description": "Distributed tracing: in-cluster OpenTelemetry Collector that forwards OTLP spans from the app/HPS/workers/Traefik to a pluggable backend (Elastic APM, a generic OTLP/HTTP endpoint, or Azure Monitor).",
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "destination": { "type": "string", "enum": ["elastic", "otlp", "azure-monitor"], "default": "elastic" },
+            "samplingRatio": { "type": "number", "minimum": 0, "maximum": 1, "default": 1 },
+            "collector": {
+              "type": "object",
+              "properties": {
+                "image": { "type": "string" },
+                "replicas": { "type": "integer", "minimum": 1, "default": 1 },
+                "memoryLimitMiB": { "type": "integer", "minimum": 64, "default": 400 },
+                "resources": { "$ref": "#/definitions/resources" },
+                "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+                "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+                "tolerations": { "type": "array", "items": { "$ref": "#/definitions/toleration" } },
+                "affinity": { "type": "object" }
+              }
+            },
+            "elastic": {
+              "type": "object",
+              "description": "Customer-managed Elastic APM target for OTLP spans (destination: elastic).",
+              "properties": {
+                "endpoint": { "type": "string", "description": "OTLP endpoint of the Elastic APM server / managed integration" },
+                "authMode": { "type": "string", "enum": ["secret-token", "api-key", "none"], "default": "secret-token" },
+                "secretToken": { "type": "string" },
+                "apiKey": { "type": "string" },
+                "existingSecret": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" },
+                    "secretTokenKey": { "type": "string", "default": "secret-token" },
+                    "apiKeyKey": { "type": "string", "default": "api-key" }
+                  }
+                },
+                "tlsInsecureSkipVerify": { "type": "boolean", "default": false }
+              }
+            },
+            "otlp": {
+              "type": "object",
+              "description": "Generic OTLP/HTTP backend (destination: otlp).",
+              "properties": {
+                "endpoint": { "type": "string", "description": "OTLP/HTTP traces endpoint of the backend" },
+                "authMode": { "type": "string", "enum": ["none", "bearer", "api-key", "header"], "default": "none" },
+                "headerName": { "type": "string", "default": "Authorization" },
+                "token": { "type": "string" },
+                "apiKey": { "type": "string" },
+                "headerValue": { "type": "string" },
+                "existingSecret": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" },
+                    "tokenKey": { "type": "string", "default": "token" }
+                  }
+                },
+                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+                "tlsInsecureSkipVerify": { "type": "boolean", "default": false }
+              }
+            },
+            "azureMonitor": {
+              "type": "object",
+              "description": "Azure Monitor / Application Insights target (destination: azure-monitor).",
+              "properties": {
+                "connectionString": { "type": "string", "description": "Application Insights connection string" },
+                "existingSecret": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" },
+                    "connectionStringKey": { "type": "string", "default": "connection-string" }
+                  }
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "comment": "Default/absent destination is treated as elastic.",
+              "if": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"],
+                "not": { "required": ["destination"] }
+              },
+              "then": {
+                "required": ["elastic"],
+                "properties": {
+                  "elastic": { "type": "object", "required": ["endpoint"], "properties": { "endpoint": { "type": "string", "minLength": 1 } } }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "enabled": { "const": true }, "destination": { "const": "elastic" } },
+                "required": ["enabled", "destination"]
+              },
+              "then": {
+                "required": ["elastic"],
+                "properties": {
+                  "elastic": { "type": "object", "required": ["endpoint"], "properties": { "endpoint": { "type": "string", "minLength": 1 } } }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "enabled": { "const": true }, "destination": { "const": "otlp" } },
+                "required": ["enabled", "destination"]
+              },
+              "then": {
+                "required": ["otlp"],
+                "properties": {
+                  "otlp": { "type": "object", "required": ["endpoint"], "properties": { "endpoint": { "type": "string", "minLength": 1 } } }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "enabled": { "const": true }, "destination": { "const": "azure-monitor" } },
+                "required": ["enabled", "destination"]
+              },
+              "then": {
+                "required": ["azureMonitor"],
+                "properties": {
+                  "azureMonitor": { "type": "object", "required": ["connectionString"], "properties": { "connectionString": { "type": "string", "minLength": 1 } } }
+                }
+              }
+            }
+          ]
         },
         "labels": {
           "type": "object",
@@ -381,6 +516,45 @@
               }
             },
             "replicas": { "type": "integer", "minimum": 0 },
+            "keda": {
+              "type": "object",
+              "description": "Gather-plane autoscaler: scales HPS on response-topic lag. Conservative one-pod-at-a-time behavior because HPS scale events rebalance the response consumer group and can time out in-flight requests.",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "minReplicaCount": { "type": "integer", "minimum": 0 },
+                "maxReplicaCount": { "type": "integer", "minimum": 0 },
+                "pollingInterval": { "type": "integer", "minimum": 1 },
+                "cooldownPeriod": { "type": "integer", "minimum": 0 },
+                "lagThreshold": { "type": ["integer", "string"] },
+                "cpuThreshold": { "type": ["integer", "string"] }
+              }
+            },
+            "imagePrepull": {
+              "type": "object",
+              "description": "DaemonSet that pre-pulls the HPS server + worker images onto every node so burst scale-outs skip the image pull on fresh nodes.",
+              "properties": {
+                "enabled": { "type": "boolean", "default": true },
+                "pauseImage": { "type": "string" },
+                "nodeSelector": {
+                  "type": "object",
+                  "description": "Node selector for the prepull DaemonSet; empty by default so it reaches every node.",
+                  "additionalProperties": { "type": "string" }
+                },
+                "tolerations": {
+                  "type": "array",
+                  "description": "Tolerations for the prepull DaemonSet; defaults to the Rulebricks burst-pool taint only. Add explicit architecture tolerations as needed; avoid bare {operator: Exists} because it also tolerates shutdown, out-of-service, and unreachable nodes.",
+                  "items": { "$ref": "#/definitions/toleration" }
+                },
+                "resources": {
+                  "type": "object",
+                  "description": "Per-container resources for the prepull DaemonSet (near-zero by default so it never affects bin-packing).",
+                  "properties": {
+                    "init": { "$ref": "#/definitions/resources" },
+                    "pause": { "$ref": "#/definitions/resources" }
+                  }
+                }
+              }
+            },
             "resources": { "$ref": "#/definitions/resources" },
             "podLabels": {
               "type": "object",
@@ -423,9 +597,18 @@
                 "enabled": { "type": "boolean" },
                 "replicas": { "type": "integer", "minimum": 0 },
                 "resources": { "$ref": "#/definitions/resources" },
+                "solutionPartitions": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Partition count of the (prefixed) solution request topic. Must match kafka.provisioning.topics for the solution topic; hard ceiling on worker fleet concurrency, so keda.maxReplicaCount must not exceed it."
+                },
                 "podLabels": {
                   "type": "object",
                   "additionalProperties": { "type": "string" }
+                },
+                "priorityClassName": {
+                  "type": "string",
+                  "description": "PriorityClass for worker pods; defaults to the release-scoped burst class (<release>-burst) when global.priorityClasses.enabled, making workers the first preemption victims."
                 },
                 "keda": {
                   "type": "object",
@@ -436,7 +619,11 @@
                     "pollingInterval": { "type": "integer", "minimum": 1 },
                     "cooldownPeriod": { "type": "integer", "minimum": 0 },
                     "lagThreshold": { "type": ["integer", "string"] },
-                    "cpuThreshold": { "type": ["integer", "string"] }
+                    "cpuThreshold": { "type": ["integer", "string"] },
+                    "scalingBehavior": {
+                      "type": "object",
+                      "description": "Optional HPA scaling behavior override (scaleUp/scaleDown) rendered into the worker ScaledObject; omit to use the chart's exponential scale-up / smooth scale-down defaults."
+                    }
                   }
                 },
                 "nodeSelector": {
@@ -499,7 +686,7 @@
         },
         "redis": {
           "type": "object",
-          "description": "Redis configuration. Set enabled: false to use an external/managed Redis instance.",
+          "description": "Valkey/Redis-compatible configuration. The redis key is retained for compatibility. Set enabled: false to use an external/managed endpoint.",
           "properties": {
             "enabled": { "type": "boolean", "default": true },
             "tag": { "type": "string" },
@@ -518,12 +705,12 @@
             },
             "external": {
               "type": "object",
-              "description": "External Redis connection settings (used when redis.enabled is false).",
+              "description": "External Valkey/Redis-compatible connection settings (used when redis.enabled is false).",
               "properties": {
                 "host": { "type": "string" },
                 "port": { "type": ["integer", "string"], "default": 6379 },
                 "password": { "type": "string", "description": "Inline password. Prefer existingSecret for production." },
-                "existingSecret": { "type": "string", "description": "Name of an existing secret holding the Redis password." },
+                "existingSecret": { "type": "string", "description": "Name of an existing secret holding the Valkey/Redis-compatible password." },
                 "existingSecretKey": { "type": "string", "default": "redis-password" },
                 "tls": {
                   "type": "object",
@@ -545,6 +732,132 @@
                 }
               }
             }
+          }
+        },
+        "cache": {
+          "type": "object",
+          "description": "Optional Valkey observability and management components.",
+          "properties": {
+            "valkeyAdmin": {
+              "type": "object",
+              "description": "Official Valkey Admin web console. Disabled by default and internal-only unless explicitly exposed through authenticated ingress.",
+              "properties": {
+                "enabled": { "type": "boolean", "default": false },
+                "replicas": { "type": "integer", "minimum": 1 },
+                "exposure": { "type": "string", "enum": ["internal", "ingress"], "default": "internal" },
+                "image": {
+                  "type": "object",
+                  "properties": {
+                    "repository": { "type": "string" },
+                    "tag": { "type": "string" },
+                    "pullPolicy": { "type": "string" }
+                  }
+                },
+                "service": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string" },
+                    "port": { "type": ["integer", "string"] }
+                  }
+                },
+                "ingress": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean", "default": false },
+                    "className": { "type": "string" },
+                    "hostname": { "type": "string" },
+                    "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "path": { "type": "string" },
+                    "pathType": { "type": "string" },
+                    "allowedIPs": { "type": "array", "items": { "type": "string" } },
+                    "basicAuth": {
+                      "type": "object",
+                      "description": "Traefik BasicAuth credentials. users must be htpasswd-formatted entries; prefer CLI generation.",
+                      "properties": {
+                        "users": { "type": "array", "items": { "type": "string" } },
+                        "existingSecret": { "type": "string" },
+                        "existingSecretKey": { "type": "string", "default": "users" }
+                      }
+                    }
+                  }
+                },
+                "resources": { "$ref": "#/definitions/resources" },
+                "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+                "tolerations": { "type": "array", "items": { "$ref": "#/definitions/toleration" } },
+                "affinity": { "type": "object" },
+                "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+                "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } }
+              }
+            },
+            "redisExporter": {
+              "type": "object",
+              "description": "Prometheus exporter for Valkey/Redis-compatible cache metrics.",
+              "properties": {
+                "enabled": { "type": "boolean", "default": false },
+                "image": {
+                  "type": "object",
+                  "properties": {
+                    "repository": { "type": "string" },
+                    "tag": { "type": "string" },
+                    "pullPolicy": { "type": "string" }
+                  }
+                },
+                "service": {
+                  "type": "object",
+                  "properties": { "port": { "type": ["integer", "string"] } }
+                },
+                "serviceMonitor": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "interval": { "type": "string" },
+                    "scrapeTimeout": { "type": "string" }
+                  }
+                },
+                "resources": { "$ref": "#/definitions/resources" },
+                "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+                "tolerations": { "type": "array", "items": { "$ref": "#/definitions/toleration" } },
+                "affinity": { "type": "object" },
+                "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+                "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "kafkaExporter": {
+          "type": "object",
+          "description": "Prometheus exporter for Kafka topic and consumer-group lag metrics.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "image": {
+              "type": "object",
+              "properties": {
+                "repository": { "type": "string" },
+                "tag": { "type": "string" },
+                "pullPolicy": { "type": "string" }
+              }
+            },
+            "service": {
+              "type": "object",
+              "properties": { "port": { "type": ["integer", "string"] } }
+            },
+            "serviceMonitor": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "interval": { "type": "string" },
+                "scrapeTimeout": { "type": "string" }
+              }
+            },
+            "brokers": { "type": "string" },
+            "topicFilter": { "type": "string" },
+            "groupFilter": { "type": "string" },
+            "resources": { "$ref": "#/definitions/resources" },
+            "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+            "tolerations": { "type": "array", "items": { "$ref": "#/definitions/toleration" } },
+            "affinity": { "type": "object" },
+            "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+            "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } }
           }
         }
       }
@@ -617,7 +930,33 @@
     "kafka": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" }
+        "enabled": { "type": "boolean" },
+        "provisioning": {
+          "type": "object",
+          "description": "Explicit topic management (create + idempotent alignment of existing topics via postScript). Topic names must carry the configured kafkaTopicPrefix.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "numPartitions": { "type": "integer", "minimum": 1 },
+            "replicationFactor": { "type": "integer", "minimum": 1 },
+            "postScript": { "type": "string" },
+            "topics": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "partitions": { "type": "integer", "minimum": 1 },
+                  "replicationFactor": { "type": "integer", "minimum": 1 },
+                  "config": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  }
+                },
+                "required": ["name"]
+              }
+            }
+          }
+        }
       }
     },
     "kafkaBridge": {
@@ -641,9 +980,11 @@
         "queryLimits": {
           "type": "object",
           "properties": {
-            "maxMemoryUsage": { "type": "integer", "minimum": 1, "default": 1073741824 },
+            "maxMemoryUsage": { "type": "integer", "minimum": 1, "default": 4294967296 },
             "maxThreads": { "type": "integer", "minimum": 1, "default": 4 },
-            "maxExecutionTime": { "type": "integer", "minimum": 1, "default": 60 }
+            "maxExecutionTime": { "type": "integer", "minimum": 1, "default": 120 },
+            "maxRowsToRead": { "type": "integer", "minimum": 1, "default": 50000000 },
+            "readOverflowMode": { "type": "string", "enum": ["throw", "break"], "default": "break" }
           }
         }
       }
@@ -892,8 +1233,8 @@
       }
     },
     {
-      "title": "External Redis Validation",
-      "description": "If in-cluster Redis is disabled, an external Redis host must be specified in rulebricks.redis.external.host and must not be empty.",
+      "title": "External Valkey/Redis-Compatible Validation",
+      "description": "If in-cluster Valkey is disabled, an external Valkey/Redis-compatible host must be specified in rulebricks.redis.external.host and must not be empty.",
       "if": {
         "properties": {
           "rulebricks": {
@@ -1204,6 +1545,88 @@
                 "required": ["enabled"],
                 "properties": {
                   "enabled": { "const": true }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "Valkey Admin Ingress Auth Validation",
+      "description": "Valkey Admin has no built-in authentication. If exposed through ingress, Traefik BasicAuth must be configured using htpasswd users or an existing Secret.",
+      "if": {
+        "properties": {
+          "rulebricks": {
+            "type": "object",
+            "properties": {
+              "cache": {
+                "type": "object",
+                "properties": {
+                  "valkeyAdmin": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": { "const": true },
+                      "exposure": { "const": "ingress" },
+                      "ingress": {
+                        "type": "object",
+                        "properties": {
+                          "enabled": { "const": true }
+                        },
+                        "required": ["enabled"]
+                      }
+                    },
+                    "required": ["enabled", "exposure", "ingress"]
+                  }
+                },
+                "required": ["valkeyAdmin"]
+              }
+            },
+            "required": ["cache"]
+          }
+        },
+        "required": ["rulebricks"]
+      },
+      "then": {
+        "properties": {
+          "rulebricks": {
+            "type": "object",
+            "properties": {
+              "cache": {
+                "type": "object",
+                "properties": {
+                  "valkeyAdmin": {
+                    "type": "object",
+                    "properties": {
+                      "ingress": {
+                        "type": "object",
+                        "properties": {
+                          "basicAuth": {
+                            "type": "object",
+                            "anyOf": [
+                              {
+                                "required": ["existingSecret"],
+                                "properties": {
+                                  "existingSecret": { "type": "string", "minLength": 1 }
+                                }
+                              },
+                              {
+                                "required": ["users"],
+                                "properties": {
+                                  "users": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": { "type": "string", "minLength": 1 }
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        },
+                        "required": ["basicAuth"]
+                      }
+                    }
+                  }
                 }
               }
             }

@@ -103,16 +103,16 @@ if aws_run sts get-caller-identity --query "Account" --output text; then
   AUTH_OK=1
 else
   if is_auth_error; then
-    row "AWS credentials valid" "FAIL — credentials missing or expired"
+    row "AWS credentials valid" "FAIL - credentials missing or expired"
   else
-    row "AWS credentials valid" "FAIL — ${AWS_STDERR%%$'\n'*}"
+    row "AWS credentials valid" "FAIL - ${AWS_STDERR%%$'\n'*}"
   fi
   add_action "Refresh credentials: $(login_hint)"
   mark_blocker
 fi
 
 if [[ $AUTH_OK -eq 0 ]]; then
-  printf "\nRemaining checks skipped — fix authentication first.\n"
+  printf "\nRemaining checks skipped - fix authentication first.\n"
   printf "\n========================================\n"
   printf "RESULT: NOT READY\n"
   printf "========================================\n"
@@ -147,7 +147,7 @@ aws_run cloudformation list-stacks --region "$REGION" --output text >/dev/null \
 if [[ ${#missing_access[@]} -eq 0 ]]; then
   row "EKS/EC2/IAM/S3/APS/CFN access" "OK"
 else
-  row "EKS/EC2/IAM/S3/APS/CFN access" "WARN — missing: ${missing_access[*]}"
+  row "EKS/EC2/IAM/S3/APS/CFN access" "WARN - missing: ${missing_access[*]}"
   add_action "Ask your AWS admin to grant the missing IAM actions in $REGION: ${missing_access[*]}"
 fi
 
@@ -165,12 +165,12 @@ if aws_run iam simulate-principal-policy \
   if [[ "$allowed" == "3" ]]; then
     row "IAM role-creation rights" "OK"
   else
-    row "IAM role-creation rights" "WARN — some IAM create/attach actions denied"
+    row "IAM role-creation rights" "WARN - some IAM create/attach actions denied"
     add_action "The stack creates named IAM roles (deploy needs CAPABILITY_NAMED_IAM). Ensure your principal can iam:CreateRole / iam:AttachRolePolicy / iam:PutRolePolicy, or have an admin deploy."
   fi
 else
   # SimulatePrincipalPolicy itself is often denied for non-admins; don't block.
-  row "IAM role-creation rights" "WARN — could not simulate (needs iam:SimulatePrincipalPolicy)"
+  row "IAM role-creation rights" "WARN - could not simulate (needs iam:SimulatePrincipalPolicy)"
   add_action "Could not verify IAM role-creation rights. The stack creates named IAM roles and must be deployed with --capabilities CAPABILITY_NAMED_IAM by a principal allowed to create roles."
 fi
 
@@ -184,7 +184,7 @@ if aws_run service-quotas get-service-quota \
      --output text; then
   quota="$AWS_STDOUT"
   if [[ -z "$quota" || "$quota" == "None" ]]; then
-    row "$quota_label" "WARN — empty response"
+    row "$quota_label" "WARN - empty response"
     add_action "Check the EC2 'Running On-Demand Standard vCPUs' quota in the AWS console: Service Quotas → EC2."
   else
     quota_int="${quota%.*}"
@@ -196,7 +196,7 @@ if aws_run service-quotas get-service-quota \
     fi
   fi
 else
-  row "$quota_label" "WARN — could not read quota"
+  row "$quota_label" "WARN - could not read quota"
   add_action "Manually verify EC2 vCPU quota in the AWS console (Service Quotas → EC2) for $REGION."
 fi
 
@@ -207,7 +207,7 @@ helm version   >/dev/null 2>&1 || missing_tools+=("helm")
 
 if [[ ${#missing_tools[@]} -gt 0 ]]; then
   uniq_tools="$(printf '%s\n' "${missing_tools[@]}" | sort -u | tr '\n' ' ')"
-  row "Local tools (kubectl, helm)" "FAIL — missing/broken: ${uniq_tools% }"
+  row "Local tools (kubectl, helm)" "FAIL - missing/broken: ${uniq_tools% }"
   add_action "Install/repair: ${uniq_tools% }"
   mark_blocker
 else
@@ -217,7 +217,7 @@ fi
 # ---------- summary ----------
 printf "\n========================================\n"
 if [[ $BLOCKERS -eq 0 && ${#ACTIONS[@]} -eq 0 ]]; then
-  printf "RESULT: READY — you can deploy the CloudFormation stack.\n"
+  printf "RESULT: READY - you can deploy the CloudFormation stack.\n"
   printf "========================================\n"
   exit 0
 elif [[ $BLOCKERS -eq 0 ]]; then

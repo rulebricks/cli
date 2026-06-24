@@ -1,10 +1,5 @@
 import { execa, ExecaError } from "execa";
-import {
-  DEFAULT_NAMESPACE,
-  NodeArchitecture,
-  PerformanceTier,
-  TIER_CONFIGS,
-} from "../types/index.js";
+import { DEFAULT_NAMESPACE, NodeArchitecture } from "../types/index.js";
 
 /**
  * Extracts meaningful error message from execa error
@@ -240,9 +235,6 @@ export interface ClusterStorageClass {
 }
 
 export interface ClusterCapabilities {
-  tier: PerformanceTier | null;
-  feasibleTiers: PerformanceTier[];
-  recommendedTier: PerformanceTier | null;
   nodeArchitecture: NodeArchitecture;
   arm64TolerationRequired: boolean;
   schedulableNodeCount: number;
@@ -255,74 +247,6 @@ export interface ClusterCapabilities {
   defaultStorageClass?: ClusterStorageClass;
   storageClass?: string;
   storageProvisioner?: string;
-}
-
-function inferTierFromResources(
-  totalCpu: number,
-  totalMemoryGi: number,
-  totalPersistentStorageGi?: number,
-): PerformanceTier | null {
-  const eligibleCpuCores = roundUpForEligibility(totalCpu);
-  const eligibleMemoryGi = roundUpForEligibility(totalMemoryGi);
-
-  if (
-    eligibleCpuCores >= TIER_CONFIGS.large.requirements.cpuCores &&
-    eligibleMemoryGi >= TIER_CONFIGS.large.requirements.memoryGi &&
-    hasEnoughPersistentStorage("large", totalPersistentStorageGi)
-  ) {
-    return "large";
-  }
-  if (
-    eligibleCpuCores >= TIER_CONFIGS.medium.requirements.cpuCores &&
-    eligibleMemoryGi >= TIER_CONFIGS.medium.requirements.memoryGi &&
-    hasEnoughPersistentStorage("medium", totalPersistentStorageGi)
-  ) {
-    return "medium";
-  }
-  if (
-    eligibleCpuCores >= TIER_CONFIGS.small.requirements.cpuCores &&
-    eligibleMemoryGi >= TIER_CONFIGS.small.requirements.memoryGi &&
-    hasEnoughPersistentStorage("small", totalPersistentStorageGi)
-  ) {
-    return "small";
-  }
-  return null;
-}
-
-function hasEnoughPersistentStorage(
-  tier: PerformanceTier,
-  totalPersistentStorageGi?: number,
-): boolean {
-  if (totalPersistentStorageGi === undefined) return true;
-  return (
-    totalPersistentStorageGi >=
-    TIER_CONFIGS[tier].requirements.persistentStorageGi
-  );
-}
-
-export function getFeasibleTiers(
-  capabilities: Pick<
-    ClusterCapabilities,
-    | "totalCpuCores"
-    | "totalMemoryGi"
-    | "totalPersistentStorageGi"
-    | "storageClasses"
-  >,
-): PerformanceTier[] {
-  const hasUsableStorageClass = capabilities.storageClasses.length > 0;
-  if (!hasUsableStorageClass) return [];
-
-  const eligibleCpuCores = roundUpForEligibility(capabilities.totalCpuCores);
-  const eligibleMemoryGi = roundUpForEligibility(capabilities.totalMemoryGi);
-
-  return (Object.keys(TIER_CONFIGS) as PerformanceTier[]).filter((tier) => {
-    const requirements = TIER_CONFIGS[tier].requirements;
-    return (
-      eligibleCpuCores >= requirements.cpuCores &&
-      eligibleMemoryGi >= requirements.memoryGi &&
-      hasEnoughPersistentStorage(tier, capabilities.totalPersistentStorageGi)
-    );
-  });
 }
 
 function normalizeNodeArchitecture(architecture?: string): "amd64" | "arm64" | null {
@@ -412,9 +336,10 @@ async function getPersistentStorageCapacityGi(
 }
 
 /**
- * Infers the closest internal Rulebricks sizing tier and node architecture from
- * the current cluster. The CLI uses this to keep Helm values compatible with
- * the Kubernetes resources the user has already made available.
+ * Inspects the current cluster's node architecture, schedulable capacity, and
+ * storage classes. The CLI uses this to keep Helm values compatible with the
+ * Kubernetes resources the user has already made available (storage class, ARM
+ * tolerations, etc.); workload sizing itself follows the chart defaults.
  */
 export async function inferClusterCapabilities(): Promise<ClusterCapabilities | null> {
   try {
@@ -487,22 +412,8 @@ export async function inferClusterCapabilities(): Promise<ClusterCapabilities | 
     const totalPersistentStorageGi = await getPersistentStorageCapacityGi(
       defaultStorageClass?.name,
     );
-    const baseCapabilities = {
-      totalCpuCores: totalCpu,
-      totalMemoryGi,
-      totalPersistentStorageGi,
-      storageClasses,
-    };
-    const feasibleTiers = getFeasibleTiers(baseCapabilities);
-    const recommendedTier =
-      feasibleTiers.length > 0
-        ? inferTierFromResources(totalCpu, totalMemoryGi, totalPersistentStorageGi)
-        : null;
 
     return {
-      tier: recommendedTier,
-      feasibleTiers,
-      recommendedTier,
       nodeArchitecture: summarizeNodeArchitecture(architectures),
       arm64TolerationRequired,
       schedulableNodeCount: schedulableNodes.length,
@@ -519,14 +430,6 @@ export async function inferClusterCapabilities(): Promise<ClusterCapabilities | 
   } catch {
     return null;
   }
-}
-
-/**
- * Infers the closest internal Rulebricks sizing tier from the current cluster.
- * Kept as a compatibility wrapper for call sites that only need tier sizing.
- */
-export async function inferClusterTier(): Promise<PerformanceTier | null> {
-  return (await inferClusterCapabilities())?.tier ?? null;
 }
 
 /**

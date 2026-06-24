@@ -7,9 +7,11 @@ import {
   StatusLine,
   ThemeProvider,
   useTheme,
+  CommandApprovalProvider,
 } from "../components/common/index.js";
 import { loadDeploymentConfig } from "../lib/config.js";
 import { updateKubeconfig } from "../lib/cloudCli.js";
+import { CommandDeniedError } from "../lib/commandApproval.js";
 import {
   checkClusterAccessible,
   createJobFromCronJob,
@@ -105,15 +107,21 @@ function BackupCommandInner({ name }: BackupCommandProps) {
       config.infrastructure.region &&
       config.infrastructure.clusterName
     ) {
-      await updateKubeconfig(
-        config.infrastructure.provider,
-        config.infrastructure.clusterName,
-        config.infrastructure.region,
-        {
-          gcpProjectId: config.infrastructure.gcpProjectId,
-          azureResourceGroup: config.infrastructure.azureResourceGroup,
-        },
-      );
+      try {
+        await updateKubeconfig(
+          config.infrastructure.provider,
+          config.infrastructure.clusterName,
+          config.infrastructure.region,
+          {
+            gcpProjectId: config.infrastructure.gcpProjectId,
+            azureResourceGroup: config.infrastructure.azureResourceGroup,
+          },
+        );
+      } catch (err) {
+        if (!(err instanceof CommandDeniedError)) {
+          throw err;
+        }
+      }
       clusterError = await checkClusterAccessible();
     }
 
@@ -170,7 +178,9 @@ export function BackupCommand(props: BackupCommandProps) {
   return (
     <ThemeProvider theme="status">
       <Logo />
-      <BackupCommandInner {...props} />
+      <CommandApprovalProvider>
+        <BackupCommandInner {...props} />
+      </CommandApprovalProvider>
     </ThemeProvider>
   );
 }

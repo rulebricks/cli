@@ -3,7 +3,6 @@ import { z } from "zod";
 // Cloud provider types
 export type CloudProvider = "aws" | "gcp" | "azure";
 export type DatabaseType = "self-hosted" | "supabase-cloud";
-export type PerformanceTier = "small" | "medium" | "large";
 export type NodeArchitecture = "amd64" | "arm64" | "mixed" | "unknown";
 export type SSOProvider =
   | "azure"
@@ -225,200 +224,6 @@ export const CLOUD_REGIONS: Record<CloudProvider, string[]> = {
     "israelcentral",
   ],
 };
-
-// Performance tier configurations
-export const TIER_CONFIGS: Record<PerformanceTier, TierConfig> = {
-  small: {
-    description: "Development & Testing",
-    throughput: "<1,000 rules/sec",
-    nodes: { min: 4, max: 4 },
-    resources: "8 vCPU and 16GB RAM total",
-    requirements: { cpuCores: 8, memoryGi: 16, persistentStorageGi: 24 },
-    // HPS
-    hpsReplicas: 2,
-    hpsWorkerReplicas: { min: 4, max: 8 },
-    hpsResources: {
-      requests: { cpu: "500m", memory: "1Gi" },
-      limits: { cpu: "1500m", memory: "1536Mi" },
-    },
-    hpsWorkerResources: {
-      requests: { cpu: "100m", memory: "128Mi" },
-      limits: { cpu: "500m", memory: "512Mi" },
-    },
-    // Kafka
-    kafkaStorage: "10Gi",
-    kafkaReplication: 1,
-    kafkaResources: {
-      requests: { cpu: "500m", memory: "2Gi" },
-      limits: { cpu: "2000m", memory: "3Gi" },
-    },
-    kafkaHeapOpts: "-Xmx1g -Xms1g -XX:+UseZGC -XX:+AlwaysPreTouch",
-    // Redis
-    redisResources: {
-      requests: { cpu: "200m", memory: "256Mi" },
-      limits: { cpu: "500m", memory: "2Gi" },
-    },
-    redisPersistenceSize: "4Gi",
-    // Vector
-    vectorReplicas: 2,
-    vectorResources: {
-      requests: { cpu: "50m", memory: "128Mi" },
-      limits: { cpu: "200m", memory: "256Mi" },
-    },
-    // Database
-    dbResources: {
-      requests: { cpu: "500m", memory: "1Gi" },
-      limits: { cpu: "1000m", memory: "2Gi" },
-    },
-    dbPersistenceSize: "10Gi",
-    // App
-    appReplicas: 2,
-    appResources: {
-      requests: { cpu: "500m", memory: "512Mi" },
-      limits: { cpu: "2000m", memory: "2Gi" },
-    },
-  },
-  medium: {
-    description: "Production",
-    throughput: "1,000-10,000 rules/sec",
-    nodes: { min: 4, max: 8 },
-    resources: "16+ vCPU and 32GB+ RAM total",
-    requirements: { cpuCores: 16, memoryGi: 32, persistentStorageGi: 108 },
-    // HPS
-    hpsReplicas: 3,
-    hpsWorkerReplicas: { min: 10, max: 24 },
-    hpsResources: {
-      requests: { cpu: "1000m", memory: "1Gi" },
-      limits: { cpu: "4000m", memory: "4Gi" },
-    },
-    hpsWorkerResources: {
-      requests: { cpu: "500m", memory: "512Mi" },
-      limits: { cpu: "2000m", memory: "2Gi" },
-    },
-    // Kafka
-    kafkaStorage: "50Gi",
-    kafkaReplication: 2,
-    kafkaResources: {
-      requests: { cpu: "1000m", memory: "3Gi" },
-      limits: { cpu: "2000m", memory: "4Gi" },
-    },
-    kafkaHeapOpts: "-Xmx2g -Xms2g -XX:+UseZGC -XX:+AlwaysPreTouch",
-    // Redis
-    redisResources: {
-      requests: { cpu: "200m", memory: "512Mi" },
-      limits: { cpu: "1000m", memory: "4Gi" },
-    },
-    redisPersistenceSize: "8Gi",
-    // Vector
-    vectorReplicas: 2,
-    vectorResources: {
-      requests: { cpu: "100m", memory: "256Mi" },
-      limits: { cpu: "500m", memory: "512Mi" },
-    },
-    // Database
-    dbResources: {
-      requests: { cpu: "1000m", memory: "2Gi" },
-      limits: { cpu: "2000m", memory: "4Gi" },
-    },
-    dbPersistenceSize: "50Gi",
-    // App
-    appReplicas: 2,
-    appResources: {
-      requests: { cpu: "500m", memory: "512Mi" },
-      limits: { cpu: "2000m", memory: "2Gi" },
-    },
-  },
-  large: {
-    description: "High Performance",
-    throughput: ">10,000 rules/sec",
-    nodes: { min: 5, max: 16 },
-    resources: "40+ vCPU and 80GB+ RAM total",
-    requirements: { cpuCores: 40, memoryGi: 80, persistentStorageGi: 216 },
-    // HPS
-    hpsReplicas: 4,
-    hpsWorkerReplicas: { min: 10, max: 48 },
-    hpsResources: {
-      requests: { cpu: "2000m", memory: "2Gi" },
-      limits: { cpu: "4000m", memory: "4Gi" },
-    },
-    hpsWorkerResources: {
-      requests: { cpu: "1000m", memory: "1Gi" },
-      limits: { cpu: "2000m", memory: "2Gi" },
-    },
-    // Kafka
-    kafkaStorage: "100Gi",
-    kafkaReplication: 3,
-    kafkaResources: {
-      requests: { cpu: "2000m", memory: "4Gi" },
-      limits: { cpu: "4000m", memory: "6Gi" },
-    },
-    kafkaHeapOpts: "-Xmx3g -Xms3g -XX:+UseZGC -XX:+AlwaysPreTouch",
-    // Redis
-    redisResources: {
-      requests: { cpu: "500m", memory: "1Gi" },
-      limits: { cpu: "2000m", memory: "8Gi" },
-    },
-    redisPersistenceSize: "16Gi",
-    // Vector
-    vectorReplicas: 3,
-    vectorResources: {
-      requests: { cpu: "200m", memory: "512Mi" },
-      limits: { cpu: "1000m", memory: "1Gi" },
-    },
-    // Database
-    dbResources: {
-      requests: { cpu: "2000m", memory: "4Gi" },
-      limits: { cpu: "4000m", memory: "8Gi" },
-    },
-    dbPersistenceSize: "100Gi",
-    // App
-    appReplicas: 3,
-    appResources: {
-      requests: { cpu: "1000m", memory: "1Gi" },
-      limits: { cpu: "2000m", memory: "2Gi" },
-    },
-  },
-};
-
-// Resource specification for Kubernetes
-export interface ResourceSpec {
-  requests: { cpu: string; memory: string };
-  limits: { cpu: string; memory: string };
-}
-
-export interface TierConfig {
-  description: string;
-  throughput: string;
-  nodes: { min: number; max: number };
-  resources: string;
-  requirements: {
-    cpuCores: number;
-    memoryGi: number;
-    persistentStorageGi: number;
-  };
-  // HPS configuration
-  hpsReplicas: number;
-  hpsWorkerReplicas: { min: number; max: number };
-  hpsResources: ResourceSpec;
-  hpsWorkerResources: ResourceSpec;
-  // Kafka configuration
-  kafkaStorage: string;
-  kafkaReplication: number;
-  kafkaResources: ResourceSpec;
-  kafkaHeapOpts: string;
-  // Redis configuration
-  redisResources: ResourceSpec;
-  redisPersistenceSize: string;
-  // Vector configuration
-  vectorReplicas: number;
-  vectorResources: ResourceSpec;
-  // Database configuration (for self-hosted Supabase)
-  dbResources: ResourceSpec;
-  dbPersistenceSize: string;
-  // App configuration
-  appReplicas: number;
-  appResources: ResourceSpec;
-}
 
 // SMTP Configuration
 export interface SMTPConfig {
@@ -661,6 +466,235 @@ const MonitoringDestinationSchema = z.enum([
   "generic",
 ]);
 
+// Distributed tracing: in-cluster OpenTelemetry Collector forwarding OTLP spans
+// to a customer-managed Elastic APM endpoint (BYO). Self-hosted only.
+// Trace backend the in-cluster collector exports to. AWS- and Azure-compatible:
+// `otlp` covers any vendor-neutral OTLP/HTTP endpoint, `azure-monitor` targets
+// Azure Application Insights, and `elastic` is the Elastic APM default.
+export type TracingDestination = "elastic" | "otlp" | "azure-monitor";
+
+const TracingConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    // Absent means "elastic" for backward compatibility with existing configs.
+    destination: z.enum(["elastic", "otlp", "azure-monitor"]).optional(),
+    samplingRatio: z.number().min(0).max(1).optional(),
+    elastic: z
+      .object({
+        endpoint: z.string().url().optional(),
+        authMode: z.enum(["secret-token", "api-key", "none"]).optional(),
+        secretToken: z.string().optional(),
+        apiKey: z.string().optional(),
+      })
+      .optional(),
+    // Generic OTLP/HTTP backend (Grafana Tempo, Honeycomb, Jaeger, vendor
+    // gateways, AWS/Azure OTLP ingestion, etc.).
+    otlp: z
+      .object({
+        endpoint: z.string().url().optional(),
+        authMode: z.enum(["none", "bearer", "api-key", "header"]).optional(),
+        headerName: z.string().optional(),
+        token: z.string().optional(),
+        apiKey: z.string().optional(),
+        headerValue: z.string().optional(),
+        headers: z.record(z.string()).optional(),
+        tlsInsecureSkipVerify: z.boolean().optional(),
+      })
+      .optional(),
+    // Azure Monitor / Application Insights.
+    azureMonitor: z
+      .object({
+        connectionString: z.string().optional(),
+      })
+      .optional(),
+  })
+  .superRefine((t, ctx) => {
+    if (!t.enabled) return;
+    const destination = t.destination ?? "elastic";
+    if (destination === "elastic") {
+      if (!t.elastic?.endpoint) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "features.tracing.elastic.endpoint is required when tracing destination is 'elastic'",
+          path: ["elastic", "endpoint"],
+        });
+      }
+      const mode = t.elastic?.authMode ?? "secret-token";
+      if (mode === "secret-token" && !t.elastic?.secretToken) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "features.tracing.elastic.secretToken is required for authMode 'secret-token'",
+          path: ["elastic", "secretToken"],
+        });
+      }
+      if (mode === "api-key" && !t.elastic?.apiKey) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "features.tracing.elastic.apiKey is required for authMode 'api-key'",
+          path: ["elastic", "apiKey"],
+        });
+      }
+    } else if (destination === "otlp") {
+      if (!t.otlp?.endpoint) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "features.tracing.otlp.endpoint is required when tracing destination is 'otlp'",
+          path: ["otlp", "endpoint"],
+        });
+      }
+      const mode = t.otlp?.authMode ?? "none";
+      if (mode === "bearer" && !t.otlp?.token) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "features.tracing.otlp.token is required for authMode 'bearer'",
+          path: ["otlp", "token"],
+        });
+      }
+      if (mode === "api-key" && !t.otlp?.apiKey) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "features.tracing.otlp.apiKey is required for authMode 'api-key'",
+          path: ["otlp", "apiKey"],
+        });
+      }
+      if (mode === "header" && !t.otlp?.headerValue) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "features.tracing.otlp.headerValue is required for authMode 'header'",
+          path: ["otlp", "headerValue"],
+        });
+      }
+    } else if (destination === "azure-monitor") {
+      if (!t.azureMonitor?.connectionString) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "features.tracing.azureMonitor.connectionString is required when tracing destination is 'azure-monitor'",
+          path: ["azureMonitor", "connectionString"],
+        });
+      }
+    }
+  });
+
+export type TracingConfig = z.infer<typeof TracingConfigSchema>;
+
+// Application/container log shipping to a customer-managed Elasticsearch (BYO)
+// via the Vector agent DaemonSet. Distinct from decision-log sinks.
+const AppLogsConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    destination: z.enum(["elasticsearch", "loki", "generic"]).optional(),
+    elasticsearch: z
+      .object({
+        endpoint: z.string().url().optional(),
+        index: z.string().optional(),
+        authMode: z.enum(["basic", "api-key", "none"]).optional(),
+        username: z.string().optional(),
+        password: z.string().optional(),
+        apiKey: z.string().optional(),
+        verifyCertificate: z.boolean().optional(),
+      })
+      .optional(),
+    loki: z
+      .object({
+        endpoint: z.string().url().optional(),
+        labels: z.record(z.string()).optional(),
+      })
+      .optional(),
+    generic: z
+      .object({
+        endpoint: z.string().url().optional(),
+        authHeader: z.string().optional(),
+      })
+      .optional(),
+  })
+  .superRefine((a, ctx) => {
+    if (!a.enabled) return;
+    const destination = a.destination ?? "elasticsearch";
+    if (destination === "loki") {
+      if (!a.loki?.endpoint) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "features.logging.appLogs.loki.endpoint is required when appLogs destination is 'loki'",
+          path: ["loki", "endpoint"],
+        });
+      }
+      return;
+    }
+    if (destination === "generic") {
+      if (!a.generic?.endpoint) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "features.logging.appLogs.generic.endpoint is required when appLogs destination is 'generic'",
+          path: ["generic", "endpoint"],
+        });
+      }
+      return;
+    }
+    if (!a.elasticsearch?.endpoint) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "features.logging.appLogs.elasticsearch.endpoint is required when appLogs is enabled",
+        path: ["elasticsearch", "endpoint"],
+      });
+    }
+    const mode = a.elasticsearch?.authMode ?? "basic";
+    if (
+      mode === "basic" &&
+      (!a.elasticsearch?.username || !a.elasticsearch?.password)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "features.logging.appLogs.elasticsearch username and password are required for authMode 'basic'",
+        path: ["elasticsearch", "username"],
+      });
+    }
+    if (mode === "api-key" && !a.elasticsearch?.apiKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "features.logging.appLogs.elasticsearch.apiKey is required for authMode 'api-key'",
+        path: ["elasticsearch", "apiKey"],
+      });
+    }
+  });
+
+export type AppLogsConfig = z.infer<typeof AppLogsConfigSchema>;
+
+const CacheObservabilityConfigSchema = z.object({
+  valkeyAdmin: z
+    .object({
+      enabled: z.boolean(),
+      exposure: z.enum(["internal", "ingress"]).optional(),
+      hostname: z.string().optional(),
+      basicAuthUsers: z.array(z.string()).optional(),
+      basicAuthExistingSecret: z.string().optional(),
+      allowedIPs: z.array(z.string()).optional(),
+    })
+    .optional(),
+  redisExporter: z
+    .object({
+      enabled: z.boolean(),
+    })
+    .optional(),
+  kafkaExporter: z
+    .object({
+      enabled: z.boolean(),
+    })
+    .optional(),
+});
+
 // Deployment configuration schema
 export const DeploymentConfigSchema = z.object({
   name: z
@@ -729,9 +763,6 @@ export const DeploymentConfigSchema = z.object({
     supabaseDashboardUser: z.string().optional(),
     supabaseDashboardPass: z.string().optional(),
   }),
-
-  // Performance
-  tier: z.enum(["small", "medium", "large"]),
 
   // Shared object storage: one provider, one identity, one bucket/container.
   // Decision logs and DB backups are just key prefixes within it.
@@ -869,6 +900,10 @@ export const DeploymentConfigSchema = z.object({
       remoteWriteUrl: z.string().url().optional(),
       remoteWrite: RemoteWriteConfigSchema.optional(),
     }),
+    // Distributed tracing (optional; self-hosted only). Absent on existing
+    // config files, which keeps them valid.
+    tracing: TracingConfigSchema.optional(),
+    cache: CacheObservabilityConfigSchema.optional(),
     logging: z.object({
       // Console logging is always on. This selects an additional external
       // logging platform. Cloud object storage for decision logs is configured
@@ -887,6 +922,9 @@ export const DeploymentConfigSchema = z.object({
       // (API key/token) and endpoint/site.
       bucket: z.string().optional(),
       region: z.string().optional(),
+      // Application/container log shipping to Elasticsearch via the Vector
+      // agent DaemonSet (distinct from the decision-log `sink` above).
+      appLogs: AppLogsConfigSchema.optional(),
     }),
     customEmails: z
       .object({
@@ -1023,7 +1061,6 @@ export const ProfileConfigSchema = z.object({
   licenseKey: z.string().optional(),
 
   // Preferences
-  tier: z.enum(["small", "medium", "large"]).optional(),
   databaseType: z.enum(["self-hosted", "supabase-cloud"]).optional(),
   storage: z
     .object({
