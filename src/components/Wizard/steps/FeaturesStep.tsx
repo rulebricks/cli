@@ -30,28 +30,6 @@ const FEATURES: Feature[] = [
     description: 'Enable SSO via OIDC provider (Azure AD, Google, Okta, etc.)',
     requiresConfig: true
   },
-  // In-cluster Prometheus is always installed; this only opts into exporting
-  // metrics to an external backend via remote_write.
-  {
-    id: 'metricsExport',
-    label: 'Metrics Export',
-    description: 'Send Prometheus metrics to an external backend via remote_write (AWS Managed Prometheus, Azure Monitor, Grafana Cloud, etc.). In-cluster monitoring is always on.',
-    requiresConfig: true
-  },
-  // Distributed tracing: in-cluster OTel collector -> customer-managed Elastic APM.
-  {
-    id: 'tracing',
-    label: 'Distributed Tracing',
-    description: 'Emit OpenTelemetry traces to a backend of your choice (Elastic APM, a generic OTLP/HTTP endpoint, or Azure Monitor) for end-to-end request lineage across the app, HPS, and workers. Self-hosted only.',
-    requiresConfig: true
-  },
-  // Application/container log shipping to a customer-managed Elasticsearch.
-  {
-    id: 'appLogs',
-    label: 'Application Log Shipping',
-    description: 'Optional BYO log shipping via Vector for Elasticsearch, Loki, or generic HTTP. On AWS/Azure, prefer the cloud-native container log agent unless you need a separate backend.',
-    requiresConfig: true
-  },
   {
     id: 'valkeyObservability',
     label: 'Valkey Admin + Cache Metrics',
@@ -79,9 +57,6 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
   const enabledFeatures = {
     ai: state.aiEnabled,
     sso: state.ssoEnabled,
-    metricsExport: state.metricsExportEnabled,
-    tracing: state.tracingEnabled,
-    appLogs: state.appLogsEnabled,
     valkeyObservability: state.valkeyAdminEnabled,
     customEmails: state.customEmailsEnabled
   };
@@ -120,24 +95,6 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
         break;
       case 'sso':
         dispatch({ type: 'SET_SSO_ENABLED', enabled: !state.ssoEnabled });
-        break;
-      case 'metricsExport':
-        dispatch({
-          type: 'SET_METRICS_EXPORT',
-          enabled: !state.metricsExportEnabled
-        });
-        break;
-      case 'tracing':
-        dispatch({
-          type: 'SET_TRACING_ENABLED',
-          enabled: !state.tracingEnabled
-        });
-        break;
-      case 'appLogs':
-        dispatch({
-          type: 'SET_APP_LOGS_ENABLED',
-          enabled: !state.appLogsEnabled
-        });
         break;
       case 'valkeyObservability':
         dispatch({
@@ -208,9 +165,6 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
         </Text>
         {(state.aiEnabled ||
           state.ssoEnabled ||
-          state.metricsExportEnabled ||
-          state.tracingEnabled ||
-          state.appLogsEnabled ||
           state.valkeyAdminEnabled ||
           state.loggingSink !== 'console' ||
           state.customEmailsEnabled) && (

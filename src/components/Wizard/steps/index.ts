@@ -5,6 +5,7 @@ export { DatabaseStep } from './DatabaseStep.js';
 export { SupabaseCredentialsStep } from './SupabaseCredentialsStep.js';
 export { FeaturesStep } from './FeaturesStep.js';
 export { StorageStep } from './StorageStep.js';
+export { ObservabilityStep } from './ObservabilityStep.js';
 export { ExternalServicesStep } from './ExternalServicesStep.js';
 export { FeatureConfigStep } from './FeatureConfigStep.js';
 export { VersionStep } from './VersionStep.js';

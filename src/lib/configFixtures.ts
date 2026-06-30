@@ -85,6 +85,7 @@ interface MatrixOptions {
   ai?: boolean;
   sso?: boolean;
   customEmails?: boolean;
+  clickStackEnabled?: boolean;
   remoteWrite?: RemoteWriteConfig;
   monitoringDestination?: MonitoringDestination;
   tracing?: NonNullable<DeploymentConfig["features"]["tracing"]>;
@@ -123,6 +124,9 @@ function build(options: MatrixOptions): DeploymentConfig {
   // (e.g. config-file-only "local-grafana") is configured.
   const monitoringDestination: MonitoringDestination | undefined =
     options.monitoringDestination ?? options.remoteWrite?.destination;
+  const clickStackEnabled =
+    options.clickStackEnabled ??
+    !(options.remoteWrite || options.tracing || options.appLogs);
 
   return {
     name: options.name,
@@ -180,6 +184,11 @@ function build(options: MatrixOptions): DeploymentConfig {
         enabled: true,
         destination: monitoringDestination,
         remoteWrite: options.remoteWrite,
+      },
+      observability: {
+        clickstack: {
+          enabled: clickStackEnabled,
+        },
       },
       tracing: options.tracing,
       cache: options.cache,
@@ -245,6 +254,52 @@ export function buildConfigMatrix(): { name: string; config: DeploymentConfig }[
             sasl: { mechanism: "aws-iam", region: "us-east-1" },
             identity: {
               awsRoleArn: "arn:aws:iam::123456789012:role/msk-access",
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "aws-external-postgres",
+      provider: "aws",
+      externalServices: {
+        redis: { mode: "embedded" },
+        kafka: { mode: "embedded" },
+        postgres: {
+          mode: "external",
+          external: {
+            provider: "aws",
+            host: "db.cluster-xxxx.us-east-1.rds.amazonaws.com",
+            port: 5432,
+            database: "postgres",
+            bootstrap: {
+              enabled: true,
+              masterUsername: "postgres",
+              masterPassword: "master-pw-change-me",
+              appRole: "postgres",
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "azure-external-postgres",
+      provider: "azure",
+      externalServices: {
+        redis: { mode: "embedded" },
+        kafka: { mode: "embedded" },
+        postgres: {
+          mode: "external",
+          external: {
+            provider: "azure",
+            host: "myserver.postgres.database.azure.com",
+            port: 5432,
+            database: "postgres",
+            bootstrap: {
+              enabled: true,
+              masterUsername: "pgadmin",
+              masterPassword: "master-pw-change-me",
+              appRole: "pgadmin",
             },
           },
         },

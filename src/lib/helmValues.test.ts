@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { buildHelmValues } from "./helmValues.js";
+import { getActiveWizardSteps } from "./wizardSteps.js";
 import {
   validateHelmValues,
   validateValuesInvariants,
@@ -11,6 +14,7 @@ import {
   DeploymentConfigSchema,
   RemoteWriteConfig,
   validateRemoteWriteConfig,
+  getReleaseName,
 } from "../types/index.js";
 
 const matrix = buildConfigMatrix();
@@ -91,10 +95,214 @@ test("generated values are valid both with and without TLS", () => {
   }
 });
 
+test("ClickStack is the default in-cluster observability backend", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const values = buildHelmValues(config) as Record<string, any>;
+
+  assert.equal(values.global.clickstack.enabled, true);
+  assert.equal(typeof values.global.supabase.anonKey, "string");
+  assert.equal(typeof values.global.supabase.serviceKey, "string");
+  assert.ok(values.global.supabase.anonKey.length > 0);
+  assert.ok(values.global.supabase.serviceKey.length > 0);
+  assert.equal(values.decisionLogs, undefined);
+  assert.deepEqual(values.global.clickstack.clickhouse.decisionLogs, {
+    retentionDays: 30,
+    objectStorageFallback: { enabled: true },
+  });
+  assert.equal(values.clickstack.enabled, true);
+  assert.equal(values.clickhouse.persistence.enabled, true);
+  assert.equal(values.clickhouse.persistence.size, "100Gi");
+  assert.deepEqual(values.clickhouse.resources, {
+    requests: { cpu: "1000m", memory: "4Gi" },
+    limits: { cpu: "4", memory: "12Gi" },
+  });
+  assert.deepEqual(values.clickhouse.otelQueryLimits, {
+    maxMemoryUsage: 4294967296,
+    maxThreads: 8,
+    maxExecutionTime: 120,
+  });
+  assert.equal(values.clickstack.clickhouse.retentionDays, 7);
+  assert.equal(values.clickstack.clickhouse.ttl, "");
+  assert.deepEqual(values.clickstack.clickhouse.decisionLogs, {
+    retentionDays: 30,
+    sink: {
+      batchMaxBytes: 10485760,
+      batchTimeoutSecs: 5,
+      bufferMaxSize: 1073741824,
+    },
+    objectStorageFallback: { enabled: true },
+  });
+  assert.deepEqual(values.clickstack.hyperdx.resources, {
+    requests: { cpu: "250m", memory: "512Mi" },
+    limits: { cpu: "1000m", memory: "1Gi" },
+  });
+  assert.deepEqual(values.clickstack.collector.gateway.resources, {
+    requests: { cpu: "250m", memory: "512Mi" },
+    limits: { cpu: "2000m", memory: "1Gi" },
+  });
+  assert.deepEqual(values.clickstack.collector.agent.resources, {
+    requests: { cpu: "100m", memory: "256Mi" },
+    limits: { cpu: "500m", memory: "512Mi" },
+  });
+  assert.deepEqual(values.clickstack.ferretdb.persistence, {
+    enabled: true,
+    size: "10Gi",
+    storageClassName: "gp3",
+  });
+  assert.deepEqual(values.clickstack.ferretdb.resources.ferretdb, {
+    requests: { cpu: "100m", memory: "256Mi" },
+    limits: { cpu: "500m", memory: "512Mi" },
+  });
+  assert.deepEqual(values.clickstack.ferretdb.resources.postgres, {
+    requests: { cpu: "250m", memory: "512Mi" },
+    limits: { cpu: "1000m", memory: "1Gi" },
+  });
+  assert.equal(values["vector-agent"].enabled, false);
+  assert.equal(
+    values.vector.customConfig.sinks.decision_logs_clickhouse.table,
+    "decision_logs_recent",
+  );
+  assert.equal(
+    values.vector.customConfig.sinks.decision_logs_clickhouse.auth.password,
+    "${CLICKHOUSE_PASSWORD}",
+  );
+  assert.deepEqual(
+    values.vector.customConfig.sinks.decision_logs_clickhouse.buffer,
+    {
+      type: "disk",
+      max_size: 1073741824,
+      when_full: "drop_newest",
+    },
+  );
+  assert.ok(
+    values.vector.env.some((entry: { name?: string }) => entry.name === "CLICKHOUSE_PASSWORD"),
+    "expected Vector to receive the ClickHouse password for the acceleration sink",
+  );
+  assert.equal(values.global.tracing, undefined);
+  assert.equal(values.traefik.tracing.otlp.enabled, true);
+
+  const remoteWrite =
+    values["kube-prometheus-stack"].prometheus.prometheusSpec.remoteWrite;
+  assert.deepEqual(remoteWrite, []);
+});
+
+test("built-in observability settings flow into generated Helm values", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  config.features.observability = {
+    clickstack: {
+      enabled: true,
+      telemetryRetentionDays: 14,
+      decisionLogRetentionDays: 45,
+      clickHouseStorageSize: "250Gi",
+    },
+  };
+
+  const values = buildHelmValues(config) as Record<string, any>;
+
+  assert.equal(values.clickstack.clickhouse.retentionDays, 14);
+  assert.equal(values.clickstack.clickhouse.decisionLogs.retentionDays, 45);
+  assert.equal(
+    values.global.clickstack.clickhouse.decisionLogs.retentionDays,
+    45,
+  );
+  assert.equal(values.clickhouse.persistence.size, "250Gi");
+  assert.equal(values.clickstack.ferretdb.persistence.size, "10Gi");
+});
+
+test("wizard orders storage before observability and skips feature config for built-in observability alone", () => {
+  const state = {
+    databaseType: "self-hosted",
+    aiEnabled: false,
+    ssoEnabled: false,
+    clickStackEnabled: true,
+    metricsExportEnabled: false,
+    tracingEnabled: false,
+    appLogsEnabled: false,
+    loggingSink: "console",
+    customEmailsEnabled: false,
+  };
+
+  const steps = getActiveWizardSteps(state, "create");
+
+  assert.deepEqual(
+    steps.slice(
+      steps.indexOf("external-services"),
+      steps.indexOf("version"),
+    ),
+    ["external-services", "storage", "observability", "features"],
+  );
+  assert.equal(steps.includes("feature-config"), false);
+});
+
+test("wizard includes feature config for BYO observability signals", () => {
+  const steps = getActiveWizardSteps(
+    {
+      databaseType: "self-hosted",
+      aiEnabled: false,
+      ssoEnabled: false,
+      clickStackEnabled: false,
+      metricsExportEnabled: true,
+      tracingEnabled: true,
+      appLogsEnabled: false,
+      loggingSink: "console",
+      customEmailsEnabled: false,
+    },
+    "create",
+  );
+
+  assert.ok(steps.indexOf("storage") < steps.indexOf("observability"));
+  assert.ok(steps.indexOf("observability") < steps.indexOf("features"));
+  assert.ok(steps.includes("feature-config"));
+});
+
+test("ClickHouse decision-log bootstrap keeps recent and archive behind compatibility view", (t) => {
+  const candidates = [
+    process.env.RULEBRICKS_CHART_DIR,
+    path.resolve(process.cwd(), "../private/helm"),
+    path.resolve(process.cwd(), "../helm"),
+  ].filter(Boolean) as string[];
+  const chartDir = candidates.find((candidate) =>
+    fs.existsSync(path.join(candidate, "templates", "_defaults.tpl")),
+  );
+
+  if (!chartDir) {
+    t.skip("Helm chart templates not available in this checkout");
+    return;
+  }
+
+  const defaults = fs.readFileSync(
+    path.join(chartDir, "templates", "_defaults.tpl"),
+    "utf8",
+  );
+
+  assert.match(defaults, /rulebricks\.decision_logs_archive/);
+  assert.match(defaults, /rulebricks\.decision_logs_recent/);
+  assert.match(defaults, /CREATE OR REPLACE VIEW rulebricks\.decision_logs AS SELECT/);
+  assert.match(defaults, /timestamp >= now\(\) - INTERVAL {{ \$retentionDays }} DAY/);
+  assert.match(defaults, /timestamp < now\(\) - INTERVAL {{ \$retentionDays }} DAY/);
+  assert.match(defaults, /TTL toDateTime\(timestamp\) \+ INTERVAL {{ \$retentionDays }} DAY DELETE/);
+});
+
+test("BYO observability opt-out disables ClickStack and keeps export paths", () => {
+  const config = cloneFixture("aws-tracing-elastic");
+  const values = buildHelmValues(config) as Record<string, any>;
+
+  assert.equal(values.global.clickstack.enabled, false);
+  assert.equal(values.global.clickstack.clickhouse, undefined);
+  assert.equal(values.clickstack.enabled, false);
+  assert.equal(values.clickhouse.persistence.enabled, false);
+  assert.equal(values.vector.customConfig.sinks.decision_logs_clickhouse, undefined);
+  assert.equal(values.global.tracing.destination, "elastic");
+  assert.deepEqual(
+    values["kube-prometheus-stack"].prometheus.prometheusSpec.remoteWrite,
+    [],
+  );
+});
+
 interface KafkaTopicValues {
   name: string;
   partitions: number;
-  replicationFactor: number;
+  replicas: number;
   config: Record<string, string>;
 }
 
@@ -116,11 +324,8 @@ interface GeneratedKafkaValues {
   };
   kafka: {
     enabled: boolean;
-    overrideConfiguration: Record<string, string>;
-    provisioning: {
-      enabled: boolean;
-      topics?: KafkaTopicValues[];
-    };
+    config: Record<string, string>;
+    topics?: KafkaTopicValues[];
   };
 }
 
@@ -142,9 +347,9 @@ test("in-cluster provisioning uses baseline partitions and the (empty) prefix", 
 
     // In-cluster installs run UNPREFIXED; provisioning names must match.
     assert.equal(values.rulebricks.app.logging.kafkaTopicPrefix, "");
-    assert.equal(values.kafka.provisioning.enabled, true);
+    assert.equal(values.kafka.enabled, true);
 
-    const topics = values.kafka.provisioning.topics!;
+    const topics = values.kafka.topics!;
     const byName = Object.fromEntries(topics.map((t) => [t.name, t]));
     assert.deepEqual(
       Object.keys(byName).sort(),
@@ -159,8 +364,8 @@ test("in-cluster provisioning uses baseline partitions and the (empty) prefix", 
     assert.equal(byName["logs"].partitions, 24);
 
     // Single in-cluster broker: every topic stays RF 1.
-    assert.equal(byName["solution"].replicationFactor, 1);
-    assert.equal(byName["logs"].replicationFactor, 1);
+    assert.equal(byName["solution"].replicas, 1);
+    assert.equal(byName["logs"].replicas, 1);
 
     // MAX_WORKERS source must match the solution topic exactly.
     assert.equal(values.rulebricks.hps.workers.solutionPartitions, 128);
@@ -175,7 +380,7 @@ test("in-cluster provisioning uses baseline partitions and the (empty) prefix", 
 
     // num.partitions is decoupled from worker count (auto-create default only).
     assert.equal(
-      values.kafka.overrideConfiguration["num.partitions"],
+      values.kafka.config["num.partitions"],
       "12",
       `${fixtureName}: num.partitions must no longer track max workers`,
     );
@@ -187,9 +392,9 @@ test("external Kafka disables provisioning (topics are customer-managed)", () =>
     const values = tierFixture(name);
     assert.equal(values.kafka.enabled, false, `${name}: kafka subchart off`);
     assert.equal(
-      values.kafka.provisioning.enabled,
-      false,
-      `${name}: provisioning must be disabled for external Kafka`,
+      values.kafka.topics?.length ?? 0,
+      0,
+      `${name}: no managed topics for external Kafka`,
     );
   }
 });
@@ -213,7 +418,7 @@ test("invariant checker catches partition/worker and prefix drift", () => {
   // Prefixed provisioning names while the app runs unprefixed (the original
   // CLI/chart drift this guard exists for).
   const wrongPrefix = JSON.parse(JSON.stringify(base));
-  for (const topic of wrongPrefix.kafka.provisioning.topics) {
+  for (const topic of wrongPrefix.kafka.topics) {
     topic.name = `com.rulebricks.${topic.name}`;
   }
   assert.ok(
@@ -224,7 +429,7 @@ test("invariant checker catches partition/worker and prefix drift", () => {
 
   // Solution topic partitions diverging from solutionPartitions (MAX_WORKERS).
   const divergedPartitions = JSON.parse(JSON.stringify(base));
-  divergedPartitions.kafka.provisioning.topics[0].partitions += 8;
+  divergedPartitions.kafka.topics[0].partitions += 8;
   assert.ok(
     validateValuesInvariants(divergedPartitions).some((e) =>
       e.includes("MAX_WORKERS"),
@@ -515,12 +720,74 @@ test("no vector sink uses the unsupported parquet codec or extension", () => {
   }
 });
 
-test("tracing disabled by default: no global.tracing, traefik.tracing empty", () => {
+test("Grafana dashboard references only classified metric families", (t) => {
+  const candidates = [
+    process.env.RULEBRICKS_CHART_DIR,
+    path.resolve(process.cwd(), "../private/helm"),
+    path.resolve(process.cwd(), "../helm"),
+  ].filter(Boolean) as string[];
+  const chartDir = candidates.find((candidate) =>
+    fs.existsSync(path.join(candidate, "dashboards", "rulebricks-overview.json")),
+  );
+
+  if (!chartDir) {
+    t.skip("Helm chart dashboard not available in this checkout");
+    return;
+  }
+
+  const dashboardPath = path.join(
+    chartDir,
+    "dashboards",
+    "rulebricks-overview.json",
+  );
+  const dashboard = JSON.parse(fs.readFileSync(dashboardPath, "utf8")) as {
+    panels?: Array<{
+      targets?: Array<{ expr?: string }>;
+    }>;
+  };
+
+  const expressions = (dashboard.panels ?? [])
+    .flatMap((panel) => panel.targets ?? [])
+    .map((target) => target.expr)
+    .filter((expr): expr is string => Boolean(expr));
+
+  const knownFamilies = [
+    // Rulebricks-owned metrics from app/HPS/worker code.
+    /^rulebricks_app_(http_requests_total|http_request_duration_seconds_(bucket|sum|count)|http_rejections_total|frontend_errors_total|redis_operations_total|redis_operation_duration_seconds_(bucket|sum|count)|nodejs_.*)$/,
+    /^rulebricks_hps_(http_requests_total|http_request_duration_seconds_(bucket|sum|count)|rejections_total|kafka_request_duration_seconds_(bucket|sum|count)|kafka_errors_total|bulk_items_total|decision_log_failures_total|decision_logs_total|decision_log_bytes_total|chunks_per_request_(bucket|sum|count)|chunk_failures_total|chunk_processing_ms_(bucket|sum|count)|chunk_cost_ms_per_item|chunk_cost_ms_per_byte|cache_items|cache_max_entries|cache_requests_total|redis_cache_operations_total|redis_cache_operation_duration_seconds_(bucket|sum|count)|nodejs_.*)$/,
+    /^rulebricks_worker_(messages_total|processing_duration_seconds_(bucket|sum|count)|redis_cache_operations_total|redis_cache_operation_duration_seconds_(bucket|sum|count)|nodejs_.*)$/,
+    // kube-prometheus-stack / cAdvisor / node-exporter families.
+    /^container_(cpu_usage_seconds_total|memory_working_set_bytes|oom_events_total|cpu_cfs_throttled_periods_total|cpu_cfs_periods_total)$/,
+    /^kube_(pod_container_status_restarts_total|pod_status_phase|pod_status_unschedulable|deployment_.*|horizontalpodautoscaler_.*)$/,
+    /^kubelet_volume_stats_(used_bytes|capacity_bytes)$/,
+    /^node_(cpu_seconds_total|memory_MemAvailable_bytes|memory_MemTotal_bytes|filesystem_avail_bytes|filesystem_size_bytes)$/,
+    // Optional exporter families.
+    /^redis_(commands_processed_total|connected_clients|memory_used_bytes|memory_max_bytes|keyspace_hits_total|keyspace_misses_total|evicted_keys_total)$/,
+    /^kafka_(consumergroup_lag|log_log_size|network_requestchannel_requestqueuesize_value|network_requestchannel_responsequeuesize_value|server_brokertopicmetrics_total_failedproducerequestspersec_count|server_brokertopicmetrics_total_failedfetchrequestspersec_count)$/,
+    /^traefik_(service_requests_total|service_request_duration_seconds_bucket)$/,
+    /^ClickHouse(Metrics_Query|Metrics_MemoryTracking|ProfileEvents_Query)$/,
+  ];
+
+  const metricToken = /\b(?:rulebricks_[a-zA-Z0-9_:]+|container_[a-zA-Z0-9_:]+|kube_[a-zA-Z0-9_:]+|kubelet_[a-zA-Z0-9_:]+|node_[a-zA-Z0-9_:]+|redis_[a-zA-Z0-9_:]+|kafka_[a-zA-Z0-9_:]+|traefik_[a-zA-Z0-9_:]+|ClickHouse[a-zA-Z0-9_:]+)\b/g;
+  const metrics = new Set<string>();
+  for (const expr of expressions) {
+    for (const match of expr.matchAll(metricToken)) {
+      metrics.add(match[0]);
+    }
+  }
+
+  const unknown = [...metrics].filter(
+    (metric) => !knownFamilies.some((family) => family.test(metric)),
+  );
+  assert.deepEqual(unknown.sort(), []);
+});
+
+test("BYO tracing is disabled by default while ClickStack owns OTLP routing", () => {
   const values = buildHelmValues(
     matrix.find((c) => c.name === "aws-self-hosted-minimal")!.config,
   ) as Record<string, any>;
   assert.equal(values.global.tracing, undefined);
-  assert.deepEqual(values.traefik.tracing, {});
+  assert.equal(values.traefik.tracing.otlp.enabled, true);
   assert.equal(values["vector-agent"].enabled, false);
 });
 
@@ -643,7 +910,7 @@ test("operational DaemonSet tolerations include ARM and burst pools explicitly",
 
   for (const [label, tolerations] of [
     ["imagePrepull", values.rulebricks.hps.imagePrepull.tolerations],
-    ["vector-agent", values["vector-agent"].tolerations],
+    ["clickstack-collector-agent", values.clickstack.collector.agent.tolerations],
   ] as Array<[string, Toleration[]]>) {
     assertNoBareExistsToleration(label, tolerations);
     for (const expected of expectedTolerations) {
@@ -670,4 +937,325 @@ test("invariant rejects enabled tracing without an Elastic endpoint", () => {
     errors.some((e) => e.includes("tracing.elastic.endpoint")),
     `expected a tracing endpoint invariant error, got: ${errors.join("; ")}`,
   );
+});
+
+test("external Postgres maps to supabase.externalDatabase with bootstrap creds", () => {
+  const config = cloneFixture("aws-external-postgres");
+  const values = buildHelmValues(config) as Record<string, any>;
+  const sb = values.supabase;
+  assert.equal(sb.enabled, true);
+  // Bundled DB off; externalDatabase is the single switch.
+  assert.equal(sb.db.enabled, false);
+  assert.equal(sb.externalDatabase.enabled, true);
+  assert.equal(
+    sb.externalDatabase.host,
+    "db.cluster-xxxx.us-east-1.rds.amazonaws.com",
+  );
+  assert.equal(sb.externalDatabase.port, 5432);
+  // Bootstrap (one-time init) carries inline master creds + app role.
+  assert.equal(sb.externalDatabase.bootstrap.enabled, true);
+  assert.equal(sb.externalDatabase.bootstrap.masterUsername, "postgres");
+  assert.equal(
+    sb.externalDatabase.bootstrap.masterPassword,
+    "master-pw-change-me",
+  );
+  // The shared service-role password the chart hands every service.
+  assert.ok(typeof sb.secret.db.password === "string");
+  assert.equal(sb.secret.db.database, "postgres");
+});
+
+test("embedded Postgres still deploys the bundled database", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const values = buildHelmValues(config) as Record<string, any>;
+  assert.equal(values.supabase.db.enabled, true);
+  assert.equal(values.supabase.externalDatabase, undefined);
+});
+
+import { buildDeploymentSecrets } from "./secrets.js";
+import { signSupabaseJwt, deriveRealtimeSecrets } from "./helmValues.js";
+
+test("k8s secret mode: secretRefs set, zero plaintext secrets in values", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const dbPw = config.database.supabaseDbPassword!;
+  const jwt = config.database.supabaseJwtSecret!;
+  const dashPw = config.database.supabaseDashboardPass!;
+  const license = config.licenseKey;
+  const values = buildHelmValues(config, { secretMode: "k8s" }) as Record<
+    string,
+    any
+  >;
+  // secretRef seams point at the CLI-created Secrets
+  assert.equal(values.global.secrets.secretRef, `${config.name}-app-secrets`);
+  assert.equal(
+    values.supabase.secret.db.secretRef,
+    `${config.name}-supabase-db`,
+  );
+  assert.equal(
+    values.supabase.secret.jwt.secretRef,
+    `${config.name}-supabase-jwt`,
+  );
+  assert.equal(
+    values.supabase.secret.dashboard.secretRef,
+    `${config.name}-supabase-dashboard`,
+  );
+  assert.equal(
+    values.supabase.secret.realtime.secretRef,
+    `${config.name}-supabase-realtime`,
+  );
+  // inline plaintext stripped
+  assert.equal(values.global.supabase.jwtSecret, undefined);
+  assert.equal(values.global.licenseKey, undefined);
+  // no secret value appears anywhere in the generated values
+  const dump = JSON.stringify(values);
+  for (const [label, secret] of [
+    ["db password", dbPw],
+    ["jwt secret", jwt],
+    ["dashboard password", dashPw],
+    ["license key", license],
+  ] as const) {
+    assert.ok(!dump.includes(secret), `${label} leaked into k8s-mode values`);
+  }
+});
+
+test("inline secret mode keeps secrets in values (dev path)", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const values = buildHelmValues(config, { secretMode: "inline" }) as Record<
+    string,
+    any
+  >;
+  assert.equal(
+    values.supabase.secret.db.password,
+    config.database.supabaseDbPassword,
+  );
+  // realtime keys derived (no shipped default) and present inline
+  assert.ok(values.supabase.secret.realtime.secretKeyBase);
+  assert.equal(values.supabase.secret.realtime.dbEncKey.length, 16);
+  // no consolidated app secretRef in inline mode
+  assert.equal(values.global.secrets?.secretRef ?? "", "");
+});
+
+test("buildDeploymentSecrets: app + supabase secrets with JWT-derived keys", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const jwt = config.database.supabaseJwtSecret!;
+  const byName = Object.fromEntries(
+    buildDeploymentSecrets(config).map((s) => [s.name, s.stringData]),
+  );
+  const base = config.name;
+  assert.equal(byName[`${base}-app-secrets`].LICENSE_KEY, config.licenseKey);
+  assert.equal(
+    byName[`${base}-supabase-db`].password,
+    config.database.supabaseDbPassword,
+  );
+  assert.equal(
+    byName[`${base}-supabase-jwt`].anonKey,
+    signSupabaseJwt("anon", jwt),
+  );
+  assert.equal(
+    byName[`${base}-supabase-jwt`].serviceKey,
+    signSupabaseJwt("service_role", jwt),
+  );
+  // realtime keys match the chart-side derivation + 16-byte DB_ENC_KEY
+  const rt = deriveRealtimeSecrets(jwt);
+  assert.equal(
+    byName[`${base}-supabase-realtime`].SECRET_KEY_BASE,
+    rt.secretKeyBase,
+  );
+  assert.equal(byName[`${base}-supabase-realtime`].DB_ENC_KEY.length, 16);
+});
+
+// ===========================================================================
+// Image registry / digest pinning (docker.io/rulebricks/* + global.imageRegistry)
+// ===========================================================================
+
+test("default image refs use the rulebricks/* split shape with no legacy hosts", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const values = buildHelmValues(config) as Record<string, any>;
+
+  // app/hps use the split { registry, repository } shape (host never in repo).
+  assert.deepEqual(values.rulebricks.app.image.registry, "docker.io");
+  assert.equal(values.rulebricks.app.image.repository, "rulebricks/app");
+  assert.equal(values.rulebricks.hps.image.registry, "docker.io");
+  assert.equal(values.rulebricks.hps.image.repository, "rulebricks/hps");
+
+  // clickstack images keep the split shape too.
+  assert.equal(values.clickstack.hyperdx.image.registry, "docker.io");
+  assert.equal(values.clickstack.hyperdx.image.repository, "rulebricks/hyperdx");
+  assert.equal(values.clickstack.collector.image.registry, "docker.io");
+  assert.equal(
+    values.clickstack.collector.image.repository,
+    "rulebricks/clickstack-otel-collector",
+  );
+  assert.equal(values.clickstack.ferretdb.image.registry, "docker.io");
+  assert.equal(
+    values.clickstack.ferretdb.image.repository,
+    "rulebricks/ferretdb",
+  );
+  assert.equal(
+    values.clickstack.ferretdb.postgresImage.repository,
+    "rulebricks/postgres-documentdb",
+  );
+
+  // Whole-output guard: no dhi.io and no index.docker.io anywhere.
+  const dump = JSON.stringify(values);
+  assert.ok(!dump.includes("dhi.io"), "dhi.io must not appear in output");
+  assert.ok(
+    !dump.includes("index.docker.io"),
+    "index.docker.io must not appear in output",
+  );
+  assert.ok(!dump.includes("grepplabs"), "grepplabs must not appear in output");
+});
+
+test("global.imageDigests is always present and threaded into global", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const values = buildHelmValues(config) as Record<string, any>;
+  assert.ok(
+    values.global.imageDigests !== undefined,
+    "global.imageDigests must be present",
+  );
+  assert.equal(typeof values.global.imageDigests, "object");
+  // No imageRegistry override emitted when config.imageRegistry is unset.
+  assert.equal(values.global.imageRegistry, undefined);
+});
+
+test("imageRegistry override rewrites every image host to the custom registry", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  config.imageRegistry = "myacr.azurecr.io";
+  // Enable external-dns so its image block is emitted and can be asserted.
+  config.dns = { provider: "route53", autoManage: true };
+  const values = buildHelmValues(config) as Record<string, any>;
+  const reg = "myacr.azurecr.io";
+
+  // global passthrough
+  assert.equal(values.global.imageRegistry, reg);
+
+  // app / hps / clickstack / supabase split shapes
+  assert.equal(values.rulebricks.app.image.registry, reg);
+  assert.equal(values.rulebricks.app.image.repository, "rulebricks/app");
+  assert.equal(values.rulebricks.hps.image.registry, reg);
+  assert.equal(values.clickstack.hyperdx.image.registry, reg);
+  assert.equal(values.clickstack.collector.image.registry, reg);
+  assert.equal(values.clickstack.ferretdb.image.registry, reg);
+  assert.equal(values.clickstack.ferretdb.postgresImage.registry, reg);
+  assert.equal(values.supabase.db.image.registry, reg);
+
+  // kube-prometheus-stack sub-images
+  const kps = values["kube-prometheus-stack"];
+  assert.equal(kps.prometheus.prometheusSpec.image.registry, reg);
+  assert.equal(
+    kps.prometheus.prometheusSpec.image.repository,
+    "rulebricks/prometheus",
+  );
+  assert.equal(kps.alertmanager.alertmanagerSpec.image.registry, reg);
+  assert.equal(
+    kps.alertmanager.alertmanagerSpec.image.repository,
+    "rulebricks/alertmanager",
+  );
+  assert.equal(kps.prometheusOperator.image.registry, reg);
+  assert.equal(
+    kps.prometheusOperator.image.repository,
+    "rulebricks/prometheus-operator",
+  );
+  assert.equal(
+    kps.prometheusOperator.prometheusConfigReloader.image.registry,
+    reg,
+  );
+  assert.equal(
+    kps.prometheusOperator.prometheusConfigReloader.image.repository,
+    "rulebricks/prometheus-config-reloader",
+  );
+  assert.equal(
+    kps.prometheusOperator.admissionWebhooks.patch.image.registry,
+    reg,
+  );
+  assert.equal(
+    kps.prometheusOperator.admissionWebhooks.patch.image.repository,
+    "rulebricks/kube-webhook-certgen",
+  );
+  assert.equal(kps.grafana.image.registry, reg);
+  assert.equal(kps.grafana.image.repository, "rulebricks/grafana");
+  assert.equal(kps.grafana.sidecar.image.registry, reg);
+  assert.equal(kps.grafana.sidecar.image.repository, "rulebricks/k8s-sidecar");
+  assert.equal(kps["kube-state-metrics"].image.registry, reg);
+  assert.equal(
+    kps["kube-state-metrics"].image.repository,
+    "rulebricks/kube-state-metrics",
+  );
+  assert.equal(kps["prometheus-node-exporter"].image.registry, reg);
+  assert.equal(
+    kps["prometheus-node-exporter"].image.repository,
+    "rulebricks/node-exporter",
+  );
+
+  // cert-manager (registry + repository per component)
+  const cm = values["cert-manager"];
+  assert.equal(cm.image.registry, reg);
+  assert.equal(cm.image.repository, "rulebricks/cert-manager-controller");
+  assert.equal(cm.webhook.image.registry, reg);
+  assert.equal(cm.webhook.image.repository, "rulebricks/cert-manager-webhook");
+  assert.equal(cm.cainjector.image.registry, reg);
+  assert.equal(
+    cm.cainjector.image.repository,
+    "rulebricks/cert-manager-cainjector",
+  );
+  assert.equal(cm.startupapicheck.image.registry, reg);
+  assert.equal(
+    cm.startupapicheck.image.repository,
+    "rulebricks/cert-manager-startupapicheck",
+  );
+  assert.equal(cm.acmesolver.image.registry, reg);
+  assert.equal(
+    cm.acmesolver.image.repository,
+    "rulebricks/cert-manager-acmesolver",
+  );
+
+  // traefik (registry + repository)
+  assert.equal(values.traefik.image.registry, reg);
+  assert.equal(values.traefik.image.repository, "rulebricks/traefik");
+
+  // keda (global.image.registry host + per-comp repositories)
+  assert.equal(values.keda.global.image.registry, reg);
+  assert.equal(values.keda.image.keda.registry, reg);
+  assert.equal(values.keda.image.keda.repository, "rulebricks/keda");
+  assert.equal(
+    values.keda.image.metricsApiServer.repository,
+    "rulebricks/keda-metrics-apiserver",
+  );
+  assert.equal(
+    values.keda.image.webhooks.repository,
+    "rulebricks/keda-admission-webhooks",
+  );
+
+  // vector + external-dns (full-path repository incl. host)
+  assert.equal(values.vector.image.repository, `${reg}/rulebricks/vector`);
+  assert.equal(
+    values["external-dns"].image.repository,
+    `${reg}/rulebricks/external-dns`,
+  );
+
+  // Every image host is the custom registry: no docker.io image refs remain.
+  const dump = JSON.stringify(values);
+  assert.ok(!dump.includes("dhi.io"));
+  assert.ok(!dump.includes("index.docker.io"));
+  assert.ok(
+    !dump.includes('"docker.io/rulebricks'),
+    "no full docker.io/rulebricks path refs remain when overridden",
+  );
+});
+
+test("per-chart imagePullSecrets are still emitted for private rulebricks/*", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const values = buildHelmValues(config) as Record<string, any>;
+  const expected = [{ name: `${getReleaseName(config.name)}-regcred` }];
+
+  assert.deepEqual(values.global.imagePullSecrets, expected);
+  assert.deepEqual(
+    values["strimzi-kafka-operator"].image.imagePullSecrets,
+    expected,
+  );
+  assert.deepEqual(values.traefik.deployment.imagePullSecrets, expected);
+  assert.deepEqual(values.keda.imagePullSecrets, expected);
+  assert.deepEqual(values.vector.image.pullSecrets, expected);
+
+  // global has no legacy dhi.io reference.
+  assert.ok(!JSON.stringify(values.global).includes("dhi.io"));
 });

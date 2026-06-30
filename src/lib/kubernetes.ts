@@ -1370,52 +1370,69 @@ export async function deletePVCs(
   }
 }
 
+// Custom resources whose operator sets a finalizer that only that operator can
+// clear. When the operator is uninstalled with the release, those finalizers are
+// never removed and wedge the namespace (and the CRD) in Terminating forever.
+// Observed blockers: KEDA ScaledObjects, cert-manager ACME Challenges/Orders, and
+// Strimzi Kafka resources.
+const FINALIZER_BLOCKING_CR_TYPES = [
+  "scaledobjects.keda.sh",
+  "scaledjobs.keda.sh",
+  "challenges.acme.cert-manager.io",
+  "orders.acme.cert-manager.io",
+  "certificaterequests.cert-manager.io",
+  "certificates.cert-manager.io",
+  "kafkatopics.kafka.strimzi.io",
+  "kafkausers.kafka.strimzi.io",
+  "kafkanodepools.kafka.strimzi.io",
+  "kafkas.kafka.strimzi.io",
+];
+
 /**
- * Removes finalizers from KEDA ScaledObjects to prevent namespace deletion from hanging.
- * KEDA finalizers wait for the KEDA controller to clean up, but if KEDA is being deleted
- * with the namespace, this causes a deadlock.
+ * Strips finalizers from the custom resources whose controllers are torn down
+ * with the release, so the namespace can finalize instead of hanging in
+ * Terminating (NamespaceFinalizersRemaining). Best-effort per type — a missing
+ * CRD (feature disabled) or already-gone object is fine.
  */
-export async function removeKedaFinalizers(namespace: string): Promise<void> {
-  try {
-    // Get all ScaledObjects in the namespace
-    const { stdout } = await execa(
-      "kubectl",
-      [
-        "get",
-        "scaledobjects.keda.sh",
-        "-n",
-        namespace,
-        "-o",
-        "jsonpath={.items[*].metadata.name}",
-      ],
-      { timeout: 15000 },
-    );
-
-    const scaledObjects = stdout.split(" ").filter(Boolean);
-
-    // Patch each ScaledObject to remove finalizers
-    for (const name of scaledObjects) {
-      try {
-        await execa(
-          "kubectl",
-          [
-            "patch",
-            "scaledobject",
-            name,
-            "-n",
-            namespace,
-            "-p",
-            '{"metadata":{"finalizers":null}}',
-            "--type=merge",
-          ],
-          { timeout: 15000 },
-        );
-      } catch {
-        // Ignore errors - object might already be deleted
+export async function removeBlockingFinalizers(namespace: string): Promise<void> {
+  for (const resourceType of FINALIZER_BLOCKING_CR_TYPES) {
+    try {
+      const { stdout } = await execa(
+        "kubectl",
+        [
+          "get",
+          resourceType,
+          "-n",
+          namespace,
+          "-o",
+          "jsonpath={.items[*].metadata.name}",
+        ],
+        { timeout: 15000 },
+      );
+      const names = stdout.split(" ").filter(Boolean);
+      for (const name of names) {
+        try {
+          await execa(
+            "kubectl",
+            [
+              "patch",
+              resourceType,
+              name,
+              "-n",
+              namespace,
+              "-p",
+              '{"metadata":{"finalizers":null}}',
+              "--type=merge",
+            ],
+            { timeout: 15000 },
+          );
+        } catch {
+          // Ignore — object might already be deleted.
+        }
       }
+    } catch {
+      // Ignore — this CRD might not be installed (feature disabled).
     }
-  } catch {
-    // Ignore errors - KEDA CRDs might not be installed
   }
 }
 
@@ -1490,6 +1507,171 @@ export async function namespaceExists(namespace: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Removes this release's leftovers in the kube-system namespace. The
+ * kube-prometheus-stack prometheus-operator creates a "<release>-...-kubelet"
+ * Service there at runtime (via its --kubelet-service flag); it lives OUTSIDE the
+ * release namespace and is operator-created (not chart-templated), so
+ * `helm uninstall` never deletes it and one accumulates per deployment. Also
+ * sweeps any helm-labeled kube-system objects (exporter Services/Endpoints) a
+ * partial uninstall may have stranded. Scoped strictly to this release; matched
+ * by the release-name prefix so a coexisting deployment's kubelet Service is
+ * never touched. Best-effort — never blocks teardown.
+ */
+export async function cleanupKubeSystemLeftovers(
+  releaseName: string,
+): Promise<void> {
+  // 1) helm-labeled kube-system objects from this release (only present if a
+  //    prior uninstall didn't finish): the kube-prometheus-stack exporter
+  //    Services (coredns/kube-controller-manager/etc.) and their Endpoints.
+  try {
+    await execa(
+      "kubectl",
+      [
+        "delete",
+        "service,endpoints",
+        "-n",
+        "kube-system",
+        "-l",
+        `release=${releaseName}`,
+        "--ignore-not-found",
+      ],
+      { timeout: 30000 },
+    );
+  } catch {
+    // best-effort
+  }
+  // 2) the operator-created kubelet Service, matched by name (it carries no
+  //    reliable per-release label). Name is "<release>-<kube-prometheus>-kubelet"
+  //    (the middle segment is truncated by the helm fullname template). The
+  //    trailing "-" in the prefix guard prevents matching a sibling whose name
+  //    is a prefix of this one (e.g. az-p0 vs az-p055).
+  try {
+    const { stdout } = await execa(
+      "kubectl",
+      [
+        "get",
+        "service",
+        "-n",
+        "kube-system",
+        "-o",
+        "jsonpath={.items[*].metadata.name}",
+      ],
+      { timeout: 15000 },
+    );
+    const targets = stdout
+      .split(" ")
+      .filter(Boolean)
+      .filter((n) => n.startsWith(`${releaseName}-`) && n.endsWith("-kubelet"));
+    for (const name of targets) {
+      try {
+        await execa(
+          "kubectl",
+          ["delete", "service", name, "-n", "kube-system", "--ignore-not-found"],
+          { timeout: 30000 },
+        );
+      } catch {
+        // best-effort
+      }
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * True only when no OTHER Rulebricks deployment remains on the cluster (besides
+ * `releaseName`). Gates deletion of cluster-SHARED resources (CRDs) so tearing
+ * down one deployment never cascade-deletes another deployment's custom
+ * resources. Deployments are named `rulebricks-<name>` for both the namespace and
+ * the helm release (see getNamespace/getReleaseName), so the "rulebricks-" prefix
+ * is a sound cluster-side signal. Fails CLOSED (returns false) if the cluster
+ * can't be enumerated — we never purge shared resources on uncertainty.
+ */
+export async function isLastRulebricksDeployment(
+  releaseName: string,
+): Promise<boolean> {
+  try {
+    // Authoritative: helm releases cluster-wide.
+    const { stdout } = await execa("helm", ["list", "-A", "-o", "json"], {
+      timeout: 30000,
+    });
+    const releases = JSON.parse(stdout) as Array<{ name?: string }>;
+    const otherReleases = releases.filter(
+      (r) =>
+        typeof r.name === "string" &&
+        r.name.startsWith("rulebricks-") &&
+        r.name !== releaseName,
+    );
+    if (otherReleases.length > 0) return false;
+
+    // Cross-check namespaces in case a release secret is gone but the ns lingers
+    // (namespace name == release name by convention).
+    const { stdout: nsOut } = await execa(
+      "kubectl",
+      ["get", "namespaces", "-o", "jsonpath={.items[*].metadata.name}"],
+      { timeout: 15000 },
+    );
+    const otherNamespaces = nsOut
+      .split(" ")
+      .filter(Boolean)
+      .filter((n) => n.startsWith("rulebricks-") && n !== releaseName);
+    return otherNamespaces.length === 0;
+  } catch {
+    return false; // fail closed — do not purge shared resources on uncertainty
+  }
+}
+
+// CRD API-group suffixes the chart ships in crds/ dirs (cert-manager + keda from
+// the parent crds/, strimzi + kube-prometheus-stack from subchart crds/). helm
+// NEVER deletes crds/ contents on uninstall, so they leak and accumulate.
+const RULEBRICKS_CRD_GROUP_SUFFIXES = [
+  ".strimzi.io", // kafka.strimzi.io, core.strimzi.io
+  "cert-manager.io", // cert-manager.io, acme.cert-manager.io
+  ".keda.sh", // keda.sh, eventing.keda.sh
+  "monitoring.coreos.com", // kube-prometheus-stack
+];
+
+/**
+ * Deletes the cluster-scoped CRDs the chart installs from crds/ dirs (cert-
+ * manager, keda, strimzi, kube-prometheus-stack). CLUSTER-SHARED: deleting a CRD
+ * cascade-deletes every custom resource of that kind across ALL namespaces, so
+ * callers MUST gate this on isLastRulebricksDeployment() (or an explicit
+ * operator --purge) — never call it while another Rulebricks deployment exists.
+ * Best-effort, non-blocking; returns the CRD names removed.
+ */
+export async function deleteRulebricksCRDs(): Promise<string[]> {
+  const deleted: string[] = [];
+  try {
+    const { stdout } = await execa(
+      "kubectl",
+      ["get", "crd", "-o", "jsonpath={.items[*].metadata.name}"],
+      { timeout: 30000 },
+    );
+    const targets = stdout
+      .split(" ")
+      .filter(Boolean)
+      .filter((name) =>
+        RULEBRICKS_CRD_GROUP_SUFFIXES.some((suffix) => name.endsWith(suffix)),
+      );
+    for (const name of targets) {
+      try {
+        await execa(
+          "kubectl",
+          ["delete", "crd", name, "--ignore-not-found", "--wait=false"],
+          { timeout: 30000 },
+        );
+        deleted.push(name);
+      } catch {
+        // best-effort: a single CRD failure should not block teardown
+      }
+    }
+  } catch {
+    // best-effort: if CRDs can't be listed, don't block the destroy
+  }
+  return deleted;
 }
 
 /**

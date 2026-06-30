@@ -159,10 +159,10 @@ export function FeatureConfigStep({
   // always installed and needs no configuration.
   const needsAI = state.aiEnabled && !state.openaiApiKey;
   const needsSSO = state.ssoEnabled;
-  const needsMonitoring = state.metricsExportEnabled;
+  const needsMonitoring = !state.clickStackEnabled && state.metricsExportEnabled;
   const needsLogging = state.loggingSink !== "console";
-  const needsTracing = state.tracingEnabled;
-  const needsAppLogs = state.appLogsEnabled;
+  const needsTracing = !state.clickStackEnabled && state.tracingEnabled;
+  const needsAppLogs = !state.clickStackEnabled && state.appLogsEnabled;
   const needsCustomEmails = state.customEmailsEnabled;
 
   // Configuration order:

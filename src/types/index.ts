@@ -867,6 +867,37 @@ export const DeploymentConfigSchema = z.object({
             .optional(),
         })
         .optional(),
+      // Managed external PostgreSQL (AWS RDS/Aurora or Azure Flexible Server).
+      // Self-hosted Supabase runs against this instead of the bundled in-cluster
+      // database. Maps to the chart's supabase.externalDatabase.* values.
+      postgres: z
+        .object({
+          mode: z.enum(["embedded", "external"]),
+          external: z
+            .object({
+              // Managed provider this database lives on (gates CLI prompts; only
+              // aws/azure are supported for the structured/managed flow).
+              provider: z.enum(["aws", "azure"]).optional(),
+              host: z.string().optional(),
+              port: z.number().int().min(1).max(65535).optional(),
+              database: z.string().optional(),
+              // One-time master/owner credentials the chart's pre-install hook
+              // uses to initialize the database (roles, schemas, auth helpers,
+              // publication). Inline creds are materialized into a hook-scoped
+              // secret; secretRef points at a pre-created secret instead.
+              bootstrap: z
+                .object({
+                  enabled: z.boolean().optional(),
+                  masterUsername: z.string().optional(),
+                  masterPassword: z.string().optional(),
+                  secretRef: z.string().optional(),
+                  appRole: z.string().optional(),
+                })
+                .optional(),
+            })
+            .optional(),
+        })
+        .optional(),
     })
     .optional(),
 
@@ -900,6 +931,16 @@ export const DeploymentConfigSchema = z.object({
       remoteWriteUrl: z.string().url().optional(),
       remoteWrite: RemoteWriteConfigSchema.optional(),
     }),
+    observability: z
+      .object({
+        clickstack: z.object({
+          enabled: z.boolean(),
+          telemetryRetentionDays: z.number().int().min(1).optional(),
+          decisionLogRetentionDays: z.number().int().min(1).optional(),
+          clickHouseStorageSize: z.string().optional(),
+        }),
+      })
+      .optional(),
     // Distributed tracing (optional; self-hosted only). Absent on existing
     // config files, which keeps them valid.
     tracing: TracingConfigSchema.optional(),
@@ -954,6 +995,13 @@ export const DeploymentConfigSchema = z.object({
 
   // Product version used for app, HPS, and HPS worker images
   version: z.string().min(1),
+
+  // Optional single registry-host override for every image. Empty/unset means
+  // the chart default docker.io/rulebricks/*. When set (e.g. "myacr.azurecr.io"
+  // for an air-gapped mirror), the CLI rewrites the registry host into
+  // global.imageRegistry and into each Tier-2 chart's native image keys, keeping
+  // the rulebricks/<name> path. See the helm chart's global.imageRegistry knob.
+  imageRegistry: z.string().optional(),
 
   // Legacy chart version (deprecated, kept for backwards compatibility)
   chartVersion: z.string().optional(),

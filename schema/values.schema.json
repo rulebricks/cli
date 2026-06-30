@@ -28,6 +28,33 @@
           "pattern": "^$|^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$",
           "description": "Rulebricks product version used by app, HPS, HPS worker, and migration images"
         },
+        "imageRegistry": {
+          "type": "string",
+          "description": "Single registry host override applied to every image (empty = docker.io/rulebricks/*). Replaces the host, keeps the rulebricks/<name> path."
+        },
+        "imageDigests": {
+          "type": "object",
+          "description": "Generated name->sha256 digest map (scripts/images/render-digests.sh); when a name is present the image helper pins @sha256 instead of :tag",
+          "additionalProperties": { "type": "string" }
+        },
+        "images": {
+          "type": "object",
+          "description": "Shared leaf images (init/hook/test utilities) as {registry, repository, tag} dicts rendered through the image helper",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "registry": { "type": "string" },
+              "repository": { "type": "string" },
+              "tag": { "type": "string" },
+              "digest": { "type": "string" }
+            }
+          }
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "description": "Pull secrets for the private rulebricks/* images (and any custom registry the imageRegistry override points at)",
+          "items": { "type": "object" }
+        },
         "tlsEnabled": {
           "type": "boolean",
           "description": "Enable TLS/HTTPS"
@@ -176,6 +203,30 @@
             }
           }
         },
+        "clickstack": {
+          "type": "object",
+          "description": "Cross-chart switch for the built-in ClickStack observability backend.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "clickhouse": {
+              "type": "object",
+              "properties": {
+                "decisionLogs": {
+                  "type": "object",
+                  "properties": {
+                    "retentionDays": { "type": "integer", "minimum": 1, "default": 30 },
+                    "objectStorageFallback": {
+                      "type": "object",
+                      "properties": {
+                        "enabled": { "type": "boolean", "default": true }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         "tracing": {
           "type": "object",
           "description": "Distributed tracing: in-cluster OpenTelemetry Collector that forwards OTLP spans from the app/HPS/workers/Traefik to a pluggable backend (Elastic APM, a generic OTLP/HTTP endpoint, or Azure Monitor).",
@@ -186,7 +237,16 @@
             "collector": {
               "type": "object",
               "properties": {
-                "image": { "type": "string" },
+                "image": {
+                  "type": "object",
+                  "description": "RB image dict for the OpenTelemetry collector, rendered through the rulebricks.image helper (registry host overridable by global.imageRegistry).",
+                  "properties": {
+                    "registry": { "type": "string" },
+                    "repository": { "type": "string" },
+                    "tag": { "type": "string" },
+                    "digest": { "type": "string" }
+                  }
+                },
                 "replicas": { "type": "integer", "minimum": 1, "default": 1 },
                 "memoryLimitMiB": { "type": "integer", "minimum": 64, "default": 400 },
                 "resources": { "$ref": "#/definitions/resources" },
@@ -880,6 +940,17 @@
                 "password": { "type": "string" },
                 "database": { "type": "string" }
               }
+            },
+            "bootstrap": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "masterUsername": { "type": "string" },
+                "masterPassword": { "type": "string" },
+                "secretRef": { "type": "string" },
+                "appRole": { "type": "string" },
+                "image": { "type": "string" }
+              }
             }
           }
         },
@@ -985,6 +1056,103 @@
             "maxExecutionTime": { "type": "integer", "minimum": 1, "default": 120 },
             "maxRowsToRead": { "type": "integer", "minimum": 1, "default": 50000000 },
             "readOverflowMode": { "type": "string", "enum": ["throw", "break"], "default": "break" }
+          }
+        },
+        "otelQueryLimits": {
+          "type": "object",
+          "properties": {
+            "maxMemoryUsage": { "type": "integer", "minimum": 1, "default": 4294967296 },
+            "maxThreads": { "type": "integer", "minimum": 1, "default": 8 },
+            "maxExecutionTime": { "type": "integer", "minimum": 1, "default": 120 }
+          }
+        },
+        "otelDatabase": { "type": "string", "default": "otel" }
+      }
+    },
+    "clickstack": {
+      "type": "object",
+      "description": "Built-in ClickStack observability backend (HyperDX UI, OTel collectors, FerretDB). The dependency condition uses global.clickstack.enabled so sibling subcharts can share the same switch.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "clickhouse": {
+          "type": "object",
+          "properties": {
+            "database": { "type": "string" },
+            "username": { "type": "string" },
+            "existingSecret": { "type": "string" },
+            "existingSecretKey": { "type": "string" },
+            "retentionDays": { "type": "integer", "minimum": 1, "default": 7 },
+            "ttl": { "type": "string", "description": "Advanced ClickHouse exporter TTL override. Leave empty to derive from retentionDays." },
+            "decisionLogs": {
+              "type": "object",
+              "description": "Decision-log acceleration settings used automatically when ClickStack is enabled. Object storage remains the durable archive.",
+              "properties": {
+                "retentionDays": { "type": "integer", "minimum": 1, "default": 30 },
+                "sink": {
+                  "type": "object",
+                  "properties": {
+                    "batchMaxBytes": { "type": "integer", "minimum": 1, "default": 10485760 },
+                    "batchTimeoutSecs": { "type": "integer", "minimum": 1, "default": 5 },
+                    "bufferMaxSize": { "type": "integer", "minimum": 1, "default": 1073741824 }
+                  }
+                },
+                "objectStorageFallback": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean", "default": true }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "hyperdx": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "resources": { "$ref": "#/definitions/resources" },
+            "ingress": { "type": "object" }
+          }
+        },
+        "collector": {
+          "type": "object",
+          "properties": {
+            "memoryLimitMiB": { "type": "integer", "minimum": 64 },
+            "gateway": {
+              "type": "object",
+              "properties": {
+                "replicas": { "type": "integer", "minimum": 1 },
+                "resources": { "$ref": "#/definitions/resources" }
+              }
+            },
+            "agent": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "resources": { "$ref": "#/definitions/resources" }
+              }
+            }
+          }
+        },
+        "ferretdb": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "persistence": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "size": { "type": "string" },
+                "storageClassName": { "type": "string" }
+              }
+            },
+            "resources": {
+              "type": "object",
+              "properties": {
+                "ferretdb": { "$ref": "#/definitions/resources" },
+                "postgres": { "$ref": "#/definitions/resources" }
+              }
+            }
           }
         }
       }
@@ -1350,14 +1518,6 @@
                   "user": { "type": "string", "minLength": 1 },
                   "pass": { "type": "string", "minLength": 1 }
                 }
-              },
-              "supabase": {
-                "type": "object",
-                "required": ["anonKey", "serviceKey"],
-                "properties": {
-                  "anonKey": { "type": "string", "minLength": 1 },
-                  "serviceKey": { "type": "string", "minLength": 1 }
-                }
               }
             }
           }
@@ -1424,8 +1584,7 @@
                   "jwtSecret": { "type": "string", "minLength": 1 }
                 }
               }
-            },
-            "required": ["supabase"]
+            }
           }
         }
       }

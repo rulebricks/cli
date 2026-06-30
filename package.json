@@ -1,6 +1,6 @@
 {
   "name": "@rulebricks/cli",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "CLI for deploying and managing private Rulebricks instances",
   "type": "module",
   "bin": {
@@ -13,7 +13,7 @@
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
     "sync-schema": "node scripts/sync-schema.mjs",
-    "test": "npm run build && node --test dist/lib/versions.test.js dist/lib/helmValues.test.js",
+    "test": "npm run build && node --test dist/lib/versions.test.js dist/lib/helmValues.test.js dist/lib/dns.test.js",
     "verify-chart": "npm run build && node scripts/verify-against-chart.mjs"
   },
   "keywords": [

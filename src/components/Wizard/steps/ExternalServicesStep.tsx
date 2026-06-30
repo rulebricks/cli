@@ -30,9 +30,16 @@ type Field =
   | "kafka-custom-mechanism"
   | "kafka-custom-ssl"
   | "kafka-custom-username"
-  | "kafka-custom-password";
+  | "kafka-custom-password"
+  | "pg-input-mode"
+  | "pg-conn"
+  | "pg-host"
+  | "pg-port"
+  | "pg-database"
+  | "pg-master-username"
+  | "pg-master-password";
 
-type Externalize = "redis" | "kafka" | "both";
+type ServiceKey = "redis" | "kafka" | "postgres";
 
 const MODE_OPTIONS = [
   {
@@ -43,12 +50,6 @@ const MODE_OPTIONS = [
     label: "Connect to existing providers",
     value: "existing",
   },
-];
-
-const WHICH_OPTIONS: { label: string; value: Externalize }[] = [
-  { label: "Redis only", value: "redis" },
-  { label: "Kafka only", value: "kafka" },
-  { label: "Both Redis and Kafka", value: "both" },
 ];
 
 const yesNo = (yesLabel: string, noLabel: string) => [
@@ -82,12 +83,47 @@ const CUSTOM_MECH: { id: string; label: string }[] = [
   { id: "scram-sha-512", label: "SCRAM-SHA-512" },
 ];
 
+const PG_INPUT_MODES = [
+  {
+    label: "Enter connection details (AWS RDS / Azure)",
+    value: "structured",
+  },
+  { label: "Paste a Postgres connection string", value: "connstring" },
+];
+
 function defaultPresetForCloud(provider: string | null): KafkaPreset {
   if (provider === "aws") return "aws-msk-iam";
   if (provider === "azure") return "azure-event-hubs";
   if (provider === "gcp") return "gcp-managed";
   return "custom";
 }
+
+// Parse a postgres:// URL into parts. Returns null when it isn't parseable.
+function parsePostgresUrl(raw: string): {
+  host?: string;
+  port?: number;
+  database?: string;
+  user?: string;
+  password?: string;
+} | null {
+  const trimmed = raw.trim();
+  if (!/^postgres(ql)?:\/\//i.test(trimmed)) return null;
+  try {
+    const u = new URL(trimmed.replace(/^postgres(ql)?:\/\//i, "http://"));
+    const db = u.pathname.replace(/^\//, "");
+    return {
+      host: u.hostname || undefined,
+      port: u.port ? Number.parseInt(u.port, 10) : undefined,
+      database: db || undefined,
+      user: u.username ? decodeURIComponent(u.username) : undefined,
+      password: u.password ? decodeURIComponent(u.password) : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+const SERVICE_ORDER: ServiceKey[] = ["redis", "kafka", "postgres"];
 
 export function ExternalServicesStep({
   onComplete,
@@ -99,17 +135,36 @@ export function ExternalServicesStep({
   const [field, setField] = useState<Field>("mode");
   const [error, setError] = useState<string | null>(null);
 
-  // Which services to externalize when connecting to existing providers.
-  const initialExternalize: Externalize =
-    state.redisMode === "external" && state.kafkaMode !== "external"
-      ? "redis"
-      : state.kafkaMode === "external" && state.redisMode !== "external"
-        ? "kafka"
-        : "both";
-  const [externalize, setExternalize] =
-    useState<Externalize>(initialExternalize);
-  const redisChosen = externalize === "redis" || externalize === "both";
-  const kafkaChosen = externalize === "kafka" || externalize === "both";
+  // Postgres external is only offered for self-hosted Supabase (there is no
+  // in-cluster database to externalize with Supabase Cloud) on providers we
+  // support a managed flow for.
+  const pgAvailable =
+    (state.provider === "aws" || state.provider === "azure") &&
+    state.databaseType === "self-hosted";
+
+  // Multi-select of which services to connect to existing/managed providers.
+  const [selected, setSelected] = useState<Record<ServiceKey, boolean>>({
+    redis: state.redisMode === "external",
+    kafka: state.kafkaMode === "external",
+    postgres: pgAvailable && state.postgresMode === "external",
+  });
+  const whichItems: { key: ServiceKey; label: string; hint: string }[] = [
+    { key: "redis", label: "Redis", hint: "Managed cache (ElastiCache, etc.)" },
+    { key: "kafka", label: "Kafka", hint: "Managed event streaming (MSK, Event Hubs, etc.)" },
+    ...(pgAvailable
+      ? [
+          {
+            key: "postgres" as ServiceKey,
+            label: "Postgres database",
+            hint:
+              state.provider === "aws"
+                ? "Managed RDS / Aurora for the Supabase database."
+                : "Azure Flexible Server for the Supabase database.",
+          },
+        ]
+      : []),
+  ];
+  const [whichIndex, setWhichIndex] = useState(0);
 
   // Redis
   const [redisHost, setRedisHost] = useState(state.redisHost);
@@ -148,13 +203,53 @@ export function ExternalServicesStep({
   const [customUsername, setCustomUsername] = useState(state.kafkaSaslUsername);
   const [customPassword, setCustomPassword] = useState(state.kafkaSaslPassword);
 
-  const persist = (
-    redisExternal: boolean,
-    kafkaExternal: boolean,
-    overrides: { customSsl?: boolean } = {},
-  ) => {
+  // Postgres
+  const [pgModeIndex, setPgModeIndex] = useState(0);
+  const [pgConn, setPgConn] = useState("");
+  const [pgHost, setPgHost] = useState(state.postgresHost);
+  const [pgPort, setPgPort] = useState(String(state.postgresPort || 5432));
+  const [pgDatabase, setPgDatabase] = useState(
+    state.postgresDatabase || "postgres",
+  );
+  const [pgMasterUser, setPgMasterUser] = useState(
+    state.postgresMasterUsername || "postgres",
+  );
+  const [pgMasterPass, setPgMasterPass] = useState(state.postgresMasterPassword);
+
+  // ----- chaining across the chosen services -----
+  const chosen = (): ServiceKey[] => SERVICE_ORDER.filter((k) => selected[k]);
+  const firstFieldOf = (k: ServiceKey): Field =>
+    k === "redis"
+      ? "redis-host"
+      : k === "kafka"
+        ? "kafka-preset"
+        : "pg-input-mode";
+  const goToFirstService = () => {
+    const order = chosen();
+    if (order.length === 0) {
+      persist({});
+      return;
+    }
+    setField(firstFieldOf(order[0]));
+  };
+  const isLastChosen = (k: ServiceKey) => {
+    const order = chosen();
+    return order[order.length - 1] === k;
+  };
+  const goAfter = (k: ServiceKey, overrides: { customSsl?: boolean } = {}) => {
+    const order = chosen();
+    const next = order[order.indexOf(k) + 1];
+    if (next) setField(firstFieldOf(next));
+    else persist(overrides);
+  };
+
+  const persist = (overrides: { customSsl?: boolean }) => {
+    const redisExternal = selected.redis;
+    const kafkaExternal = selected.kafka;
+    const postgresExternal = selected.postgres;
     const redisMode = redisExternal ? "external" : "embedded";
     const kafkaMode = kafkaExternal ? "external" : "embedded";
+    const postgresMode = postgresExternal ? "external" : "embedded";
 
     // Derive Kafka SASL/SSL/identity from the chosen preset.
     let kafkaSsl = false;
@@ -209,15 +304,19 @@ export function ExternalServicesStep({
         kafkaSaslPassword: password,
         kafkaIdentityAwsRoleArn: awsRoleArn,
         kafkaIdentityGcpServiceAccountEmail: "",
+        postgresMode,
+        postgresHost: postgresExternal ? pgHost.trim() : "",
+        postgresPort: Number.parseInt(pgPort, 10) || 5432,
+        postgresDatabase: postgresExternal
+          ? pgDatabase.trim() || "postgres"
+          : "postgres",
+        postgresMasterUsername: postgresExternal
+          ? pgMasterUser.trim() || "postgres"
+          : "postgres",
+        postgresMasterPassword: postgresExternal ? pgMasterPass : "",
       },
     });
     onComplete();
-  };
-
-  // After Redis details, go on to Kafka if chosen, otherwise finish.
-  const continueAfterRedis = () => {
-    if (kafkaChosen) setField("kafka-preset");
-    else persist(true, false);
   };
 
   const firstKafkaAuthField = (): Field => {
@@ -242,11 +341,11 @@ export function ExternalServicesStep({
         setField("redis-tls");
         return;
       case "redis-password":
-        if (redisPassword) continueAfterRedis();
+        if (redisPassword) goAfter("redis");
         else setField("redis-existing-secret");
         return;
       case "redis-existing-secret":
-        continueAfterRedis();
+        goAfter("redis");
         return;
       case "kafka-brokers":
         if (!brokers.trim()) {
@@ -266,28 +365,80 @@ export function ExternalServicesStep({
         setField("kafka-aws-role");
         return;
       case "kafka-aws-role":
-        persist(redisChosen, true);
+        goAfter("kafka");
         return;
       case "kafka-azure-connection":
         if (!azureConnection.trim()) {
           setError("Event Hubs connection string is required.");
           return;
         }
-        persist(redisChosen, true);
+        goAfter("kafka");
         return;
       case "kafka-gcp-username":
         setField("kafka-gcp-password");
         return;
       case "kafka-gcp-password":
-        persist(redisChosen, true);
+        goAfter("kafka");
         return;
       case "kafka-custom-username":
         setField("kafka-custom-password");
         return;
       case "kafka-custom-password":
-        persist(redisChosen, true);
+        goAfter("kafka");
+        return;
+      case "pg-conn": {
+        const parsed = parsePostgresUrl(pgConn);
+        if (!parsed || !parsed.host) {
+          setError(
+            "Enter a valid connection string, e.g. postgresql://user:pass@host:5432/postgres",
+          );
+          return;
+        }
+        setPgHost(parsed.host);
+        if (parsed.port) setPgPort(String(parsed.port));
+        if (parsed.database) setPgDatabase(parsed.database);
+        if (parsed.user) setPgMasterUser(parsed.user);
+        if (parsed.password) setPgMasterPass(parsed.password);
+        // Confirm/edit the parsed values via the structured fields.
+        setField("pg-host");
+        return;
+      }
+      case "pg-host":
+        if (!pgHost.trim()) {
+          setError("Database host/endpoint is required.");
+          return;
+        }
+        setField("pg-port");
+        return;
+      case "pg-port":
+        setField("pg-database");
+        return;
+      case "pg-database":
+        setField("pg-master-username");
+        return;
+      case "pg-master-username":
+        setField("pg-master-password");
+        return;
+      case "pg-master-password":
+        if (!pgMasterPass) {
+          setError(
+            "Master password is required to initialize the database (roles, schemas).",
+          );
+          return;
+        }
+        goAfter("postgres");
         return;
     }
+  };
+
+  const prevServiceField = (k: ServiceKey): Field => {
+    const order = chosen();
+    const prev = order[order.indexOf(k) - 1];
+    if (!prev) return "which";
+    // Land on the last field of the previous service.
+    if (prev === "redis") return "redis-password";
+    if (prev === "kafka") return "kafka-preset";
+    return "pg-master-password";
   };
 
   const handleBack = () => {
@@ -300,7 +451,7 @@ export function ExternalServicesStep({
         setField("mode");
         return;
       case "redis-host":
-        setField("which");
+        setField(prevServiceField("redis"));
         return;
       case "redis-port":
         setField("redis-host");
@@ -315,7 +466,7 @@ export function ExternalServicesStep({
         setField("redis-password");
         return;
       case "kafka-preset":
-        setField(redisChosen ? "redis-password" : "which");
+        setField(prevServiceField("kafka"));
         return;
       case "kafka-brokers":
         setField("kafka-preset");
@@ -344,10 +495,60 @@ export function ExternalServicesStep({
       case "kafka-custom-password":
         setField("kafka-custom-username");
         return;
+      case "pg-input-mode":
+        setField(prevServiceField("postgres"));
+        return;
+      case "pg-conn":
+        setField("pg-input-mode");
+        return;
+      case "pg-host":
+        setField("pg-input-mode");
+        return;
+      case "pg-port":
+        setField("pg-host");
+        return;
+      case "pg-database":
+        setField("pg-port");
+        return;
+      case "pg-master-username":
+        setField("pg-database");
+        return;
+      case "pg-master-password":
+        setField("pg-master-username");
+        return;
     }
   };
 
-  useInput((_input, key) => {
+  useInput((input, key) => {
+    if (field === "which") {
+      if (key.escape) {
+        setField("mode");
+        return;
+      }
+      if (key.upArrow) {
+        setWhichIndex((i) => Math.max(0, i - 1));
+      } else if (key.downArrow) {
+        setWhichIndex((i) => Math.min(whichItems.length, i + 1));
+      } else if (input === " " || input === "x") {
+        if (whichIndex < whichItems.length) {
+          const k = whichItems[whichIndex].key;
+          setSelected((s) => ({ ...s, [k]: !s[k] }));
+        }
+      } else if (key.return) {
+        if (whichIndex === whichItems.length) {
+          if (!selected.redis && !selected.kafka && !selected.postgres) {
+            setError("Select at least one service to externalize.");
+            return;
+          }
+          setError(null);
+          goToFirstService();
+        } else {
+          const k = whichItems[whichIndex].key;
+          setSelected((s) => ({ ...s, [k]: !s[k] }));
+        }
+      }
+      return;
+    }
     if (key.escape) {
       handleBack();
     }
@@ -356,16 +557,19 @@ export function ExternalServicesStep({
   // ===== Select handlers =====
   const handleModeSelect = (item: { value: string }) => {
     if (item.value === "dedicated") {
-      persist(false, false);
+      setSelected({ redis: false, kafka: false, postgres: false });
+      dispatch({
+        type: "SET_EXTERNAL_SERVICES",
+        config: {
+          redisMode: "embedded",
+          kafkaMode: "embedded",
+          postgresMode: "embedded",
+        },
+      });
+      onComplete();
       return;
     }
     setField("which");
-  };
-
-  const handleWhichSelect = (item: { value: string }) => {
-    const choice = item.value as Externalize;
-    setExternalize(choice);
-    setField(choice === "kafka" ? "kafka-preset" : "redis-host");
   };
 
   const handleRedisTlsSelect = (item: { value: string }) => {
@@ -388,13 +592,20 @@ export function ExternalServicesStep({
   const handleCustomSslSelect = (item: { value: string }) => {
     const ssl = item.value === "yes";
     setCustomSsl(ssl);
-    // A SASL mechanism needs credentials next; SSL-only finishes here. Pass the
-    // freshly chosen ssl value to avoid reading stale state.
+    // A SASL mechanism needs credentials next; SSL-only ends Kafka here. Pass the
+    // freshly chosen ssl value to avoid reading stale state when persisting.
     if (customMechanism) {
       setField("kafka-custom-username");
     } else {
-      persist(redisChosen, true, { customSsl: ssl });
+      goAfter("kafka", { customSsl: ssl });
     }
+  };
+
+  const handlePgModeSelect = (item: { value: string }) => {
+    setPgModeIndex(
+      Math.max(0, PG_INPUT_MODES.findIndex((m) => m.value === item.value)),
+    );
+    setField(item.value === "connstring" ? "pg-conn" : "pg-host");
   };
 
   // ===== Renderers =====
@@ -458,34 +669,87 @@ export function ExternalServicesStep({
   return (
     <BorderBox title="External Services">
       <Box flexDirection="column" marginY={1}>
-        <Text>Redis and Kafka for Rulebricks.</Text>
+        <Text>Managed services for Rulebricks.</Text>
         <Text color="gray" dimColor>
-          By default these run in-cluster, managed by the chart. You can instead
-          connect to managed providers you already operate.
+          By default Redis and Kafka run in-cluster, managed by the chart. You can
+          instead connect to managed providers you already operate
+          {pgAvailable ? ", including your Postgres database." : "."}
         </Text>
       </Box>
 
       {field === "mode" &&
         renderSelect(
-          "How should Redis and Kafka be provided?",
+          "How should these services be provided?",
           MODE_OPTIONS,
           handleModeSelect,
-          state.redisMode === "external" || state.kafkaMode === "external"
+          state.redisMode === "external" ||
+            state.kafkaMode === "external" ||
+            state.postgresMode === "external"
             ? 1
             : 0,
         )}
 
-      {field === "which" &&
-        renderSelect(
-          "Which services do you want to connect to existing providers?",
-          WHICH_OPTIONS.map((o) => ({ label: o.label, value: o.value })),
-          handleWhichSelect,
-          Math.max(
-            0,
-            WHICH_OPTIONS.findIndex((o) => o.value === externalize),
-          ),
-          "* Managed Kafka may require admin setup (topics/partitions) outside the CLI. The CLI just collects connection info to get the chart running.",
-        )}
+      {field === "which" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Which services do you want to connect to managed providers?</Text>
+          <Text color="gray" dimColor>
+            Space/Enter to toggle • ↑/↓ to navigate
+          </Text>
+          <Box marginTop={1} flexDirection="column">
+            {whichItems.map((item, index) => {
+              const isCursor = index === whichIndex;
+              const isOn = selected[item.key];
+              return (
+                <Box key={item.key} flexDirection="column">
+                  <Box>
+                    <Text color={isCursor ? colors.accent : undefined}>
+                      {isCursor ? "❯ " : "  "}
+                    </Text>
+                    <Text color={isOn ? colors.success : colors.muted}>
+                      {isOn ? "[✓]" : "[ ]"}
+                    </Text>
+                    <Text color={isCursor ? colors.accent : undefined}>
+                      {" "}
+                      {item.label}
+                    </Text>
+                  </Box>
+                  {isCursor && (
+                    <Box marginLeft={6}>
+                      <Text color="gray" dimColor>
+                        {item.hint}
+                      </Text>
+                    </Box>
+                  )}
+                </Box>
+              );
+            })}
+            <Box marginTop={1}>
+              <Text
+                color={
+                  whichIndex === whichItems.length ? colors.accent : colors.muted
+                }
+              >
+                {whichIndex === whichItems.length ? "❯ " : "  "}
+              </Text>
+              <Text
+                color={
+                  whichIndex === whichItems.length
+                    ? colors.success
+                    : colors.muted
+                }
+                bold={whichIndex === whichItems.length}
+              >
+                [Continue →]
+              </Text>
+            </Box>
+          </Box>
+          {!pgAvailable && (
+            <Text color="gray" dimColor>
+              Externalizing the Postgres database is available on AWS and Azure.
+            </Text>
+          )}
+        </Box>
+      )}
 
       {field === "redis-host" &&
         renderText("Redis host", redisHost, setRedisHost, {
@@ -604,6 +868,65 @@ export function ExternalServicesStep({
 
       {field === "kafka-custom-password" &&
         renderText("Kafka SASL password", customPassword, setCustomPassword, {
+          mask: true,
+        })}
+
+      {field === "pg-input-mode" &&
+        renderSelect(
+          state.provider === "aws"
+            ? "How do you want to provide your RDS / Aurora connection?"
+            : "How do you want to provide your Flexible Server connection?",
+          PG_INPUT_MODES,
+          handlePgModeSelect,
+          pgModeIndex,
+          "Self-hosted Supabase will run against this database. A one-time bootstrap initializes roles/schemas; provide the master/admin credentials.",
+        )}
+
+      {field === "pg-conn" &&
+        renderText("Postgres connection string", pgConn, setPgConn, {
+          hint: "Parsed into the fields below (you can review them next). Use the admin/master user.",
+          placeholder: "postgresql://postgres:pass@host:5432/postgres",
+          mask: true,
+        })}
+
+      {field === "pg-host" &&
+        renderText(
+          state.provider === "aws" ? "RDS endpoint" : "Server host",
+          pgHost,
+          setPgHost,
+          {
+            hint:
+              state.provider === "aws"
+                ? "Writer/instance endpoint. Use the direct endpoint (not a proxy/pooler)."
+                : "Fully-qualified server name.",
+            placeholder:
+              state.provider === "aws"
+                ? "db.cluster-xxxx.us-east-1.rds.amazonaws.com"
+                : "myserver.postgres.database.azure.com",
+          },
+        )}
+
+      {field === "pg-port" &&
+        renderText("Database port", pgPort, setPgPort, { placeholder: "5432" })}
+
+      {field === "pg-database" &&
+        renderText("Database name", pgDatabase, setPgDatabase, {
+          hint: "The database Supabase services connect to.",
+          placeholder: "postgres",
+        })}
+
+      {field === "pg-master-username" &&
+        renderText("Master/admin username", pgMasterUser, setPgMasterUser, {
+          hint:
+            state.provider === "aws"
+              ? "RDS master username (recommended: postgres). Used once to create roles/schemas."
+              : "Azure server admin username. Used once to create roles/schemas.",
+          placeholder: "postgres",
+        })}
+
+      {field === "pg-master-password" &&
+        renderText("Master/admin password", pgMasterPass, setPgMasterPass, {
+          hint: "Used by the one-time bootstrap to initialize the database. Stored in a short-lived secret.",
           mask: true,
         })}
 

@@ -35,6 +35,7 @@ import {
   generateHelmValues,
   updateHelmValuesForTLS,
 } from "../lib/helmValues.js";
+import { ensureNamespace, applyDeploymentSecrets } from "../lib/secrets.js";
 import { CommandDeniedError } from "../lib/commandApproval.js";
 import {
   DeploymentConfig,
@@ -50,6 +51,10 @@ interface DeployCommandProps {
   version?: string;
   regenerateValues?: boolean;
   assumeDnsConfigured?: boolean;
+  // When true, secrets are written inline into values.yaml (dev/direct-chart).
+  // Default (false) = k8s mode: the CLI creates Kubernetes Secrets and the
+  // generated values carry only secretRef references.
+  inlineSecrets?: boolean;
 }
 
 function getConfigProductVersion(config: DeploymentConfig): string {
@@ -84,7 +89,9 @@ function DeployCommandInner({
   version,
   regenerateValues = true,
   assumeDnsConfigured = false,
+  inlineSecrets = false,
 }: DeployCommandProps) {
+  const secretMode: "k8s" | "inline" = inlineSecrets ? "inline" : "k8s";
   const { exit } = useApp();
   const { colors } = useTheme();
   const [step, setStep] = useState<DeployStep>("loading");
@@ -227,7 +234,7 @@ function DeployCommandInner({
 
       if (externalDnsEnabled) {
         if (regenerateValues) {
-          await generateHelmValues(cfg, { tlsEnabled: true });
+          await generateHelmValues(cfg, { tlsEnabled: true, secretMode });
         }
         await ensureGeneratedValuesValid();
         await installOrUpgradeChart(name, {
@@ -254,9 +261,15 @@ function DeployCommandInner({
       }
 
       if (regenerateValues) {
-        await generateHelmValues(cfg, { tlsEnabled: false });
+        await generateHelmValues(cfg, { tlsEnabled: false, secretMode });
       }
       await ensureGeneratedValuesValid();
+      // k8s secret mode: create the namespace + Secrets (idempotent upsert) so
+      // they exist before Helm runs and the chart's secretRef seams resolve.
+      if (secretMode === "k8s") {
+        await ensureNamespace(namespace);
+        await applyDeploymentSecrets(cfg, namespace);
+      }
       await installOrUpgradeChart(name, {
         releaseName,
         namespace,
@@ -462,6 +475,9 @@ function DeployCommandInner({
       <DNSWaitScreen
         domain={config.domain}
         selfHostedSupabase={config.database.type === "self-hosted"}
+        builtInObservability={
+          config.features.observability?.clickstack?.enabled ?? true
+        }
         namespace={getNamespace(config.name)}
         onComplete={handleDnsComplete}
         onSkip={handleDnsSkip}

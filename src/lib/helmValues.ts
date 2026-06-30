@@ -11,12 +11,43 @@ import { assertValidHelmValues } from "./validateValues.js";
 import {
   SUPABASE_POSTGRES_IMAGE_REPOSITORY,
   SUPABASE_POSTGRES_IMAGE_TAG,
+  DEFAULT_IMAGE_REGISTRY,
+  IMAGE_REPOSITORIES,
+  IMAGE_DIGESTS,
+  KAFKA_PROXY_IMAGE,
 } from "./versions.js";
+import { createHmac } from "crypto";
 import fs from "fs/promises";
 import YAML from "yaml";
 
 interface GenerateOptions {
   tlsEnabled?: boolean;
+  // "k8s" (default at deploy time): sensitive values are created as Kubernetes
+  // Secrets by the CLI and the generated values carry only *.secretRef — no
+  // plaintext. "inline": secrets are written into the values (dev / direct-chart).
+  secretMode?: "k8s" | "inline";
+}
+
+// Names of the Kubernetes Secrets the CLI creates in k8s secret mode. Shared by
+// the value generator (which sets the secretRef fields) and src/lib/secrets.ts
+// (which creates the Secrets) so they always agree.
+export function deploymentSecretNames(config: DeploymentConfig): {
+  app: string;
+  db: string;
+  jwt: string;
+  dashboard: string;
+  realtime: string;
+  smtp: string;
+} {
+  const base = config.name;
+  return {
+    app: `${base}-app-secrets`,
+    db: `${base}-supabase-db`,
+    jwt: `${base}-supabase-jwt`,
+    dashboard: `${base}-supabase-dashboard`,
+    realtime: `${base}-supabase-realtime`,
+    smtp: `${base}-supabase-smtp`,
+  };
 }
 
 // Baseline Kafka topic partitioning. These are NOT user-tunable sizing knobs
@@ -53,6 +84,15 @@ const SEMVER_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 // headroom under the chart's 1 GiB Vector limit while still producing large,
 // scan-efficient files for ClickHouse.
 const DECISION_LOG_BATCH = { max_bytes: 67108864, timeout_secs: 300 } as const;
+const DECISION_LOG_ACCELERATION_RETENTION_DAYS = 30;
+const DECISION_LOG_ACCELERATION_SINK = {
+  batchMaxBytes: 10485760,
+  batchTimeoutSecs: 5,
+  bufferMaxSize: 1073741824,
+} as const;
+
+const SUPABASE_JWT_ISSUED_AT = 1641769200;
+const SUPABASE_JWT_EXPIRES_AT = 4102444800;
 
 // VRL that normalizes the Kafka decision-log envelope into the ClickHouse column
 // types. Inlined as a real multi-line string (not a chart `{{ include }}`) so
@@ -168,6 +208,32 @@ function generateVectorSinks(
         };
         break;
     }
+  }
+
+  if (isClickStackEnabled(config)) {
+    sinks.decision_logs_clickhouse = {
+      type: "clickhouse",
+      inputs: ["normalize_logs"],
+      endpoint: `http://${getReleaseName(config.name)}-clickhouse:8123`,
+      database: "rulebricks",
+      table: "decision_logs_recent",
+      format: "json_each_row",
+      skip_unknown_fields: true,
+      auth: {
+        strategy: "basic",
+        user: "rulebricks",
+        password: "${CLICKHOUSE_PASSWORD}",
+      },
+      batch: {
+        max_bytes: DECISION_LOG_ACCELERATION_SINK.batchMaxBytes,
+        timeout_secs: DECISION_LOG_ACCELERATION_SINK.batchTimeoutSecs,
+      },
+      buffer: {
+        type: "disk",
+        max_size: DECISION_LOG_ACCELERATION_SINK.bufferMaxSize,
+        when_full: "drop_newest",
+      },
+    };
   }
 
   // Add external logging-platform sink if configured. Decision logs always go
@@ -315,6 +381,18 @@ function generateVectorEnv(config: DeploymentConfig): Array<Record<string, unkno
     });
   }
 
+  if (isClickStackEnabled(config)) {
+    env.push({
+      name: "CLICKHOUSE_PASSWORD",
+      valueFrom: {
+        secretKeyRef: {
+          name: `${getReleaseName(config.name)}-clickhouse-credentials`,
+          key: "admin-password",
+        },
+      },
+    });
+  }
+
   const azureBlobSecretRef = config.storage?.azureBlobConnectionStringSecretRef;
 
   if (
@@ -408,6 +486,47 @@ function secretKeySelector(ref: SecretKeyRef): Record<string, string> {
   };
 }
 
+function base64UrlJson(value: Record<string, unknown>): string {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
+// Self-hosted Supabase derives the anon and service_role API keys from the JWT
+// secret: each is an HS256 JWT (role: anon / service_role) signed with the secret.
+// https://supabase.com/docs/guides/self-hosting/self-hosted-auth-keys
+export function signSupabaseJwt(
+  role: "anon" | "service_role",
+  secret: string,
+): string {
+  const header = base64UrlJson({ alg: "HS256", typ: "JWT" });
+  const payload = base64UrlJson({
+    role,
+    iss: "supabase",
+    iat: SUPABASE_JWT_ISSUED_AT,
+    exp: SUPABASE_JWT_EXPIRES_AT,
+  });
+  const body = `${header}.${payload}`;
+  const signature = createHmac("sha256", secret).update(body).digest("base64url");
+  return `${body}.${signature}`;
+}
+
+// Realtime needs SECRET_KEY_BASE (signs/encrypts its tokens) and a 16-byte
+// DB_ENC_KEY (encrypts tenant DB creds). Derive both deterministically from the
+// JWT secret so they are stable across redeploys with no extra state to persist,
+// and anchored to the one root secret the operator already manages.
+export function deriveRealtimeSecrets(jwtSecret: string): {
+  secretKeyBase: string;
+  dbEncKey: string;
+} {
+  const secretKeyBase = createHmac("sha256", jwtSecret)
+    .update("supabase-realtime-secret-key-base")
+    .digest("hex"); // 64 chars
+  const dbEncKey = createHmac("sha256", jwtSecret)
+    .update("supabase-realtime-db-enc-key")
+    .digest("hex")
+    .slice(0, 16); // Realtime requires exactly 16 bytes
+  return { secretKeyBase, dbEncKey };
+}
+
 /**
  * Strips surrounding whitespace and embedded control characters (notably the
  * trailing carriage return that sneaks in when a remote_write URL is pasted from
@@ -468,6 +587,138 @@ function generateRemoteWriteSpec(
     default:
       return [base];
   }
+}
+
+function isClickStackEnabled(config: DeploymentConfig): boolean {
+  return config.features.observability?.clickstack?.enabled ?? true;
+}
+
+function generateClickStackValues(
+  enabled: boolean,
+  config: DeploymentConfig,
+  storageClass: string,
+  infrastructurePodLabels: Record<string, string>,
+  operationalDaemonSetTolerations: Array<Record<string, string>>,
+): Record<string, unknown> {
+  const clickstack = config.features.observability?.clickstack;
+  const telemetryRetentionDays =
+    clickstack?.telemetryRetentionDays ?? 7;
+  const decisionLogRetentionDays =
+    clickstack?.decisionLogRetentionDays ??
+    DECISION_LOG_ACCELERATION_RETENTION_DAYS;
+  const clickHouseStorageSize = clickstack?.clickHouseStorageSize ?? "100Gi";
+
+  // Registry host for the clickstack images. The clickstack subchart routes
+  // these through its own image helper, so the split { registry, repository }
+  // shape lets global.imageRegistry + digest pinning flow through.
+  const reg = config.imageRegistry || DEFAULT_IMAGE_REGISTRY;
+
+  return {
+    enabled,
+    clickhouse: {
+      database: "otel",
+      username: "rulebricks",
+      existingSecret: "",
+      existingSecretKey: "admin-password",
+      retentionDays: telemetryRetentionDays,
+      ttl: "",
+      decisionLogs: {
+        retentionDays: decisionLogRetentionDays,
+        sink: { ...DECISION_LOG_ACCELERATION_SINK },
+        objectStorageFallback: { enabled: true },
+      },
+    },
+    hyperdx: {
+      enabled,
+      image: {
+        registry: reg,
+        repository: IMAGE_REPOSITORIES.hyperdx.repository,
+        tag: IMAGE_REPOSITORIES.hyperdx.tag,
+        pullPolicy: "IfNotPresent",
+      },
+      resources: {
+        requests: { cpu: "250m", memory: "512Mi" },
+        limits: { cpu: "1000m", memory: "1Gi" },
+      },
+      ingress: {
+        enabled,
+        className: "traefik",
+        hostname: "",
+        allowedIPs: [],
+      },
+      podLabels: infrastructurePodLabels,
+    },
+    collector: {
+      image: {
+        registry: reg,
+        repository: IMAGE_REPOSITORIES.clickstackOtelCollector.repository,
+        tag: IMAGE_REPOSITORIES.clickstackOtelCollector.tag,
+        pullPolicy: "IfNotPresent",
+      },
+      memoryLimitMiB: 800,
+      agent: {
+        enabled,
+        securityContext: {
+          runAsUser: 0,
+          runAsGroup: 0,
+        },
+        resources: {
+          requests: { cpu: "100m", memory: "256Mi" },
+          limits: { cpu: "500m", memory: "512Mi" },
+        },
+        tolerations: operationalDaemonSetTolerations,
+        podLabels: infrastructurePodLabels,
+      },
+      gateway: {
+        replicas: 1,
+        resources: {
+          requests: { cpu: "250m", memory: "512Mi" },
+          limits: { cpu: "2000m", memory: "1Gi" },
+        },
+        podLabels: infrastructurePodLabels,
+      },
+    },
+    ferretdb: {
+      enabled,
+      image: {
+        registry: reg,
+        repository: IMAGE_REPOSITORIES.ferretdb.repository,
+        tag: IMAGE_REPOSITORIES.ferretdb.tag,
+        pullPolicy: "IfNotPresent",
+      },
+      postgresImage: {
+        registry: reg,
+        repository: IMAGE_REPOSITORIES.postgresDocumentdb.repository,
+        tag: IMAGE_REPOSITORIES.postgresDocumentdb.tag,
+        pullPolicy: "IfNotPresent",
+      },
+      auth: {
+        username: "hyperdx",
+        password: "",
+        existingSecret: "",
+        existingSecretKey: "password",
+      },
+      persistence: {
+        enabled,
+        size: "10Gi",
+        storageClassName: storageClass,
+      },
+      resources: {
+        ferretdb: {
+          requests: { cpu: "100m", memory: "256Mi" },
+          limits: { cpu: "500m", memory: "512Mi" },
+        },
+        postgres: {
+          requests: { cpu: "250m", memory: "512Mi" },
+          limits: { cpu: "1000m", memory: "1Gi" },
+        },
+      },
+      podLabels: infrastructurePodLabels,
+      podAnnotations: {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
+      },
+    },
+  };
 }
 
 function generatePrometheusServiceAccount(
@@ -616,37 +867,32 @@ function generateGenericRemoteWrite(
 }
 
 /**
- * Generates Kafka extra environment variables for tuning.
- * Kept in lockstep with the chart's values.yaml controller.extraEnvVars.
+ * Generates the Kafka broker config map (Kafka.spec.kafka.config for Strimzi).
+ * These are the former KAFKA_CFG_* tuning env vars, as their Kafka property
+ * names. Kept in lockstep with the chart's kafka.config.
  */
-function generateKafkaExtraEnvVars(): Array<{ name: string; value: string }> {
-  return [
-    {
-      name: "KAFKA_JVM_PERFORMANCE_OPTS",
-      value:
-        "-XX:MaxDirectMemorySize=256M -Djdk.nio.maxCachedBufferSize=262144",
-    },
-    { name: "KAFKA_CFG_QUEUED_MAX_REQUESTS", value: "10000" },
-    { name: "KAFKA_CFG_NUM_NETWORK_THREADS", value: "8" },
-    { name: "KAFKA_CFG_NUM_IO_THREADS", value: "8" },
-    { name: "KAFKA_CFG_SOCKET_SEND_BUFFER_BYTES", value: "1048576" },
-    { name: "KAFKA_CFG_SOCKET_RECEIVE_BUFFER_BYTES", value: "1048576" },
-    { name: "KAFKA_CFG_SOCKET_REQUEST_MAX_BYTES", value: "209715200" },
-    // Broker-wide max record size; must exceed every per-topic
-    // max.message.bytes set by the provisioning block.
-    { name: "KAFKA_CFG_MESSAGE_MAX_BYTES", value: "2097152" },
-    { name: "KAFKA_CFG_REPLICA_FETCH_MAX_BYTES", value: "4194304" },
-    // Broker-wide default retention bytes per partition; the application
-    // topics carry tighter per-topic caps via provisioning.
-    { name: "KAFKA_CFG_LOG_RETENTION_BYTES", value: "536870912" },
-    { name: "KAFKA_CFG_LOG_SEGMENT_BYTES", value: "1073741824" },
-    { name: "KAFKA_CFG_NUM_REPLICA_FETCHERS", value: "4" },
-    { name: "KAFKA_CFG_REPLICA_SOCKET_RECEIVE_BUFFER_BYTES", value: "1048576" },
-    { name: "KAFKA_CFG_LOG_CLEANER_DEDUPE_BUFFER_SIZE", value: "268435456" },
-    { name: "KAFKA_CFG_LOG_CLEANER_IO_BUFFER_SIZE", value: "1048576" },
-    // (KAFKA_CFG_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION removed: that is a
-    // producer-client config; the broker ignores it.)
-  ];
+function generateKafkaConfig(): Record<string, string> {
+  return {
+    "auto.create.topics.enable": "true",
+    "log.retention.hours": "24",
+    "num.partitions": "12",
+    "num.network.threads": "8",
+    "num.io.threads": "8",
+    "socket.send.buffer.bytes": "1048576",
+    "socket.receive.buffer.bytes": "1048576",
+    "socket.request.max.bytes": "209715200",
+    // Broker-wide max record size; must exceed every per-topic max.message.bytes.
+    "message.max.bytes": "2097152",
+    "replica.fetch.max.bytes": "4194304",
+    // Broker-wide default retention; the application topics carry tighter caps.
+    "log.retention.bytes": "536870912",
+    "log.segment.bytes": "1073741824",
+    "num.replica.fetchers": "4",
+    "queued.max.requests": "10000",
+    "replica.socket.receive.buffer.bytes": "1048576",
+    "log.cleaner.dedupe.buffer.size": "268435456",
+    "log.cleaner.io.buffer.size": "1048576",
+  };
 }
 
 /**
@@ -681,13 +927,12 @@ function effectiveTopicPrefix(config: DeploymentConfig): string {
  * - logs: LOGS_TOPIC_PARTITIONS (durable data feeding the Vector -> object
  *   storage pipeline).
  */
-function generateKafkaProvisioning(
+function generateKafkaTopics(
   config: DeploymentConfig,
-): Record<string, unknown> {
+): Array<Record<string, unknown>> {
   if (isExternalKafka(config)) {
-    // External/managed Kafka: topics are customer-managed (the kafka
-    // subchart is disabled, so neither provisioning nor align jobs render).
-    return { enabled: false };
+    // External/managed Kafka: topics are customer-managed.
+    return [];
   }
 
   const prefix = effectiveTopicPrefix(config);
@@ -699,36 +944,30 @@ function generateKafkaProvisioning(
     "max.message.bytes": "2097152",
   };
 
-  return {
-    enabled: true,
-    replicationFactor: TOPIC_REPLICATION_FACTOR,
-    numPartitions: 12,
-    podLabels: { "rulebricks.com/workload-group": "infrastructure" },
-    topics: [
-      {
-        name: `${prefix}solution`,
-        partitions: SOLUTION_TOPIC_PARTITIONS,
-        replicationFactor: TOPIC_REPLICATION_FACTOR,
-        config: rpcTopicConfig,
+  return [
+    {
+      name: `${prefix}solution`,
+      partitions: SOLUTION_TOPIC_PARTITIONS,
+      replicas: TOPIC_REPLICATION_FACTOR,
+      config: rpcTopicConfig,
+    },
+    {
+      name: `${prefix}solution-response`,
+      partitions: SOLUTION_TOPIC_PARTITIONS,
+      replicas: TOPIC_REPLICATION_FACTOR,
+      config: rpcTopicConfig,
+    },
+    {
+      name: `${prefix}logs`,
+      partitions: LOGS_TOPIC_PARTITIONS,
+      replicas: TOPIC_REPLICATION_FACTOR,
+      config: {
+        "retention.ms": "86400000",
+        "retention.bytes": "268435456",
+        "max.message.bytes": "2097152",
       },
-      {
-        name: `${prefix}solution-response`,
-        partitions: SOLUTION_TOPIC_PARTITIONS,
-        replicationFactor: TOPIC_REPLICATION_FACTOR,
-        config: rpcTopicConfig,
-      },
-      {
-        name: `${prefix}logs`,
-        partitions: LOGS_TOPIC_PARTITIONS,
-        replicationFactor: TOPIC_REPLICATION_FACTOR,
-        config: {
-          "retention.ms": "86400000",
-          "retention.bytes": "268435456",
-          "max.message.bytes": "2097152",
-        },
-      },
-    ],
-  };
+    },
+  ];
 }
 
 function generateWorkerPodAntiAffinity(): Record<string, unknown> {
@@ -1017,7 +1256,7 @@ function generateKafkaBridge(config: DeploymentConfig): Record<string, unknown> 
     region: ext.sasl?.region ?? "",
     brokers: ext.brokers ?? "",
     localPort: 19092,
-    image: "grepplabs/kafka-proxy:latest",
+    image: KAFKA_PROXY_IMAGE,
     awsRoleArn: ext.identity?.awsRoleArn ?? "",
   };
 }
@@ -1045,7 +1284,7 @@ function generateVectorExtraContainers(
   return [
     {
       name: "kafka-proxy",
-      image: "grepplabs/kafka-proxy:latest",
+      image: KAFKA_PROXY_IMAGE,
       args: [
         "server",
         ...mappings,
@@ -1088,10 +1327,21 @@ function generateTracingGlobal(
   if (!tracing?.enabled) return undefined;
 
   const destination = tracing.destination ?? "elastic";
+  const reg = config.imageRegistry || DEFAULT_IMAGE_REGISTRY;
   const base: Record<string, unknown> = {
     enabled: true,
     destination,
     samplingRatio: tracing.samplingRatio ?? 1,
+    // RB image dict for the parent chart's otel-collector deployment. The
+    // rulebricks.image helper requires image.repository and applies
+    // global.imageRegistry to the host.
+    collector: {
+      image: {
+        registry: reg,
+        repository: IMAGE_REPOSITORIES.opentelemetryCollector.repository,
+        tag: IMAGE_REPOSITORIES.opentelemetryCollector.tag,
+      },
+    },
   };
 
   if (destination === "elastic") {
@@ -1147,7 +1397,7 @@ function generateTraefikTracing(
   config: DeploymentConfig,
   releaseName: string,
 ): Record<string, unknown> {
-  if (!config.features.tracing?.enabled) return {};
+  if (!isClickStackEnabled(config) && !config.features.tracing?.enabled) return {};
   return {
     otlp: {
       enabled: true,
@@ -1266,7 +1516,7 @@ export function buildHelmValues(
   config: DeploymentConfig,
   options: GenerateOptions = {},
 ): Record<string, unknown> {
-  const { tlsEnabled = true } = options;
+  const { tlsEnabled = true, secretMode = "inline" } = options;
   const useLocalGrafana =
     config.features.monitoring.destination === "local-grafana";
 
@@ -1337,10 +1587,26 @@ export function buildHelmValues(
   const releaseName = getReleaseName(config.name);
   const criticalPriorityClass = `${releaseName}-critical`;
   const burstPriorityClass = `${releaseName}-burst`;
+  // Subcharts that don't honor global.imagePullSecrets (keda, strimzi, traefik,
+  // vector) need the pull secret on their own key so their pods can pull the
+  // private docker.io/rulebricks/* images from index.docker.io.
+  const rulebricksPullSecret = [{ name: `${releaseName}-regcred` }];
+  // Registry host for every image. Empty config.imageRegistry => docker.io. When
+  // set, the host is rewritten into global.imageRegistry (which kube-prometheus-stack
+  // and our subcharts honor) and into each of the six Tier-2 charts' own image
+  // keys below, always keeping the rulebricks/<name> path.
+  const reg = config.imageRegistry || DEFAULT_IMAGE_REGISTRY;
+  const clickStackEnabled = isClickStackEnabled(config);
+  const clickStackConfig = config.features.observability?.clickstack;
+  const decisionLogAccelerationRetentionDays =
+    clickStackConfig?.decisionLogRetentionDays ??
+    DECISION_LOG_ACCELERATION_RETENTION_DAYS;
+  const clickHouseStorageSize =
+    clickStackConfig?.clickHouseStorageSize ?? "100Gi";
   // Distributed tracing (self-hosted only). Lives under global so the
   // rulebricks subchart deployments can read it; the collector + traefik are
   // wired below from the same source.
-  const tracingGlobal = generateTracingGlobal(config);
+  const tracingGlobal = clickStackEnabled ? undefined : generateTracingGlobal(config);
   // Never let the cluster-autoscaler evict single-replica stateful pods
   // during node scale-down; an evicted broker/db stalls the whole pipeline.
   const safeToEvictAnnotations = {
@@ -1357,30 +1623,53 @@ export function buildHelmValues(
           accessToken: config.database.supabaseAccessToken || undefined,
           projectRef: config.database.supabaseProjectRef || undefined,
         }
-      : {
-          jwtSecret: config.database.supabaseJwtSecret || undefined,
-          anonKey: undefined,
-          serviceKey: undefined,
-        };
+      : (() => {
+          const jwtSecret = config.database.supabaseJwtSecret || "";
+          return {
+            jwtSecret: jwtSecret || undefined,
+            anonKey: jwtSecret ? signSupabaseJwt("anon", jwtSecret) : undefined,
+            serviceKey: jwtSecret
+              ? signSupabaseJwt("service_role", jwtSecret)
+              : undefined,
+          };
+        })();
 
-  // Add custom email templates if enabled
+  // Always emit email configuration so auth pods receive template/subject env
+  // vars regardless of Helm merge order. Custom values take precedence over
+  // built-in defaults when explicitly enabled.
+  const customEmails = config.features.customEmails;
   if (
-    config.features.customEmails?.enabled &&
-    config.features.customEmails.subjects &&
-    config.features.customEmails.templates
+    customEmails?.enabled &&
+    customEmails.subjects &&
+    customEmails.templates
   ) {
     supabaseGlobalConfig.emails = {
       subjects: {
-        invite: config.features.customEmails.subjects.invite,
-        confirmation: config.features.customEmails.subjects.confirmation,
-        recovery: config.features.customEmails.subjects.recovery,
-        emailChange: config.features.customEmails.subjects.emailChange,
+        invite: customEmails.subjects.invite,
+        confirmation: customEmails.subjects.confirmation,
+        recovery: customEmails.subjects.recovery,
+        emailChange: customEmails.subjects.emailChange,
       },
       templates: {
-        invite: config.features.customEmails.templates.invite,
-        confirmation: config.features.customEmails.templates.confirmation,
-        recovery: config.features.customEmails.templates.recovery,
-        emailChange: config.features.customEmails.templates.emailChange,
+        invite: customEmails.templates.invite,
+        confirmation: customEmails.templates.confirmation,
+        recovery: customEmails.templates.recovery,
+        emailChange: customEmails.templates.emailChange,
+      },
+    };
+  } else {
+    supabaseGlobalConfig.emails = {
+      subjects: {
+        invite: "Join your team on Rulebricks",
+        confirmation: "Confirm Your Email",
+        recovery: "Reset Your Password",
+        emailChange: "Confirm Email Change",
+      },
+      templates: {
+        invite: "https://prefix-files.s3.us-west-2.amazonaws.com/templates/invite.html",
+        confirmation: "https://prefix-files.s3.us-west-2.amazonaws.com/templates/verify.html",
+        recovery: "https://prefix-files.s3.us-west-2.amazonaws.com/templates/password_change.html",
+        emailChange: "https://prefix-files.s3.us-west-2.amazonaws.com/templates/email_change.html",
       },
     };
   }
@@ -1394,6 +1683,20 @@ export function buildHelmValues(
       email: config.adminEmail,
       tlsEnabled,
       licenseKey: config.licenseKey,
+      // Pull secret for the private docker.io/rulebricks/* images. References the
+      // license registry secret <release>-regcred (index.docker.io, authed by the
+      // license PAT). kube-prometheus-stack + cert-manager honor this global value;
+      // keda, traefik, vector and the strimzi operator each get the same secret on
+      // their own key below.
+      imagePullSecrets: [{ name: `${releaseName}-regcred` }],
+      // Single registry-host override (empty => docker.io/rulebricks/*). Honored by
+      // kube-prometheus-stack and our subcharts; the CLI also rewrites the host into
+      // the other Tier-2 charts' native image keys below.
+      ...(config.imageRegistry ? { imageRegistry: config.imageRegistry } : {}),
+      // Generated name->sha256 digest map (empty until the helm repo's mirror
+      // pipeline populates IMAGE_DIGESTS). When a name is present the chart image
+      // helper pins @sha256 instead of :tag.
+      imageDigests: IMAGE_DIGESTS,
       ...(productVersion && SEMVER_PATTERN.test(productVersion)
         ? { version: productVersion }
         : {}),
@@ -1402,6 +1705,19 @@ export function buildHelmValues(
       // Scheduling priority tiers (the chart renders release-scoped
       // <release>-critical and <release>-burst PriorityClasses).
       priorityClasses: { enabled: true },
+      clickstack: {
+        enabled: clickStackEnabled,
+        ...(clickStackEnabled
+          ? {
+              clickhouse: {
+                decisionLogs: {
+                  retentionDays: decisionLogAccelerationRetentionDays,
+                  objectStorageFallback: { enabled: true },
+                },
+              },
+            }
+          : {}),
+      },
 
       // SMTP Configuration
       smtp: {
@@ -1476,6 +1792,14 @@ export function buildHelmValues(
       ...(tracingGlobal ? { tracing: tracingGlobal } : {}),
     },
 
+    clickstack: generateClickStackValues(
+      clickStackEnabled,
+      config,
+      storageClass,
+      infrastructurePodLabels,
+      operationalDaemonSetTolerations,
+    ),
+
     backup: generateBackupValues(config),
 
     // =============================================================================
@@ -1502,7 +1826,11 @@ export function buildHelmValues(
       },
       app: {
         image: {
-          repository: "index.docker.io/rulebricks/app",
+          // Split shape: the rulebricks-chart.image helper applies
+          // global.imageRegistry to the host + digest pinning. The host NEVER
+          // goes in repository.
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.app,
           pullPolicy: "IfNotPresent",
         },
         // Replica count and resources fall back to the chart defaults.
@@ -1517,7 +1845,10 @@ export function buildHelmValues(
       hps: {
         enabled: true,
         image: {
-          repository: "index.docker.io/rulebricks/hps",
+          // Split shape (see app.image): host comes from global.imageRegistry via
+          // the rulebricks-chart.image helper, never baked into repository.
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.hps,
           pullPolicy: "Always",
         },
         // Replica count and resources fall back to the chart defaults.
@@ -1616,63 +1947,39 @@ export function buildHelmValues(
     // =============================================================================
     kafka: {
       enabled: !isExternalKafka(config),
-      // KRaft mode (no Zookeeper)
-      kraft: {
-        enabled: true,
+      // Apache Kafka version (must be one the bundled DHI Strimzi operator
+      // supports; DHI strimzi 1.0.1 ships Kafka 4.2.0).
+      version: "4.2.0",
+      // Single combined controller+broker node (KRaft, no ZooKeeper).
+      replicas: TOPIC_REPLICATION_FACTOR,
+      storage: {
+        size: "20Gi",
+        class: storageClass,
       },
-      zookeeper: {
-        enabled: false,
-      },
-      // Kafka broker configuration
-      overrideConfiguration: {
-        // Safety net only: the application topics are created explicitly by
-        // kafka.provisioning below with per-topic partitions/retention/size.
-        "auto.create.topics.enable": "true",
-        "log.retention.hours": "24",
-        "default.replication.factor": String(TOPIC_REPLICATION_FACTOR),
-        "offsets.topic.replication.factor": String(TOPIC_REPLICATION_FACTOR),
-        // Default for auto-created topics only; no longer coupled to worker
-        // count (partitions are a ceiling, sized via solutionPartitions).
-        "num.partitions": "12",
-      },
-      // Explicit topic management (creation + idempotent alignment on
-      // upgrade). Names derive from the same prefix as app.logging.
-      provisioning: generateKafkaProvisioning(config),
-      controller: {
-        // Single in-cluster broker; resources, persistence size, and heapOpts
-        // fall back to the chart defaults.
-        replicaCount: TOPIC_REPLICATION_FACTOR,
-        // Critical tier: the broker must always be able to preempt burst
-        // workers to reschedule; never autoscaler-evicted on scale-down.
-        priorityClassName: criticalPriorityClass,
-        podAnnotations: safeToEvictAnnotations,
-        podLabels: infrastructurePodLabels,
-        ...coreScheduling,
-        persistence: {
-          enabled: true,
-          storageClass: storageClass,
-        },
-        extraEnvVars: generateKafkaExtraEnvVars(),
-      },
-      listeners: {
-        client: {
-          protocol: "PLAINTEXT",
-        },
-        controller: {
-          protocol: "PLAINTEXT",
-        },
-        interbroker: {
-          protocol: "PLAINTEXT",
+      // Critical tier: the broker must always be able to preempt burst workers.
+      priorityClassName: criticalPriorityClass,
+      config: generateKafkaConfig(),
+      jvm: {
+        xms: "1g",
+        xmx: "1g",
+        extraOpts: {
+          UseZGC: "true",
+          AlwaysPreTouch: "true",
+          MaxDirectMemorySize: "256M",
         },
       },
       metrics: {
-        jmx: {
-          enabled: true,
-        },
-        serviceMonitor: {
-          enabled: true,
-        },
+        enabled: true,
+        serviceMonitor: { enabled: true },
       },
+      // Topics, reconciled by the Strimzi Topic Operator (KafkaTopic CRs).
+      topics: generateKafkaTopics(config),
+    },
+
+    // Strimzi operator: pull secret so the operator pod pulls the private
+    // rulebricks/* image from index.docker.io.
+    "strimzi-kafka-operator": {
+      image: { imagePullSecrets: rulebricksPullSecret },
     },
 
     // =============================================================================
@@ -1692,14 +1999,22 @@ export function buildHelmValues(
         existingSecret: '{{ printf "%s-clickhouse-credentials" .Release.Name }}',
         existingSecretKey: "admin-password",
       },
-      shards: 1,
-      replicaCount: 1,
-      keeper: { enabled: false },
-      persistence: { enabled: false },
-      resources: {
-        requests: { cpu: "200m", memory: "512Mi" },
-        limits: { cpu: "1000m", memory: "2Gi" },
-      },
+      persistence: clickStackEnabled
+        ? {
+            enabled: true,
+            storageClass: storageClass,
+            size: clickHouseStorageSize,
+          }
+        : { enabled: false },
+      resources: clickStackEnabled
+        ? {
+            requests: { cpu: "1000m", memory: "4Gi" },
+            limits: { cpu: "4", memory: "12Gi" },
+          }
+        : {
+            requests: { cpu: "500m", memory: "2Gi" },
+            limits: { cpu: "2", memory: "6Gi" },
+          },
       serviceAccount: {
         create: true,
         annotations: {},
@@ -1711,34 +2026,20 @@ export function buildHelmValues(
         },
       },
       queryLimits: {
-        maxMemoryUsage: 1073741824,
+        maxMemoryUsage: 4294967296,
         maxThreads: 4,
-        maxExecutionTime: 60,
+        maxExecutionTime: 120,
+        maxRowsToRead: 50000000,
+        readOverflowMode: "break",
       },
-      configdFiles: {
-        // Server-level named collections belong in config.d (the <clickhouse> root).
-        "09-decision-log-storage.xml":
-          '{{ include "rulebricks.clickhouse.decisionLogStorageXml" . }}',
+      otelQueryLimits: {
+        maxMemoryUsage: 4294967296,
+        maxThreads: 8,
+        maxExecutionTime: 120,
       },
-      usersdFiles: {
-        // <profiles>/<users> are read from the users config tree, so these MUST be
-        // in users.d. In config.d they are silently ignored: query limits go unset,
-        // date_time_input_format stays "basic" (breaking decision_logs DateTime64
-        // parsing), and the admin user never gets NAMED COLLECTION access (so the
-        // initdb decision_logs view fails to create).
-        "10-query-limits.xml":
-          '{{ include "rulebricks.clickhouse.queryLimitsXml" . }}',
-        "11-named-collection-access.xml":
-          '{{ include "rulebricks.clickhouse.userAccessXml" . }}',
-      },
-      initdbScripts: {
-        // Bitnami ClickHouse only executes *.sh init scripts (it skips *.sql),
-        // so this must be a shell script, not raw SQL. The chart helper renders
-        // a single-line clickhouse-client invocation that idempotently creates
-        // the rulebricks database + decision_logs view on every fresh pod.
-        "01-decision-logs-view.sh":
-          '{{ include "rulebricks.clickhouse.decisionLogsViewScript" . }}',
-      },
+      otelDatabase: "otel",
+      // config.d / users.d / the decision-log view are rendered by the parent
+      // chart's clickhouse templates (no longer passed as Bitnami subchart values).
     },
 
     // =============================================================================
@@ -1746,6 +2047,15 @@ export function buildHelmValues(
     // =============================================================================
     traefik: {
       enabled: true,
+      // traefik has no global.imageRegistry path: set registry + repository
+      // directly (host = reg, rulebricks/* path).
+      image: {
+        registry: reg,
+        repository: IMAGE_REPOSITORIES.traefik,
+      },
+      deployment: {
+        imagePullSecrets: rulebricksPullSecret,
+      },
       ingressClass: {
         name: "traefik",
       },
@@ -1778,8 +2088,12 @@ export function buildHelmValues(
         websecure: {
           port: 8443,
           exposedPort: 443,
-          tls: {
-            enabled: tlsEnabled,
+          // traefik 41.x moved per-entrypoint TLS under ports.<name>.http.tls
+          // (the old ports.<name>.tls location is rejected by the chart schema).
+          http: {
+            tls: {
+              enabled: tlsEnabled,
+            },
           },
         },
       },
@@ -1804,6 +2118,28 @@ export function buildHelmValues(
     // =============================================================================
     keda: {
       enabled: true,
+      imagePullSecrets: rulebricksPullSecret,
+      // keda reads global.image.registry (NOT global.imageRegistry) for the host;
+      // set it plus the rulebricks/* repositories for all three sub-images.
+      global: {
+        image: {
+          registry: reg,
+        },
+      },
+      image: {
+        keda: {
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.keda,
+        },
+        metricsApiServer: {
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.kedaMetricsApiServer,
+        },
+        webhooks: {
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.kedaAdmissionWebhooks,
+        },
+      },
       ...coreScheduling,
       crds: {
         install: false, // CRDs managed in parent chart
@@ -1815,13 +2151,41 @@ export function buildHelmValues(
     // =============================================================================
     "cert-manager": {
       enabled: tlsEnabled,
-      installCRDs: false, // CRDs managed in parent chart
+      // CRDs managed in parent chart (cert-manager v1.15+ uses crds.enabled,
+      // not the deprecated installCRDs flag).
+      crds: { enabled: false },
+      // cert-manager prepends image.registry to image.repository, so set both per
+      // component (host = reg, rulebricks/cert-manager-* path).
+      image: {
+        registry: reg,
+        repository: IMAGE_REPOSITORIES.certManagerController,
+      },
       ...coreScheduling,
       webhook: {
+        image: {
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.certManagerWebhook,
+        },
         ...coreScheduling,
       },
       cainjector: {
+        image: {
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.certManagerCainjector,
+        },
         ...coreScheduling,
+      },
+      startupapicheck: {
+        image: {
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.certManagerStartupapicheck,
+        },
+      },
+      acmesolver: {
+        image: {
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.certManagerAcmesolver,
+        },
       },
     },
 
@@ -1837,6 +2201,12 @@ export function buildHelmValues(
     // =============================================================================
     vector: {
       enabled: true,
+      // vector's image.repository is the FULL path including host (no separate
+      // registry field), so the reg host is prefixed here.
+      image: {
+        repository: `${reg}/${IMAGE_REPOSITORIES.vector}`,
+        pullSecrets: rulebricksPullSecret,
+      },
       role: "Stateless-Aggregator",
       // Replica count and resources fall back to the chart defaults.
       ...coreScheduling,
@@ -1895,11 +2265,20 @@ export function buildHelmValues(
     // =============================================================================
     // VECTOR AGENT (Application / container logs -> Elasticsearch)
     // =============================================================================
-    "vector-agent": generateVectorAgent(
-      config,
-      infrastructurePodLabels,
-      operationalDaemonSetTolerations,
-    ),
+    "vector-agent": clickStackEnabled
+      ? { enabled: false }
+      : {
+          ...generateVectorAgent(
+            config,
+            infrastructurePodLabels,
+            operationalDaemonSetTolerations,
+          ),
+          // Full-path repository (see vector above) + pull secret.
+          image: {
+            repository: `${reg}/${IMAGE_REPOSITORIES.vector}`,
+            pullSecrets: rulebricksPullSecret,
+          },
+        },
 
     // =============================================================================
     // SUPABASE (Self-hosted Database)
@@ -1907,67 +2286,116 @@ export function buildHelmValues(
     supabase: {
       enabled: config.database.type === "self-hosted",
       ...(config.database.type === "self-hosted"
-        ? {
-            secret: {
-              db: {
-                username: "postgres",
-                password: config.database.supabaseDbPassword,
-                database: "postgres",
+        ? (() => {
+            // External managed Postgres (AWS RDS / Azure Flexible Server): the
+            // self-hosted Supabase services run against it instead of the
+            // bundled in-cluster database.
+            const pgExt =
+              config.externalServices?.postgres?.mode === "external"
+                ? config.externalServices?.postgres?.external
+                : undefined;
+            return {
+              secret: {
+                db: {
+                  username: "postgres",
+                  // Shared service-role password (authenticator / auth_admin /
+                  // replication_admin). With an external DB the bootstrap hook
+                  // sets the roles to this same value.
+                  password: config.database.supabaseDbPassword,
+                  database: pgExt?.database || "postgres",
+                },
+                dashboard: {
+                  username: config.database.supabaseDashboardUser || "supabase",
+                  password: config.database.supabaseDashboardPass,
+                },
+                jwt: {
+                  secret: config.database.supabaseJwtSecret,
+                },
+                // SECRET_KEY_BASE / DB_ENC_KEY, derived from the JWT secret
+                // (stable across redeploys). The chart no longer ships defaults.
+                realtime: deriveRealtimeSecrets(
+                  config.database.supabaseJwtSecret || "",
+                ),
               },
-              dashboard: {
-                username: config.database.supabaseDashboardUser || "supabase",
-                password: config.database.supabaseDashboardPass,
+              ...(pgExt
+                ? {
+                    // One switch: enabling externalDatabase disables the bundled
+                    // Postgres and runs the bootstrap hook to initialize the
+                    // managed instance. db.enabled=false is explicit so chart
+                    // schema rules keyed off it hold.
+                    db: { enabled: false },
+                    externalDatabase: {
+                      enabled: true,
+                      host: pgExt.host ?? "",
+                      port: pgExt.port ?? 5432,
+                      bootstrap: {
+                        enabled: pgExt.bootstrap?.enabled ?? true,
+                        masterUsername:
+                          pgExt.bootstrap?.masterUsername ?? "postgres",
+                        masterPassword: pgExt.bootstrap?.masterPassword ?? "",
+                        appRole: pgExt.bootstrap?.appRole ?? "postgres",
+                      },
+                    },
+                  }
+                : {
+                    db: {
+                      // Explicit so chart schema rules that key off
+                      // supabase.db.enabled (e.g. Database Backup Storage
+                      // Validation) hold without relying on subchart-default
+                      // coalescing.
+                      enabled: true,
+                      image: {
+                        // Split shape: the supabase.image helper applies
+                        // global.imageRegistry to the host. Host never in repository.
+                        registry: reg,
+                        repository: SUPABASE_POSTGRES_IMAGE_REPOSITORY,
+                        tag: SUPABASE_POSTGRES_IMAGE_TAG,
+                        pullPolicy: "IfNotPresent",
+                      },
+                      podLabels: infrastructurePodLabels,
+                      // Critical tier: the primary datastore must preempt burst
+                      // workers to reschedule; never autoscaler-evicted.
+                      // Resources and persistence size fall back to chart
+                      // defaults.
+                      priorityClassName: criticalPriorityClass,
+                      podAnnotations: safeToEvictAnnotations,
+                      ...coreScheduling,
+                      persistence: {
+                        enabled: true,
+                        storageClassName: storageClass,
+                      },
+                    },
+                  }),
+              auth: {
+                // Explicit public URLs so GoTrue never falls back to the
+                // in-cluster Kong service name when global.domain propagation
+                // is lost (e.g. after manual patching or partial upgrades).
+                siteUrl: `https://${config.domain}`,
+                externalUrl: `https://supabase.${config.domain}`,
+                ...coreScheduling,
               },
-              jwt: {
-                secret: config.database.supabaseJwtSecret,
+              rest: {
+                ...coreScheduling,
               },
-            },
-            db: {
-              // Explicit so chart schema rules that key off supabase.db.enabled
-              // (e.g. Database Backup Storage Validation) hold without relying
-              // on subchart-default coalescing.
-              enabled: true,
-              image: {
-                repository: SUPABASE_POSTGRES_IMAGE_REPOSITORY,
-                tag: SUPABASE_POSTGRES_IMAGE_TAG,
-                pullPolicy: "IfNotPresent",
+              realtime: {
+                ...coreScheduling,
               },
-              podLabels: infrastructurePodLabels,
-              // Critical tier: the primary datastore must preempt burst
-              // workers to reschedule; never autoscaler-evicted. Resources and
-              // persistence size fall back to the chart defaults.
-              priorityClassName: criticalPriorityClass,
-              podAnnotations: safeToEvictAnnotations,
-              ...coreScheduling,
-              persistence: {
-                enabled: true,
-                storageClassName: storageClass,
+              meta: {
+                ...coreScheduling,
               },
-            },
-            auth: {
-              ...coreScheduling,
-            },
-            rest: {
-              ...coreScheduling,
-            },
-            realtime: {
-              ...coreScheduling,
-            },
-            meta: {
-              ...coreScheduling,
-            },
-            kong: {
-              ...coreScheduling,
-              ingress: {
-                enabled: true,
-                className: "traefik",
-                annotations: {},
+              kong: {
+                ...coreScheduling,
+                ingress: {
+                  enabled: true,
+                  className: "traefik",
+                  annotations: {},
+                },
               },
-            },
-            studio: {
-              ...coreScheduling,
-            },
-          }
+              studio: {
+                ...coreScheduling,
+              },
+            };
+          })()
         : {}),
     },
 
@@ -1979,17 +2407,67 @@ export function buildHelmValues(
     },
     "kube-prometheus-stack": {
       enabled: true,
+      // kube-prometheus-stack honors the parent global.imageRegistry for the host
+      // automatically; the CLI sets the rulebricks/* repository defaults (and the
+      // reg host explicitly) for every sub-image so a bare helm install also pulls
+      // rulebricks/*.
       alertmanager: {
         enabled: false,
+        alertmanagerSpec: {
+          image: {
+            registry: reg,
+            repository: IMAGE_REPOSITORIES.alertmanager,
+          },
+        },
+      },
+      prometheusOperator: {
+        image: {
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.prometheusOperator,
+        },
+        prometheusConfigReloader: {
+          image: {
+            registry: reg,
+            repository: IMAGE_REPOSITORIES.prometheusConfigReloader,
+          },
+        },
+        admissionWebhooks: {
+          patch: {
+            image: {
+              registry: reg,
+              repository: IMAGE_REPOSITORIES.kubeWebhookCertgen,
+            },
+          },
+        },
+      },
+      "kube-state-metrics": {
+        image: {
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.kubeStateMetrics,
+        },
+      },
+      "prometheus-node-exporter": {
+        image: {
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.nodeExporter,
+        },
       },
       grafana: {
         enabled: useLocalGrafana,
+        image: {
+          registry: reg,
+          repository: IMAGE_REPOSITORIES.grafana,
+        },
         // Dashboard sidecar imports the provisioned Rulebricks dashboards
         // (ConfigMaps labeled grafana_dashboard="1") when in-cluster Grafana
         // is enabled.
-        ...(useLocalGrafana
-          ? {
-              sidecar: {
+        sidecar: {
+          image: {
+            registry: reg,
+            repository: IMAGE_REPOSITORIES.k8sSidecar,
+          },
+          ...(useLocalGrafana
+            ? {
                 dashboards: {
                   enabled: true,
                   label: "grafana_dashboard",
@@ -1998,15 +2476,19 @@ export function buildHelmValues(
                   folderAnnotation: "grafana_folder",
                   provider: { foldersFromFilesStructure: true },
                 },
-              },
-            }
-          : {}),
+              }
+            : {}),
+        },
       },
       prometheus: {
         enabled: true,
         serviceAccount: generatePrometheusServiceAccount(config),
         prometheusSpec: {
           retention: "30d",
+          image: {
+            registry: reg,
+            repository: IMAGE_REPOSITORIES.prometheus,
+          },
           podMetadata: generatePrometheusPodMetadata(config),
           serviceMonitorSelectorNilUsesHelmValues: false,
           serviceMonitorSelector: {},
@@ -2025,7 +2507,9 @@ export function buildHelmValues(
               },
             },
           },
-          remoteWrite: generateRemoteWriteSpec(config),
+          remoteWrite: [
+            ...(clickStackEnabled ? [] : generateRemoteWriteSpec(config)),
+          ],
         },
       },
     },
@@ -2066,7 +2550,13 @@ export function buildHelmValues(
     "external-dns": externalDnsEnabled
       ? {
           enabled: true,
-          provider: getExternalDnsProvider(config.dns.provider),
+          // external-dns has NO image.registry field: image.repository is the
+          // FULL path including host (reg prefix + rulebricks/external-dns).
+          image: {
+            repository: `${reg}/${IMAGE_REPOSITORIES.externalDns}`,
+          },
+          // external-dns 1.21+ idiom: provider is an object ({name: ...}).
+          provider: { name: getExternalDnsProvider(config.dns.provider) },
           domainFilters: [config.domain],
           sources: ["ingress", "service"],
           policy: "upsert-only",
@@ -2076,6 +2566,66 @@ export function buildHelmValues(
         },
   };
 
+  // In k8s secret mode, the CLI creates Kubernetes Secrets and the chart reads
+  // them by reference. Point the chart's secretRef seams at those Secrets and
+  // strip every plaintext secret out of the generated values.
+  if (secretMode === "k8s") {
+    return redactSecretsToRefs(values, config);
+  }
+
+  return values;
+}
+
+/**
+ * Rewrites generated values for k8s secret mode: sets the chart's *.secretRef
+ * seams to the CLI-created Secret names and removes inline plaintext secrets so
+ * none are persisted to values.yaml or the Helm release.
+ */
+export function redactSecretsToRefs(
+  values: Record<string, unknown>,
+  config: DeploymentConfig,
+): Record<string, unknown> {
+  const names = deploymentSecretNames(config);
+  const global = (values.global ?? {}) as Record<string, any>;
+  const supabase = (values.supabase ?? {}) as Record<string, any>;
+
+  // App-level consolidated secret: one secretRef supplies every app cred.
+  global.secrets = { ...(global.secrets ?? {}), secretRef: names.app };
+  // Strip inline app/global secrets (non-secret config like host/from/url stays).
+  if (global.smtp) {
+    delete global.smtp.user;
+    delete global.smtp.pass;
+  }
+  if (global.supabase) {
+    delete global.supabase.jwtSecret;
+    delete global.supabase.anonKey;
+    delete global.supabase.serviceKey;
+    delete global.supabase.accessToken;
+  }
+  if (global.ai) delete global.ai.openaiApiKey;
+  if (global.sso) {
+    delete global.sso.clientId;
+    delete global.sso.clientSecret;
+  }
+  delete global.licenseKey;
+
+  // Supabase subchart: replace each inline secret block with a secretRef.
+  if (supabase.secret) {
+    supabase.secret = {
+      db: { secretRef: names.db },
+      jwt: { secretRef: names.jwt },
+      dashboard: { secretRef: names.dashboard },
+      realtime: { secretRef: names.realtime },
+      // Supabase auth (GoTrue) SMTP — only when SMTP creds are configured;
+      // otherwise the global.smtp we just stripped would leave it empty.
+      ...(config.smtp?.user || config.smtp?.pass
+        ? { smtp: { secretRef: names.smtp } }
+        : {}),
+    };
+  }
+
+  values.global = global;
+  values.supabase = supabase;
   return values;
 }
 

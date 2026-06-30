@@ -104,6 +104,10 @@ export interface WizardState {
 
   // Features - Monitoring (Prometheus). In-cluster Prometheus is always
   // installed; this toggle only controls exporting metrics via remote_write.
+  clickStackEnabled: boolean;
+  clickStackTelemetryRetentionDays: number;
+  decisionLogAccelerationRetentionDays: number;
+  clickHouseStorageSize: string;
   metricsExportEnabled: boolean;
   prometheusMonitoringDestination: MonitoringDestination | null;
   prometheusRemoteWriteUrl: string;
@@ -197,6 +201,14 @@ export interface WizardState {
   kafkaIdentityGcpServiceAccountEmail: string;
   kafkaIdentityAzureClientId: string;
 
+  // External services - Postgres (managed external database; AWS/Azure only)
+  postgresMode: "embedded" | "external";
+  postgresHost: string;
+  postgresPort: number;
+  postgresDatabase: string;
+  postgresMasterUsername: string;
+  postgresMasterPassword: string;
+
   // Credentials
   licenseKey: string;
 
@@ -269,6 +281,18 @@ type WizardAction =
         Pick<
           WizardState,
           "ssoProvider" | "ssoUrl" | "ssoClientId" | "ssoClientSecret"
+        >
+      >;
+    }
+  | { type: "SET_CLICKSTACK_ENABLED"; enabled: boolean }
+  | {
+      type: "SET_CLICKSTACK_CONFIG";
+      config: Partial<
+        Pick<
+          WizardState,
+          | "clickStackTelemetryRetentionDays"
+          | "decisionLogAccelerationRetentionDays"
+          | "clickHouseStorageSize"
         >
       >;
     }
@@ -392,6 +416,12 @@ type WizardAction =
           | "kafkaIdentityAwsRoleArn"
           | "kafkaIdentityGcpServiceAccountEmail"
           | "kafkaIdentityAzureClientId"
+          | "postgresMode"
+          | "postgresHost"
+          | "postgresPort"
+          | "postgresDatabase"
+          | "postgresMasterUsername"
+          | "postgresMasterPassword"
         >
       >;
     }
@@ -494,6 +524,10 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
 
     // Features - Monitoring (metrics export is opt-in; in-cluster Prometheus
     // is always installed)
+    clickStackEnabled: true,
+    clickStackTelemetryRetentionDays: 7,
+    decisionLogAccelerationRetentionDays: 30,
+    clickHouseStorageSize: "100Gi",
     metricsExportEnabled: false,
     prometheusMonitoringDestination: null,
     prometheusRemoteWriteUrl: "",
@@ -586,6 +620,14 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     kafkaIdentityGcpServiceAccountEmail: "",
     kafkaIdentityAzureClientId: "",
 
+    // External services - Postgres
+    postgresMode: "embedded",
+    postgresHost: "",
+    postgresPort: 5432,
+    postgresDatabase: "postgres",
+    postgresMasterUsername: "postgres",
+    postgresMasterPassword: "",
+
     // Credentials - pre-populate from profile
     licenseKey: profile?.licenseKey ?? "",
 
@@ -629,7 +671,8 @@ function buildExternalServices(
 ): DeploymentConfig["externalServices"] {
   const redisExternal = state.redisMode === "external";
   const kafkaExternal = state.kafkaMode === "external";
-  if (!redisExternal && !kafkaExternal) {
+  const postgresExternal = state.postgresMode === "external";
+  if (!redisExternal && !kafkaExternal && !postgresExternal) {
     return undefined;
   }
 
@@ -679,6 +722,29 @@ function buildExternalServices(
                 }
               : undefined,
             identity: buildKafkaIdentity(state),
+          }
+        : undefined,
+    },
+    postgres: {
+      mode: state.postgresMode,
+      external: postgresExternal
+        ? {
+            provider:
+              state.provider === "aws" || state.provider === "azure"
+                ? state.provider
+                : undefined,
+            host: state.postgresHost.trim() || undefined,
+            port: state.postgresPort || undefined,
+            database: state.postgresDatabase.trim() || undefined,
+            // One-time creds for the chart's bootstrap hook. The shared
+            // service-role password is sourced separately from the Supabase DB
+            // password (secret.db) so it matches what the services present.
+            bootstrap: {
+              enabled: true,
+              masterUsername: state.postgresMasterUsername.trim() || undefined,
+              masterPassword: state.postgresMasterPassword || undefined,
+              appRole: "postgres",
+            },
           }
         : undefined,
     },
@@ -820,7 +886,7 @@ export function collectConfigIssues(state: WizardState): string[] {
     );
   }
 
-  if (state.tracingEnabled) {
+  if (!state.clickStackEnabled && state.tracingEnabled) {
     if (state.tracingDestination === "elastic") {
       if (!state.tracingElasticEndpoint) {
         issues.push(
@@ -863,7 +929,7 @@ export function collectConfigIssues(state: WizardState): string[] {
     }
   }
 
-  if (state.appLogsEnabled) {
+  if (!state.clickStackEnabled && state.appLogsEnabled) {
     if (!state.appLogsElasticEndpoint) {
       issues.push(
         "Application log shipping is enabled but the Elasticsearch endpoint is missing.",
@@ -926,8 +992,18 @@ export function collectConfigIssues(state: WizardState): string[] {
   if (state.kafkaMode === "external" && !state.kafkaBrokers.trim()) {
     issues.push("External Kafka requires brokers.");
   }
+  if (state.postgresMode === "external") {
+    if (!state.postgresHost.trim()) {
+      issues.push("External Postgres requires a host.");
+    }
+    if (!state.postgresMasterPassword) {
+      issues.push(
+        "External Postgres requires master credentials to initialize the database.",
+      );
+    }
+  }
 
-  if (state.metricsExportEnabled) {
+  if (!state.clickStackEnabled && state.metricsExportEnabled) {
     const remoteWrite = buildRemoteWriteFromState(state);
     if (!remoteWrite) {
       issues.push(
@@ -963,6 +1039,7 @@ export function configToWizardState(
   const customEmails = config.features.customEmails;
   const externalRedis = config.externalServices?.redis;
   const externalKafka = config.externalServices?.kafka;
+  const externalPostgres = config.externalServices?.postgres;
 
   return {
     ...base,
@@ -1027,6 +1104,17 @@ export function configToWizardState(
     ssoUrl: config.features.sso.url ?? "",
     ssoClientId: config.features.sso.clientId ?? "",
     ssoClientSecret: config.features.sso.clientSecret ?? "",
+    clickStackEnabled:
+      config.features.observability?.clickstack?.enabled ?? true,
+    clickStackTelemetryRetentionDays:
+      config.features.observability?.clickstack?.telemetryRetentionDays ??
+      base.clickStackTelemetryRetentionDays,
+    decisionLogAccelerationRetentionDays:
+      config.features.observability?.clickstack?.decisionLogRetentionDays ??
+      base.decisionLogAccelerationRetentionDays,
+    clickHouseStorageSize:
+      config.features.observability?.clickstack?.clickHouseStorageSize ??
+      base.clickHouseStorageSize,
     // The toggle reflects whether remote_write is actually configured, so a
     // redeploy resumes with the metrics-export sub-flow only when in use.
     metricsExportEnabled: !!(
@@ -1167,6 +1255,18 @@ export function configToWizardState(
     kafkaIdentityAzureClientId:
       externalKafka?.external?.identity?.azureClientId ??
       base.kafkaIdentityAzureClientId,
+    // External services - Postgres
+    postgresMode: externalPostgres?.mode ?? base.postgresMode,
+    postgresHost: externalPostgres?.external?.host ?? base.postgresHost,
+    postgresPort: externalPostgres?.external?.port ?? base.postgresPort,
+    postgresDatabase:
+      externalPostgres?.external?.database ?? base.postgresDatabase,
+    postgresMasterUsername:
+      externalPostgres?.external?.bootstrap?.masterUsername ??
+      base.postgresMasterUsername,
+    postgresMasterPassword:
+      externalPostgres?.external?.bootstrap?.masterPassword ??
+      base.postgresMasterPassword,
     licenseKey: config.licenseKey,
     version: config.version,
     chartVersion: config.chartVersion ?? "",
@@ -1244,7 +1344,11 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
     case "SET_SSO_CONFIG":
       return { ...state, ...action.config };
     case "SET_METRICS_EXPORT":
-      return { ...state, metricsExportEnabled: action.enabled };
+      return {
+        ...state,
+        clickStackEnabled: action.enabled ? false : state.clickStackEnabled,
+        metricsExportEnabled: action.enabled,
+      };
     case "SET_PROMETHEUS_REMOTE_WRITE":
       return { ...state, prometheusRemoteWriteUrl: action.url };
     case "SET_PROMETHEUS_REMOTE_WRITE_CONFIG":
@@ -1263,12 +1367,30 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, ...action.config };
     case "SET_LOGGING_CONFIG":
       return { ...state, ...action.config };
+    case "SET_CLICKSTACK_ENABLED":
+      return {
+        ...state,
+        clickStackEnabled: action.enabled,
+        metricsExportEnabled: action.enabled ? false : state.metricsExportEnabled,
+        tracingEnabled: action.enabled ? false : state.tracingEnabled,
+        appLogsEnabled: action.enabled ? false : state.appLogsEnabled,
+      };
+    case "SET_CLICKSTACK_CONFIG":
+      return { ...state, ...action.config };
     case "SET_TRACING_ENABLED":
-      return { ...state, tracingEnabled: action.enabled };
+      return {
+        ...state,
+        clickStackEnabled: action.enabled ? false : state.clickStackEnabled,
+        tracingEnabled: action.enabled,
+      };
     case "SET_TRACING_CONFIG":
       return { ...state, ...action.config };
     case "SET_APP_LOGS_ENABLED":
-      return { ...state, appLogsEnabled: action.enabled };
+      return {
+        ...state,
+        clickStackEnabled: action.enabled ? false : state.clickStackEnabled,
+        appLogsEnabled: action.enabled,
+      };
     case "SET_APP_LOGS_CONFIG":
       return { ...state, ...action.config };
     case "SET_BACKUP_ENABLED":
@@ -1378,7 +1500,7 @@ export function WizardProvider({
     }
 
     const externalServices = buildExternalServices(state);
-    const remoteWrite = state.metricsExportEnabled
+    const remoteWrite = !state.clickStackEnabled && state.metricsExportEnabled
       ? buildRemoteWriteFromState(state)
       : undefined;
 
@@ -1507,7 +1629,7 @@ export function WizardProvider({
         monitoring: {
           // In-cluster Prometheus is always installed.
           enabled: true,
-          destination: state.metricsExportEnabled
+          destination: !state.clickStackEnabled && state.metricsExportEnabled
             ? state.prometheusMonitoringDestination ||
               remoteWrite?.destination ||
               undefined
@@ -1516,14 +1638,22 @@ export function WizardProvider({
               state.prometheusMonitoringDestination === "local-grafana"
               ? "local-grafana"
               : undefined,
-          remoteWriteUrl: state.metricsExportEnabled
+          remoteWriteUrl: !state.clickStackEnabled && state.metricsExportEnabled
             ? state.prometheusRemoteWriteUrl || undefined
             : undefined,
           remoteWrite,
         },
+        observability: {
+          clickstack: {
+            enabled: state.clickStackEnabled,
+            telemetryRetentionDays: state.clickStackTelemetryRetentionDays,
+            decisionLogRetentionDays: state.decisionLogAccelerationRetentionDays,
+            clickHouseStorageSize: state.clickHouseStorageSize,
+          },
+        },
         // Distributed tracing (self-hosted only). Omitted when disabled. The
         // destination selects which backend sub-block is emitted.
-        tracing: state.tracingEnabled
+        tracing: !state.clickStackEnabled && state.tracingEnabled
           ? state.tracingDestination === "otlp"
             ? {
                 enabled: true,
@@ -1613,7 +1743,7 @@ export function WizardProvider({
           bucket: state.loggingPlatformCredential || undefined,
           region: state.loggingPlatformDetail || undefined,
           // Application/container log shipping to Elasticsearch (Vector agent).
-          appLogs: state.appLogsEnabled
+          appLogs: !state.clickStackEnabled && state.appLogsEnabled
             ? {
                 enabled: true,
                 elasticsearch: {
@@ -1663,8 +1793,9 @@ export function WizardProvider({
       "database",
       "database-creds",
       "external-services",
-      "features",
       "storage",
+      "observability",
+      "features",
       "feature-config",
       "version",
       "review",

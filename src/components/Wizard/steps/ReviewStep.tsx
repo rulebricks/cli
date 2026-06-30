@@ -77,8 +77,9 @@ export function ReviewStep({
       ? `${state.storageClass} (${Math.ceil(state.totalPersistentStorageGi)} Gi reported available)`
       : `${state.storageClass} (dynamic PVC provisioning)`
     : '';
-  const monitoringDestination =
-    state.metricsExportEnabled && state.prometheusRemoteWriteDestination
+  const monitoringDestination = state.clickStackEnabled
+    ? 'Prometheus + in-cluster ClickStack metrics mirror'
+    : state.metricsExportEnabled && state.prometheusRemoteWriteDestination
       ? `Remote write: ${state.prometheusRemoteWriteDestination}`
       : 'In-cluster Prometheus (no remote write)';
   const storageAuthValue =
@@ -91,6 +92,8 @@ export function ReviewStep({
           : state.storageAzureBlobClientId
             ? `workload identity (${state.storageAzureBlobClientId})`
             : 'workload identity';
+  const clickStackStorageGi =
+    Number.parseInt(state.clickHouseStorageSize || "0", 10) + 10;
   
   if (editingName) {
     return (
@@ -290,26 +293,51 @@ export function ReviewStep({
           <Text>  </Text>
           <Text color={colors.success}>✓ Monitoring</Text>
           <Text>  </Text>
-          <Text color={state.tracingEnabled ? colors.success : colors.muted}>
-            {state.tracingEnabled ? '✓' : '○'} Tracing
+          <Text color={state.clickStackEnabled ? colors.success : colors.muted}>
+            {state.clickStackEnabled ? '✓' : '○'} ClickStack
           </Text>
           <Text>  </Text>
-          <Text color={state.appLogsEnabled ? colors.success : colors.muted}>
-            {state.appLogsEnabled ? '✓' : '○'} App Logs
+          <Text color={!state.clickStackEnabled && state.tracingEnabled ? colors.success : colors.muted}>
+            {!state.clickStackEnabled && state.tracingEnabled ? '✓' : '○'} Tracing
+          </Text>
+          <Text>  </Text>
+          <Text color={!state.clickStackEnabled && state.appLogsEnabled ? colors.success : colors.muted}>
+            {!state.clickStackEnabled && state.appLogsEnabled ? '✓' : '○'} App Logs
           </Text>
           <Text>  </Text>
           <Text color={state.loggingSink !== 'console' ? colors.success : colors.muted}>
             {state.loggingSink !== 'console' ? '✓' : '○'} Logging
           </Text>
         </Box>
+        <ConfigRow
+          label="Observability"
+          value={
+            state.clickStackEnabled
+              ? 'Built-in ClickStack + HyperDX'
+              : 'BYO/export mode'
+          }
+          valueColor={state.clickStackEnabled ? colors.success : colors.muted}
+        />
+        {state.clickStackEnabled && (
+          <>
+            <ConfigRow
+              label="Retention"
+              value={`decision logs ${state.decisionLogAccelerationRetentionDays}d / telemetry ${state.clickStackTelemetryRetentionDays}d`}
+            />
+            <ConfigRow
+              label="Storage"
+              value={`ClickHouse ${state.clickHouseStorageSize}, HyperDX metadata 10Gi (${clickStackStorageGi} Gi requested)`}
+            />
+          </>
+        )}
         <ConfigRow label="Monitoring" value={monitoringDestination} />
-        {state.tracingEnabled && (
+        {!state.clickStackEnabled && state.tracingEnabled && (
           <ConfigRow
             label="Tracing"
             value={state.tracingElasticEndpoint || 'enabled'}
           />
         )}
-        {state.appLogsEnabled && (
+        {!state.clickStackEnabled && state.appLogsEnabled && (
           <ConfigRow
             label="App logs"
             value={state.appLogsElasticEndpoint || 'enabled'}

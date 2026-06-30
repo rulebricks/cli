@@ -12,6 +12,8 @@ import {
 interface DNSWaitScreenProps {
   domain: string;
   selfHostedSupabase: boolean;
+  builtInObservability?: boolean;
+  observabilityHostname?: string;
   namespace: string;
   onComplete: () => void;
   onSkip?: () => void;
@@ -22,6 +24,8 @@ type Status = "loading-lb" | "idle" | "checking" | "complete" | "error";
 export function DNSWaitScreen({
   domain,
   selfHostedSupabase,
+  builtInObservability = false,
+  observabilityHostname,
   namespace,
   onComplete,
   onSkip,
@@ -89,6 +93,8 @@ export function DNSWaitScreen({
         result.address,
         result.type!,
         selfHostedSupabase,
+        builtInObservability,
+        observabilityHostname,
       );
 
       setRecords(dnsRecords);
@@ -96,7 +102,13 @@ export function DNSWaitScreen({
     };
 
     fetchLB();
-  }, [domain, selfHostedSupabase, namespace]);
+  }, [
+    domain,
+    selfHostedSupabase,
+    builtInObservability,
+    observabilityHostname,
+    namespace,
+  ]);
 
   const verifiedCount = records.filter((r) => r.verified).length;
   const footerText =

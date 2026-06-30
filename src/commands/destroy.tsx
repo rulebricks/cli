@@ -17,12 +17,15 @@ import {
 } from "../lib/config.js";
 import { uninstallChart, getInstalledVersion } from "../lib/helm.js";
 import {
+  cleanupKubeSystemLeftovers,
   cleanupNamespaceAPIServices,
   deleteNamespace,
   deletePVCs,
+  deleteRulebricksCRDs,
   isClusterAccessible,
+  isLastRulebricksDeployment,
   namespaceExists,
-  removeKedaFinalizers,
+  removeBlockingFinalizers,
 } from "../lib/kubernetes.js";
 import { DeploymentState, getNamespace, getReleaseName } from "../types/index.js";
 
@@ -30,6 +33,7 @@ interface DestroyCommandProps {
   name: string;
   config?: boolean;
   force?: boolean;
+  purge?: boolean;
 }
 
 type DestroyStep = "loading" | "confirm" | "destroying" | "complete" | "error";
@@ -38,6 +42,8 @@ interface StepStatus {
   helm: "pending" | "running" | "success" | "error" | "skipped";
   pvc: "pending" | "running" | "success" | "error" | "skipped";
   namespace: "pending" | "running" | "success" | "error" | "skipped";
+  kubeSystem: "pending" | "running" | "success" | "error" | "skipped";
+  crds: "pending" | "running" | "success" | "error" | "skipped";
   cleanup: "pending" | "running" | "success" | "error" | "skipped";
 }
 
@@ -48,7 +54,12 @@ interface DeploymentScope {
   clusterAccessible: boolean;
 }
 
-function DestroyCommandInner({ name, config, force }: DestroyCommandProps) {
+function DestroyCommandInner({
+  name,
+  config,
+  force,
+  purge,
+}: DestroyCommandProps) {
   const { exit } = useApp();
   const { colors } = useTheme();
   const [step, setStep] = useState<DestroyStep>("loading");
@@ -59,6 +70,8 @@ function DestroyCommandInner({ name, config, force }: DestroyCommandProps) {
     helm: "pending",
     pvc: "pending",
     namespace: "pending",
+    kubeSystem: "pending",
+    crds: "pending",
     cleanup: "pending",
   });
 
@@ -143,13 +156,15 @@ function DestroyCommandInner({ name, config, force }: DestroyCommandProps) {
             setStatus((s) => ({ ...s, namespace: "running" }));
             try {
               // Clear teardown deadlocks BEFORE deleting the namespace:
-              //  - KEDA ScaledObject finalizers wait on a controller that's
-              //    being removed with the namespace.
+              //  - Custom-resource finalizers (KEDA ScaledObjects, cert-manager
+              //    ACME Challenges/Orders, Strimzi Kafka) wait on controllers
+              //    removed with the release, so they're never cleared and wedge
+              //    the namespace (and the CRD) in Terminating.
               //  - Aggregated APIServices backed by this namespace's services
               //    (KEDA external.metrics, metrics adapters, etc.) go
               //    Unavailable as the namespace tears down and break the
               //    namespace controller's discovery, wedging it in Terminating.
-              await removeKedaFinalizers(namespace);
+              await removeBlockingFinalizers(namespace);
               await cleanupNamespaceAPIServices(namespace);
               await deleteNamespace(namespace);
               setStatus((s) => ({ ...s, namespace: "success" }));
@@ -159,12 +174,44 @@ function DestroyCommandInner({ name, config, force }: DestroyCommandProps) {
           } else {
             setStatus((s) => ({ ...s, pvc: "skipped", namespace: "skipped" }));
           }
+
+          // Leftovers `helm uninstall` does NOT remove. The prometheus-operator's
+          // kube-system kubelet Service is per-release and operator-created, so
+          // always clean it (safe; scoped to this release only).
+          setStatus((s) => ({ ...s, kubeSystem: "running" }));
+          try {
+            await cleanupKubeSystemLeftovers(releaseName);
+            setStatus((s) => ({ ...s, kubeSystem: "success" }));
+          } catch {
+            setStatus((s) => ({ ...s, kubeSystem: "error" }));
+          }
+
+          // CRDs (cert-manager/keda/strimzi/kube-prometheus-stack) ship in crds/
+          // dirs and are never removed by helm. They are cluster-SHARED, so only
+          // purge them when this is the last Rulebricks deployment on the cluster
+          // (or the operator forces --purge) — otherwise deleting a CRD would
+          // cascade-delete other deployments' custom resources.
+          const purgeCRDs =
+            purge === true || (await isLastRulebricksDeployment(releaseName));
+          if (purgeCRDs) {
+            setStatus((s) => ({ ...s, crds: "running" }));
+            try {
+              await deleteRulebricksCRDs();
+              setStatus((s) => ({ ...s, crds: "success" }));
+            } catch {
+              setStatus((s) => ({ ...s, crds: "error" }));
+            }
+          } else {
+            setStatus((s) => ({ ...s, crds: "skipped" }));
+          }
         } else {
           setStatus((s) => ({
             ...s,
             helm: "skipped",
             pvc: "skipped",
             namespace: "skipped",
+            kubeSystem: "skipped",
+            crds: "skipped",
           }));
         }
 
@@ -191,7 +238,7 @@ function DestroyCommandInner({ name, config, force }: DestroyCommandProps) {
         setStep("error");
       }
     },
-    [name, config, exit],
+    [name, config, purge, exit],
   );
 
   if (step === "loading") {
@@ -228,6 +275,9 @@ function DestroyCommandInner({ name, config, force }: DestroyCommandProps) {
     if (status.pvc === "success") cleanedItems.push("Persistent volume claims");
     if (status.namespace === "success")
       cleanedItems.push("Kubernetes namespace");
+    if (status.kubeSystem === "success")
+      cleanedItems.push("kube-system leftovers (kubelet service)");
+    if (status.crds === "success") cleanedItems.push("Shared CRDs");
     if (status.cleanup === "success")
       cleanedItems.push("Local configuration files");
 
@@ -294,6 +344,14 @@ function DestroyCommandInner({ name, config, force }: DestroyCommandProps) {
               <StatusLine
                 status={status.namespace}
                 label="Deleting namespace"
+              />
+              <StatusLine
+                status={status.kubeSystem}
+                label="Removing kube-system leftovers"
+              />
+              <StatusLine
+                status={status.crds}
+                label="Removing shared CRDs"
               />
             </>
           )}

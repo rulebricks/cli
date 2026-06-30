@@ -178,8 +178,8 @@ export function validateValuesInvariants(values: unknown): string[] {
   //    application uses, and the solution topic must match solutionPartitions
   //    (which HPS receives as MAX_WORKERS). Mirrors the chart's render guard.
   const kafkaEnabled = get(values, ["kafka", "enabled"]);
-  const provisioning = get(values, ["kafka", "provisioning"]);
-  if (kafkaEnabled && provisioning && provisioning.enabled) {
+  const kafkaTopics = get(values, ["kafka", "topics"]);
+  if (kafkaEnabled && Array.isArray(kafkaTopics) && kafkaTopics.length > 0) {
     const logging = get(values, ["rulebricks", "app", "logging"]) ?? {};
     const prefix = Object.prototype.hasOwnProperty.call(
       logging,
@@ -187,18 +187,14 @@ export function validateValuesInvariants(values: unknown): string[] {
     )
       ? String(logging.kafkaTopicPrefix ?? "")
       : "com.rulebricks.";
-    const topics: Array<{ name?: string; partitions?: number }> = Array.isArray(
-      provisioning.topics,
-    )
-      ? provisioning.topics
-      : [];
+    const topics: Array<{ name?: string; partitions?: number }> = kafkaTopics;
     const names = topics.map((t) => t?.name);
 
     for (const base of ["solution", "solution-response", "logs"]) {
       const expected = `${prefix}${base}`;
       if (!names.includes(expected)) {
         errors.push(
-          `kafka.provisioning.topics must include "${expected}" (kafkaTopicPrefix is "${prefix}"); found: ${names.join(", ") || "none"}`,
+          `kafka.topics must include "${expected}" (kafkaTopicPrefix is "${prefix}"); found: ${names.join(", ") || "none"}`,
         );
       }
     }
@@ -211,7 +207,7 @@ export function validateValuesInvariants(values: unknown): string[] {
       solutionTopic.partitions !== solutionPartitions
     ) {
       errors.push(
-        `kafka.provisioning "${prefix}solution" partitions (${solutionTopic.partitions}) must equal rulebricks.hps.workers.solutionPartitions (${solutionPartitions}); HPS derives MAX_WORKERS from it`,
+        `kafka "${prefix}solution" partitions (${solutionTopic.partitions}) must equal rulebricks.hps.workers.solutionPartitions (${solutionPartitions}); HPS derives MAX_WORKERS from it`,
       );
     }
   }

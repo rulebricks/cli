@@ -13,6 +13,7 @@ import {
   SupabaseCredentialsStep,
   FeaturesStep,
   StorageStep,
+  ObservabilityStep,
   ExternalServicesStep,
   FeatureConfigStep,
   VersionStep,
@@ -43,6 +44,10 @@ import {
 } from "../lib/helmValues.js";
 import { assertValidHelmValues } from "../lib/validateValues.js";
 import { ProfileConfig } from "../types/index.js";
+import {
+  getActiveWizardSteps,
+  WizardStepId,
+} from "../lib/wizardSteps.js";
 
 interface InitWizardProps {
   initialName?: string;
@@ -53,18 +58,7 @@ interface InitWizardProps {
 }
 
 // Define step IDs for conditional navigation
-type StepId =
-  | "cloud"
-  | "domain"
-  | "smtp"
-  | "database"
-  | "database-creds"
-  | "external-services"
-  | "features"
-  | "storage"
-  | "feature-config"
-  | "version"
-  | "review";
+type StepId = WizardStepId;
 
 const STEP_INFO: Record<StepId, { title: string; description: string }> = {
   cloud: { title: "Cloud Provider", description: "Select your cloud provider" },
@@ -86,6 +80,10 @@ const STEP_INFO: Record<StepId, { title: string; description: string }> = {
   storage: {
     title: "Storage & Backups",
     description: "Configure object storage and database backups",
+  },
+  observability: {
+    title: "Observability",
+    description: "Choose built-in ClickStack or export to your own systems",
   },
   "feature-config": {
     title: "Feature Settings",
@@ -136,50 +134,13 @@ function WizardStepController({
 
   // Get list of active steps based on config
   const getActiveSteps = useCallback((): StepId[] => {
-    const steps: StepId[] = mode === "redeploy" ? [] : ["cloud"];
-
-    steps.push("domain", "smtp", "database");
-
-    // Database credentials only for self-hosted
-    if (state.databaseType === "self-hosted") {
-      steps.push("database-creds");
-    }
-
-    // External services (managed Redis/Kafka) is always offered; it defaults to
-    // in-cluster and only depends on the selected cloud provider, not the cloud step.
-    steps.push("external-services");
-    steps.push("features");
-
-    // Object storage (plus self-hosted DB backup policy, configured in the same
-    // step) is the canonical destination for decision logs and backups. It runs
-    // before the per-feature configuration so the user sees where their data
-    // lands first, then configures observability exports (metrics, traces, app
-    // logs) against that context.
-    steps.push("storage");
-
-    // Feature config collects the concrete settings for every enabled feature
-    // (AI key, SSO, metrics remote_write, tracing endpoint, app-log shipping,
-    // custom emails). Only included when an enabled feature needs configuration.
-    if (
-      state.aiEnabled ||
-      state.ssoEnabled ||
-      state.metricsExportEnabled ||
-      state.tracingEnabled ||
-      state.appLogsEnabled ||
-      state.loggingSink !== "console" ||
-      state.customEmailsEnabled
-    ) {
-      steps.push("feature-config");
-    }
-
-    steps.push("version", "review");
-
-    return steps;
+    return getActiveWizardSteps(state, mode);
   }, [
     mode,
     state.databaseType,
     state.aiEnabled,
     state.ssoEnabled,
+    state.clickStackEnabled,
     state.metricsExportEnabled,
     state.tracingEnabled,
     state.appLogsEnabled,
@@ -396,6 +357,8 @@ function WizardStepController({
         return <FeaturesStep onComplete={goNext} onBack={goBack} />;
       case "storage":
         return <StorageStep onComplete={goNext} onBack={goBack} />;
+      case "observability":
+        return <ObservabilityStep onComplete={goNext} onBack={goBack} />;
       case "feature-config":
         return (
           <FeatureConfigStep

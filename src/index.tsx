@@ -62,6 +62,10 @@ program
   .argument("[name]", "Deployment name")
   .option("--chart-version <version>", "Specific chart version to deploy")
   .option("--version <version>", "Deprecated alias for --chart-version")
+  .option(
+    "--inline-secrets",
+    "Write secrets inline into values.yaml instead of creating Kubernetes Secrets (dev clusters only)",
+  )
   .action(async (name, options) => {
     const deploymentName = name || (await selectDeployment("deploy"));
     if (!deploymentName) {
@@ -75,6 +79,7 @@ program
       <DeployCommand
         name={deploymentName}
         version={options.chartVersion || options.version}
+        inlineSecrets={options.inlineSecrets}
       />,
     );
     await waitUntilExit();
@@ -137,6 +142,10 @@ program
   .argument("[name]", "Deployment name")
   .option("--config", "Also delete local configuration files")
   .option("-f, --force", "Skip confirmation")
+  .option(
+    "--purge",
+    "Force removal of cluster-shared CRDs (cert-manager/keda/strimzi/prometheus); by default they're removed only when this is the last Rulebricks deployment on the cluster",
+  )
   .action(async (name, options) => {
     // For destroy, require explicit deployment name
     if (!name) {
@@ -161,6 +170,7 @@ program
         name={name}
         config={options.config}
         force={options.force}
+        purge={options.purge}
       />,
     );
     await waitUntilExit();

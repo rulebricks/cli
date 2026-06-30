@@ -293,6 +293,8 @@ export function getRequiredDNSRecords(
   loadBalancerAddress: string,
   loadBalancerType: "ip" | "hostname",
   selfHostedSupabase: boolean,
+  builtInObservability: boolean = false,
+  observabilityHostname?: string,
 ): DNSRecord[] {
   const records: DNSRecord[] = [
     {
@@ -308,6 +310,16 @@ export function getRequiredDNSRecords(
   if (selfHostedSupabase) {
     records.push({
       hostname: `supabase.${domain}`,
+      type: loadBalancerType === "ip" ? "A" : "CNAME",
+      target: loadBalancerAddress,
+      verified: false,
+      required: true,
+    });
+  }
+
+  if (builtInObservability) {
+    records.push({
+      hostname: observabilityHostname || `observability.${domain}`,
       type: loadBalancerType === "ip" ? "A" : "CNAME",
       target: loadBalancerAddress,
       verified: false,
