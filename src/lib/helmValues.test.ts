@@ -1140,7 +1140,7 @@ test("external Postgres k8s secret mode keeps compatibility and uses secret refs
     "db.cluster-xxxx.us-east-1.rds.amazonaws.com",
   );
   assert.equal(sb.externalDatabase.port, 5432);
-  assert.equal(sb.externalDatabase.secretRef, `${config.name}-supabase-db`);
+  assert.equal(sb.externalDatabase.secretRef, `${getReleaseName(config.name)}-supabase-db`);
   assert.deepEqual(sb.externalDatabase.secretRefKey, {
     host: "host",
     port: "port",
@@ -1150,10 +1150,10 @@ test("external Postgres k8s secret mode keeps compatibility and uses secret refs
   });
   assert.equal(
     sb.externalDatabase.bootstrap.secretRef,
-    `${config.name}-supabase-db-bootstrap`,
+    `${getReleaseName(config.name)}-supabase-db-bootstrap`,
   );
   assert.equal(sb.externalDatabase.bootstrap.masterPassword, undefined);
-  assert.equal(sb.secret.db.secretRef, `${config.name}-supabase-db`);
+  assert.equal(sb.secret.db.secretRef, `${getReleaseName(config.name)}-supabase-db`);
   assert.deepEqual(sb.secret.db.secretRefKey, {
     host: "host",
     port: "port",
@@ -1173,7 +1173,7 @@ test("embedded Postgres still deploys the bundled database", () => {
 import { buildDeploymentSecrets } from "./secrets.js";
 import { deriveRealtimeSecrets } from "./helmValues.js";
 
-test("k8s secret mode: secretRefs set, zero plaintext secrets in values", () => {
+test("k8s secret mode: secretRefs set, app secrets kept out of values (license stays inline for the pull secret)", () => {
   const config = cloneFixture("aws-self-hosted-minimal");
   config.features.ai = {
     enabled: true,
@@ -1194,34 +1194,42 @@ test("k8s secret mode: secretRefs set, zero plaintext secrets in values", () => 
     `k8s secret-mode values should satisfy chart schema:\n${schemaResult.errors.join("\n")}`,
   );
   // secretRef seams point at the CLI-created Secrets
-  assert.equal(values.global.secrets.secretRef, `${config.name}-app-secrets`);
+  assert.equal(values.global.secrets.secretRef, `${getReleaseName(config.name)}-app-secrets`);
   assert.equal(
     values.supabase.secret.db.secretRef,
-    `${config.name}-supabase-db`,
+    `${getReleaseName(config.name)}-supabase-db`,
   );
   assert.equal(
     values.supabase.secret.jwt.secretRef,
-    `${config.name}-supabase-jwt`,
+    `${getReleaseName(config.name)}-supabase-jwt`,
   );
   assert.equal(
     values.supabase.secret.dashboard.secretRef,
-    `${config.name}-supabase-dashboard`,
+    `${getReleaseName(config.name)}-supabase-dashboard`,
   );
   assert.equal(
     values.supabase.secret.realtime.secretRef,
-    `${config.name}-supabase-realtime`,
+    `${getReleaseName(config.name)}-supabase-realtime`,
   );
-  // inline plaintext stripped
+  // Genuinely-sensitive app secrets are stripped (delivered via secretRef).
   assert.equal(values.global.supabase.jwtSecret, undefined);
   assert.equal(values.global.ai.openaiApiKey, undefined);
-  assert.equal(values.global.licenseKey, undefined);
-  // no secret value appears anywhere in the generated values
+  // These two MUST stay inline: the standard (unmodified) chart consumes them at
+  // Helm TEMPLATE time with no secretRef seam.
+  //  - licenseKey -> registry-secret.yaml builds the <release>-regcred pull
+  //    secret. Stripping it => dckr_pat_evaluation => 401 on every private image.
+  //  - anonKey (public) -> app-configmap.yaml NEXT_PUBLIC_SUPABASE_PUBLIC_KEY.
+  assert.equal(values.global.licenseKey, license);
+  assert.ok(
+    values.global.supabase.anonKey,
+    "public anonKey must remain inline in k8s mode for the app ConfigMap",
+  );
+  // The genuinely-sensitive app secrets never appear in the generated values.
   const dump = JSON.stringify(values);
   for (const [label, secret] of [
     ["db password", dbPw],
     ["jwt secret", jwt],
     ["dashboard password", dashPw],
-    ["license key", license],
     ["openai key", openai],
   ] as const) {
     assert.ok(!dump.includes(secret), `${label} leaked into k8s-mode values`);
@@ -1245,7 +1253,7 @@ test("k8s secret mode: SSO + AI configs validate against the chart schema", () =
   assert.equal(values.global.sso.clientId, undefined);
   assert.equal(values.global.sso.clientSecret, undefined);
   assert.equal(values.global.ai.openaiApiKey, undefined);
-  assert.equal(values.global.secrets.secretRef, `${config.name}-app-secrets`);
+  assert.equal(values.global.secrets.secretRef, `${getReleaseName(config.name)}-app-secrets`);
 });
 
 test("k8s secret mode: managed Supabase config validates against the chart schema", () => {
@@ -1263,7 +1271,7 @@ test("k8s secret mode: managed Supabase config validates against the chart schem
   );
   assert.equal(values.global.supabase.accessToken, undefined);
   assert.ok(values.global.supabase.url);
-  assert.equal(values.global.secrets.secretRef, `${config.name}-app-secrets`);
+  assert.equal(values.global.secrets.secretRef, `${getReleaseName(config.name)}-app-secrets`);
 });
 
 test("inline secret mode keeps secrets in values (dev path)", () => {
@@ -1289,7 +1297,7 @@ test("buildDeploymentSecrets: app + supabase secrets with JWT-derived keys", () 
   const byName = Object.fromEntries(
     buildDeploymentSecrets(config).map((s) => [s.name, s.stringData]),
   );
-  const base = config.name;
+  const base = getReleaseName(config.name);
   assert.equal(byName[`${base}-app-secrets`].LICENSE_KEY, config.licenseKey);
   assert.equal(
     byName[`${base}-supabase-db`].password,
@@ -1317,7 +1325,7 @@ test("buildDeploymentSecrets includes external Postgres host/port and bootstrap 
   const byName = Object.fromEntries(
     buildDeploymentSecrets(config).map((s) => [s.name, s.stringData]),
   );
-  const base = config.name;
+  const base = getReleaseName(config.name);
 
   assert.deepEqual(byName[`${base}-supabase-db`], {
     username: "postgres",
@@ -1331,6 +1339,67 @@ test("buildDeploymentSecrets includes external Postgres host/port and bootstrap 
     "master-password": "master-pw-change-me",
     "service-password": config.database.supabaseDbPassword,
   });
+});
+
+test("external Postgres wires migrations.externalDb host/port for the migration hook", () => {
+  // templates/migration-job.yaml reads DB_HOST from .Values.migrations.externalDb
+  // (not supabase.externalDatabase). If unset, pg_isready gets an empty host and
+  // the migrate hook hangs until Helm times out. Guards that regression.
+  const config = cloneFixture("aws-external-postgres");
+  const values = buildHelmValues(config, { secretMode: "k8s" }) as Record<
+    string,
+    any
+  >;
+  assert.ok(
+    values.migrations?.externalDb,
+    "migrations.externalDb must be set for external Postgres",
+  );
+  assert.ok(
+    values.migrations.externalDb.host,
+    "migration-hook DB_HOST must be non-empty",
+  );
+  assert.equal(
+    values.migrations.externalDb.host,
+    values.supabase.externalDatabase.host,
+  );
+  assert.equal(values.migrations.externalDb.port, "5432");
+  // Migrations run as the master (bootstrap only sets service-role passwords, not
+  // the master's), so DB_PASSWORD must come from the bootstrap Secret's
+  // master-password, NOT the service password in <release>-supabase-db.
+  assert.equal(
+    values.migrations.externalDb.existingSecret,
+    `${getReleaseName(config.name)}-supabase-db-bootstrap`,
+  );
+  assert.equal(values.migrations.externalDb.existingSecretKey, "master-password");
+  // Bundled-Postgres deploys must NOT set it (chart uses the internal service).
+  const internal = buildHelmValues(cloneFixture("aws-self-hosted-minimal"), {
+    secretMode: "k8s",
+  }) as Record<string, any>;
+  assert.equal(internal.migrations?.externalDb, undefined);
+});
+
+test("supabase kong ingress carries Traefik websecure router annotations under TLS", () => {
+  // The supabase subchart's kong ingress doesn't emit router.entrypoints/tls
+  // itself, so Traefik only builds a web router and https://supabase.<domain>
+  // 404s. The CLI must inject them (via the subchart's annotations passthrough).
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const tls = buildHelmValues(config, {
+    tlsEnabled: true,
+    secretMode: "k8s",
+  }) as Record<string, any>;
+  const a = tls.supabase.kong.ingress.annotations;
+  assert.equal(
+    a["traefik.ingress.kubernetes.io/router.entrypoints"],
+    "websecure",
+  );
+  assert.equal(a["traefik.ingress.kubernetes.io/router.tls"], "true");
+  const notls = buildHelmValues(config, {
+    tlsEnabled: false,
+    secretMode: "k8s",
+  }) as Record<string, any>;
+  const b = notls.supabase.kong.ingress.annotations;
+  assert.equal(b["traefik.ingress.kubernetes.io/router.entrypoints"], "web");
+  assert.equal(b["traefik.ingress.kubernetes.io/router.tls"], "false");
 });
 
 // ===========================================================================

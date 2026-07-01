@@ -31,6 +31,13 @@ interface GenerateOptions {
 // Names of the Kubernetes Secrets the CLI creates in k8s secret mode. Shared by
 // the value generator (which sets the secretRef fields) and src/lib/secrets.ts
 // (which creates the Secrets) so they always agree.
+//
+// The base MUST be the Helm release name, not config.name. Most chart consumers
+// read the secretRef *value* (name-agnostic), but a few templates hardcode the
+// canonical <release>-* name — e.g. templates/migration-job.yaml derives
+// DB_PASSWORD from `{{ .Release.Name }}-supabase-db`. Naming these secrets with
+// the release name keeps the CLI a faithful drop-in for the unmodified chart so
+// we never have to customize the chart to match the CLI.
 export function deploymentSecretNames(config: DeploymentConfig): {
   app: string;
   db: string;
@@ -40,7 +47,7 @@ export function deploymentSecretNames(config: DeploymentConfig): {
   realtime: string;
   smtp: string;
 } {
-  const base = config.name;
+  const base = getReleaseName(config.name);
   return {
     app: `${base}-app-secrets`,
     db: `${base}-supabase-db`,
@@ -2350,7 +2357,20 @@ export function buildHelmValues(
                 ingress: {
                   enabled: true,
                   className: "traefik",
-                  annotations: {},
+                  // The supabase subchart's kong ingress does NOT emit Traefik's
+                  // router.entrypoints/router.tls annotations the way the app
+                  // ingress does — without them Traefik only builds a web (HTTP)
+                  // router, so https://supabase.<domain> 404s and the app can't
+                  // reach Supabase. Inject them via the subchart's annotations
+                  // passthrough (kong/ingress.yaml ranges over these), matching
+                  // charts/rulebricks/templates/ingress.yaml.
+                  annotations: {
+                    "traefik.ingress.kubernetes.io/router.entrypoints":
+                      tlsEnabled ? "websecure" : "web",
+                    "traefik.ingress.kubernetes.io/router.tls": tlsEnabled
+                      ? "true"
+                      : "false",
+                  },
                 },
               },
               studio: {
@@ -2528,6 +2548,37 @@ export function buildHelmValues(
         },
   };
 
+  // The managed-Postgres migration hook (templates/migration-job.yaml) reads the
+  // DB host/port from .Values.migrations.externalDb — a SEPARATE seam from
+  // supabase.externalDatabase.* — and its `pg_isready -h $DB_HOST` loop hangs
+  // forever (empty host) if it is unset. Wire it for external Postgres. We only
+  // set host/port: DB_PASSWORD falls back to the <release>-supabase-db secret and
+  // DB_USER/DB_NAME default to "postgres", which match deploymentSecretNames()
+  // and the bootstrap app role.
+  const migrationsPgExt =
+    config.database.type === "self-hosted" &&
+    config.externalServices?.postgres?.mode === "external"
+      ? config.externalServices.postgres.external
+      : undefined;
+  if (migrationsPgExt) {
+    values.migrations = {
+      externalDb: {
+        host: migrationsPgExt.host ?? "",
+        // Chart schema requires a string here (the template quotes it).
+        port: String(migrationsPgExt.port ?? 5432),
+        // Run migrations as the master/app_role. The bootstrap hook creates the
+        // service login roles (authenticator, supabase_auth_admin, …) with the
+        // service password but deliberately does NOT change the master's
+        // password (bootstrap.sql runs "as the master user (named postgres)").
+        // So the migrate hook must authenticate with the MASTER credential, not
+        // the service password in <release>-supabase-db (that would 401). Point
+        // DB_PASSWORD at the bootstrap Secret's master-password.
+        existingSecret: deploymentSecretNames(config).dbBootstrap,
+        existingSecretKey: "master-password",
+      },
+    };
+  }
+
   // In k8s secret mode, the CLI creates Kubernetes Secrets and the chart reads
   // them by reference. Point the chart's secretRef seams at those Secrets and
   // strip every plaintext secret out of the generated values.
@@ -2565,7 +2616,13 @@ export function redactSecretsToRefs(
   }
   if (global.supabase) {
     delete global.supabase.jwtSecret;
-    delete global.supabase.anonKey;
+    // NOTE: anonKey is intentionally NOT stripped. It is the *public* Supabase
+    // key that app-configmap.yaml embeds into the Next.js client bundle
+    // (SUPABASE_PUBLIC_KEY / NEXT_PUBLIC_SUPABASE_PUBLIC_KEY). That ConfigMap
+    // reads global.supabase.anonKey at TEMPLATE time and there is no secretRef
+    // seam for it, so stripping it leaves the browser client with an empty key.
+    // It is a public token (safe in a ConfigMap by design) and never appears in
+    // the k8s-mode secret-leak checks.
     delete global.supabase.serviceKey;
     delete global.supabase.accessToken;
   }
@@ -2574,7 +2631,16 @@ export function redactSecretsToRefs(
     delete global.sso.clientId;
     delete global.sso.clientSecret;
   }
-  delete global.licenseKey;
+  // NOTE: licenseKey is intentionally NOT stripped. The (standard) chart builds
+  // the image-pull secret <release>-regcred from inline global.licenseKey at
+  // TEMPLATE time (templates/registry-secret.yaml -> imagePullSecret helper). A
+  // Kubernetes imagePullSecret cannot be sourced from a secretRef, so the chart
+  // has no k8s-mode seam for it — stripping it makes the chart fall back to the
+  // "evaluation" placeholder -> dckr_pat_evaluation -> 401 on every private
+  // rulebricks/* image. Standalone chart users set global.licenseKey in their own
+  // values for exactly this reason; the CLI must do the same to stay compatible
+  // with the unmodified chart. It is a Docker Hub read-only PAT and already lives
+  // in the deployment's config.yaml, so keeping it inline adds no new exposure.
 
   // Supabase subchart: replace each inline secret block with a secretRef.
   if (supabase.secret) {
@@ -2683,6 +2749,23 @@ export async function updateHelmValuesForTLS(
           }
         }
       }
+    }
+
+    // Keep the supabase kong ingress on the right Traefik entrypoint. The
+    // subchart doesn't emit router.entrypoints/tls itself, so on the TLS-toggle
+    // path (not a full regen) HTTPS to supabase.<domain> would 404 without this.
+    // Mirrors what buildHelmValues sets on the kong ingress annotations.
+    const supabase = values.supabase as Record<string, unknown> | undefined;
+    const kongIngress = (supabase?.kong as Record<string, unknown> | undefined)
+      ?.ingress as Record<string, unknown> | undefined;
+    if (kongIngress && typeof kongIngress === "object") {
+      kongIngress.annotations = {
+        ...(kongIngress.annotations as Record<string, unknown> | undefined),
+        "traefik.ingress.kubernetes.io/router.entrypoints": tlsEnabled
+          ? "websecure"
+          : "web",
+        "traefik.ingress.kubernetes.io/router.tls": tlsEnabled ? "true" : "false",
+      };
     }
 
     // Save updated values
