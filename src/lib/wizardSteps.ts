@@ -20,6 +20,7 @@ export interface WizardStepState {
   metricsExportEnabled: boolean;
   tracingEnabled: boolean;
   appLogsEnabled: boolean;
+  valkeyAdminEnabled: boolean;
   loggingSink: string;
   customEmailsEnabled: boolean;
 }
@@ -47,6 +48,7 @@ export function getActiveWizardSteps(
     (!state.clickStackEnabled && state.metricsExportEnabled) ||
     (!state.clickStackEnabled && state.tracingEnabled) ||
     (!state.clickStackEnabled && state.appLogsEnabled) ||
+    state.valkeyAdminEnabled ||
     state.loggingSink !== "console" ||
     state.customEmailsEnabled
   ) {

@@ -12,7 +12,6 @@ interface ObservabilityStepProps {
 
 type SubStep =
   | "mode"
-  | "builtin-decision-retention"
   | "builtin-telemetry-retention"
   | "builtin-clickhouse-storage"
   | "byo-signals";
@@ -63,9 +62,6 @@ export function ObservabilityStep({
   const { state, dispatch } = useWizard();
   const { colors } = useTheme();
   const [subStep, setSubStep] = useState<SubStep>("mode");
-  const [decisionRetention, setDecisionRetention] = useState(
-    String(state.decisionLogAccelerationRetentionDays || 30),
-  );
   const [telemetryRetention, setTelemetryRetention] = useState(
     String(state.clickStackTelemetryRetentionDays || 7),
   );
@@ -123,7 +119,7 @@ export function ObservabilityStep({
   const chooseMode = (item: { value: string }) => {
     if (item.value === "built-in") {
       dispatch({ type: "SET_CLICKSTACK_ENABLED", enabled: true });
-      setSubStep("builtin-decision-retention");
+      setSubStep("builtin-telemetry-retention");
       return;
     }
 
@@ -135,10 +131,6 @@ export function ObservabilityStep({
     dispatch({
       type: "SET_CLICKSTACK_CONFIG",
       config: {
-        decisionLogAccelerationRetentionDays: parsePositiveInt(
-          decisionRetention,
-          30,
-        ),
         clickStackTelemetryRetentionDays: parsePositiveInt(telemetryRetention, 7),
         clickHouseStorageSize: normalizeSize(clickHouseStorage, "100Gi"),
       },
@@ -172,7 +164,8 @@ export function ObservabilityStep({
           <Text>How should Rulebricks observability be set up?</Text>
           <Text color="gray" dimColor>
             Built-in ClickStack gives you logs, traces, mirrored metrics, and
-            accelerated decision-log queries in-cluster.
+            operational dashboards. Decision logs stay in object storage and are
+            queried directly when needed.
           </Text>
         </Box>
         <SelectInput items={MODE_OPTIONS} onSelect={chooseMode} />
@@ -185,35 +178,14 @@ export function ObservabilityStep({
     );
   }
 
-  if (subStep === "builtin-decision-retention") {
-    return (
-      <BorderBox title="Decision Log Acceleration">
-        <Box flexDirection="column" marginY={1}>
-          <Text>How many days of decision logs should stay fast in ClickHouse?</Text>
-          <Text color="gray" dimColor>
-            Older records still fall back to the object-storage archive.
-          </Text>
-          <Box marginTop={1}>
-            <Text>Days: </Text>
-            <TextInput
-              value={decisionRetention}
-              onChange={setDecisionRetention}
-              onSubmit={() => setSubStep("builtin-telemetry-retention")}
-              placeholder="30"
-            />
-          </Box>
-        </Box>
-      </BorderBox>
-    );
-  }
-
   if (subStep === "builtin-telemetry-retention") {
     return (
       <BorderBox title="Telemetry Retention">
         <Box flexDirection="column" marginY={1}>
           <Text>How many days of ClickStack logs/traces/metrics should be retained?</Text>
           <Text color="gray" dimColor>
-            This controls operational telemetry TTL, not the decision-log archive.
+            This controls operational telemetry TTL. Decision logs are archived
+            only to object storage.
           </Text>
           <Box marginTop={1}>
             <Text>Days: </Text>
@@ -235,7 +207,7 @@ export function ObservabilityStep({
         <Box flexDirection="column" marginY={1}>
           <Text>How large should the ClickHouse PVC be?</Text>
           <Text color="gray" dimColor>
-            Stores recent decision logs and ClickStack telemetry. Example: 100Gi
+            Stores ClickStack operational telemetry. Example: 100Gi
           </Text>
           {renderCapacitySummary()}
           <Box marginTop={1}>

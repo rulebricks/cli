@@ -63,7 +63,7 @@ function providerToCloud(provider: ObjectStorageProvider): CloudProvider {
   return "aws";
 }
 
-function defaultProviderForCloud(
+export function storageProviderForCloud(
   provider: string | null,
 ): ObjectStorageProvider {
   if (provider === "azure") return "azure-blob";
@@ -76,6 +76,19 @@ function defaultProviderForCloud(
 // single-letter suffix; AWS/Azure regions never do, so this is GCS-only.
 function gcpZoneToRegion(location: string): string {
   return location.replace(/-[a-z]$/, "");
+}
+
+export function storageRegionForCloud(
+  cloudProvider: string | null,
+  clusterRegion: string,
+  savedStorageProvider?: ObjectStorageProvider | null,
+  savedStorageRegion?: string,
+): string {
+  const provider = storageProviderForCloud(cloudProvider);
+  if (savedStorageProvider === provider && savedStorageRegion) {
+    return savedStorageRegion;
+  }
+  return provider === "gcs" ? gcpZoneToRegion(clusterRegion) : clusterRegion;
 }
 
 type Field =
@@ -115,47 +128,69 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
   // Object storage always lives in the same cloud as the cluster, so derive the
   // provider from the cluster's cloud instead of asking again. (No real scenario
   // deploys to e.g. an AKS cluster and writes to S3.)
-  const provider: ObjectStorageProvider =
-    state.storageProvider || defaultProviderForCloud(state.provider);
+  const provider: ObjectStorageProvider = storageProviderForCloud(state.provider);
 
   // The storage region is likewise assumed to be the cluster's region, so the
   // region question is skipped whenever one is known (Esc from the bucket list
   // still drops back to region selection for the rare cross-region setup).
   // Only the manual-cluster path (no region captured) asks up front.
+  const savedStorageMatchesProvider = state.storageProvider === provider;
   const initialRegion =
-    state.storageRegion ||
-    (provider === "gcs" ? gcpZoneToRegion(state.region) : state.region) ||
-    "";
+    storageRegionForCloud(
+      state.provider,
+      state.region,
+      state.storageProvider,
+      state.storageRegion,
+    ) || "";
   const [field, setField] = useState<Field>(
     initialRegion ? "bucket-loading" : "region-loading",
   );
 
   const [region, setRegion] = useState(initialRegion);
-  const [bucket, setBucket] = useState(state.storageBucket || "");
-  const [roleArn, setRoleArn] = useState(state.storageAwsIamRoleArn || "");
+  const [bucket, setBucket] = useState(
+    savedStorageMatchesProvider ? state.storageBucket || "" : "",
+  );
+  const [roleArn, setRoleArn] = useState(
+    savedStorageMatchesProvider && provider === "s3"
+      ? state.storageAwsIamRoleArn || ""
+      : "",
+  );
   const [azureContainer, setAzureContainer] = useState(
-    state.storageAzureBlobContainer || "rulebricks",
+    savedStorageMatchesProvider && provider === "azure-blob"
+      ? state.storageAzureBlobContainer || "rulebricks"
+      : "rulebricks",
   );
   const [authMode, setAuthMode] = useState<CloudLoggingAuthMode>(
-    state.storageCloudAuthMode || "workload-identity",
+    savedStorageMatchesProvider && provider === "azure-blob"
+      ? state.storageCloudAuthMode || "workload-identity"
+      : "workload-identity",
   );
   const [azureClientId, setAzureClientId] = useState(
-    state.storageAzureBlobClientId || "",
+    savedStorageMatchesProvider && provider === "azure-blob"
+      ? state.storageAzureBlobClientId || ""
+      : "",
   );
   const [azureTenantId, setAzureTenantId] = useState(
-    state.storageAzureBlobTenantId || "",
+    savedStorageMatchesProvider && provider === "azure-blob"
+      ? state.storageAzureBlobTenantId || ""
+      : "",
   );
   const [tenantAutoDetected, setTenantAutoDetected] = useState(false);
   const [azureSecretRef, setAzureSecretRef] = useState(
-    state.storageAzureBlobConnectionStringSecretRef || "",
+    savedStorageMatchesProvider && provider === "azure-blob"
+      ? state.storageAzureBlobConnectionStringSecretRef || ""
+      : "",
   );
   const [gcpServiceAccount, setGcpServiceAccount] = useState(
-    state.storageGcpServiceAccountEmail || "",
+    savedStorageMatchesProvider && provider === "gcs"
+      ? state.storageGcpServiceAccountEmail || ""
+      : "",
   );
 
-  // Database backups are configured in this same step (self-hosted only); they
-  // share the bucket above and land under the db-backups/ prefix.
-  const isSelfHosted = state.databaseType === "self-hosted";
+  // Database backups are configured in this same step only when the chart owns
+  // the in-cluster Postgres. Managed/external databases own their own backups.
+  const usesInClusterPostgres =
+    state.databaseType === "self-hosted" && state.postgresMode !== "external";
   const [backupEnabled, setBackupEnabled] = useState(state.backupEnabled);
   const [backupSchedule, setBackupSchedule] = useState(
     state.backupSchedule || "0 2 * * *",
@@ -346,12 +381,12 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
     });
   };
 
-  // After object storage is configured, self-hosted deployments continue into
-  // the database backup policy (same bucket); managed-database deployments are
-  // done here.
+  // After object storage is configured, deployments with bundled Postgres
+  // continue into the database backup policy (same bucket); external databases
+  // are done here.
   const completeFromStorage = () => {
     persistStorage();
-    if (isSelfHosted) {
+    if (usesInClusterPostgres) {
       setField("backup-enabled");
     } else {
       onComplete();
@@ -679,14 +714,22 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
     </Box>
   );
 
-  const storageTitle = isSelfHosted ? "Storage & Backups" : "Object Storage";
+  const storageTitle = usesInClusterPostgres
+    ? "Storage & Backups"
+    : "Object Storage";
+  const storagePurpose = usesInClusterPostgres
+    ? "Decision logs and database backups are stored as prefixes within it."
+    : "Decision logs are stored as a prefix within it.";
+  const cloudAccessPurpose = usesInClusterPostgres
+    ? "decision logs, database backups, and metrics"
+    : "decision logs and metrics";
 
   return (
     <BorderBox title={storageTitle}>
       <Box flexDirection="column" marginBottom={1}>
         <Text>Configure one bucket/container for all Rulebricks data.</Text>
         <Text color="gray" dimColor>
-          Decision logs and database backups are stored as prefixes within it.
+          {storagePurpose}
         </Text>
       </Box>
 
@@ -790,7 +833,7 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
           <Text bold>Select the Rulebricks IAM role</Text>
           <Text color="gray" dimColor>
             The single role from cluster-setup ({`${state.clusterName || "<cluster>"}-rulebricks`}),
-            used for all cloud access: decision logs, database backups, and metrics.
+            used for all cloud access: {cloudAccessPurpose}.
           </Text>
           {(() => {
             const recommendedIndex = Math.max(
@@ -843,7 +886,7 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
           <Text bold>Select the Rulebricks Google service account</Text>
           <Text color="gray" dimColor>
             The single service account from cluster-setup, used for all cloud
-            access: decision logs, database backups, and metrics.
+            access: {cloudAccessPurpose}.
           </Text>
           {(() => {
             const recommendedIndex = Math.max(
@@ -968,7 +1011,7 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
           <Text bold>Select the Rulebricks workload identity</Text>
           <Text color="gray" dimColor>
             The single identity from cluster-setup ({`${state.clusterName || "<cluster>"}-rulebricks`}),
-            used for all cloud access: decision logs, database backups, and metrics.
+            used for all cloud access: {cloudAccessPurpose}.
           </Text>
           {(() => {
             const recommendedIndex = Math.max(
@@ -1063,7 +1106,7 @@ export function StorageStep({ onComplete, onBack }: StorageStepProps) {
           </Box>
           <Box marginTop={1}>
             <Text color={colors.muted}>
-              {isSelfHosted
+              {usesInClusterPostgres
                 ? "Press Enter to configure database backups"
                 : "Press Enter to continue"}
             </Text>

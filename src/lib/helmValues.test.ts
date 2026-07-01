@@ -2,8 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { buildHelmValues } from "./helmValues.js";
+import { buildHelmValues, signSupabaseJwt } from "./helmValues.js";
 import { getActiveWizardSteps } from "./wizardSteps.js";
+import {
+  collectConfigIssues,
+  configToWizardState,
+} from "../components/Wizard/WizardContext.js";
+import {
+  storageProviderForCloud,
+  storageRegionForCloud,
+} from "../components/Wizard/steps/StorageStep.js";
 import {
   validateHelmValues,
   validateValuesInvariants,
@@ -105,10 +113,7 @@ test("ClickStack is the default in-cluster observability backend", () => {
   assert.ok(values.global.supabase.anonKey.length > 0);
   assert.ok(values.global.supabase.serviceKey.length > 0);
   assert.equal(values.decisionLogs, undefined);
-  assert.deepEqual(values.global.clickstack.clickhouse.decisionLogs, {
-    retentionDays: 30,
-    objectStorageFallback: { enabled: true },
-  });
+  assert.equal(values.global.clickstack.clickhouse, undefined);
   assert.equal(values.clickstack.enabled, true);
   assert.equal(values.clickhouse.persistence.enabled, true);
   assert.equal(values.clickhouse.persistence.size, "100Gi");
@@ -123,15 +128,7 @@ test("ClickStack is the default in-cluster observability backend", () => {
   });
   assert.equal(values.clickstack.clickhouse.retentionDays, 7);
   assert.equal(values.clickstack.clickhouse.ttl, "");
-  assert.deepEqual(values.clickstack.clickhouse.decisionLogs, {
-    retentionDays: 30,
-    sink: {
-      batchMaxBytes: 10485760,
-      batchTimeoutSecs: 5,
-      bufferMaxSize: 1073741824,
-    },
-    objectStorageFallback: { enabled: true },
-  });
+  assert.equal(values.clickstack.clickhouse.decisionLogs, undefined);
   assert.deepEqual(values.clickstack.hyperdx.resources, {
     requests: { cpu: "250m", memory: "512Mi" },
     limits: { cpu: "1000m", memory: "1Gi" },
@@ -158,25 +155,11 @@ test("ClickStack is the default in-cluster observability backend", () => {
     limits: { cpu: "1000m", memory: "1Gi" },
   });
   assert.equal(values["vector-agent"].enabled, false);
+  assert.equal(values.vector.customConfig.sinks.decision_logs_clickhouse, undefined);
+  assert.ok(values.vector.customConfig.sinks.decision_logs);
   assert.equal(
-    values.vector.customConfig.sinks.decision_logs_clickhouse.table,
-    "decision_logs_recent",
-  );
-  assert.equal(
-    values.vector.customConfig.sinks.decision_logs_clickhouse.auth.password,
-    "${CLICKHOUSE_PASSWORD}",
-  );
-  assert.deepEqual(
-    values.vector.customConfig.sinks.decision_logs_clickhouse.buffer,
-    {
-      type: "disk",
-      max_size: 1073741824,
-      when_full: "drop_newest",
-    },
-  );
-  assert.ok(
     values.vector.env.some((entry: { name?: string }) => entry.name === "CLICKHOUSE_PASSWORD"),
-    "expected Vector to receive the ClickHouse password for the acceleration sink",
+    false,
   );
   assert.equal(values.global.tracing, undefined);
   assert.equal(values.traefik.tracing.otlp.enabled, true);
@@ -192,7 +175,6 @@ test("built-in observability settings flow into generated Helm values", () => {
     clickstack: {
       enabled: true,
       telemetryRetentionDays: 14,
-      decisionLogRetentionDays: 45,
       clickHouseStorageSize: "250Gi",
     },
   };
@@ -200,13 +182,66 @@ test("built-in observability settings flow into generated Helm values", () => {
   const values = buildHelmValues(config) as Record<string, any>;
 
   assert.equal(values.clickstack.clickhouse.retentionDays, 14);
-  assert.equal(values.clickstack.clickhouse.decisionLogs.retentionDays, 45);
-  assert.equal(
-    values.global.clickstack.clickhouse.decisionLogs.retentionDays,
-    45,
-  );
+  assert.equal(values.clickstack.clickhouse.decisionLogs, undefined);
+  assert.equal(values.global.clickstack.clickhouse, undefined);
   assert.equal(values.clickhouse.persistence.size, "250Gi");
   assert.equal(values.clickstack.ferretdb.persistence.size, "10Gi");
+});
+
+test("buildHelmValues rejects self-hosted Supabase without a JWT secret early", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  delete config.database.supabaseJwtSecret;
+
+  assert.throws(
+    () => buildHelmValues(config),
+    /Self-hosted Supabase is missing a JWT secret/,
+  );
+});
+
+test("buildHelmValues rejects enabled AI without an OpenAI key early", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  config.features.ai = { enabled: true };
+
+  assert.throws(
+    () => buildHelmValues(config),
+    /AI features are enabled but the OpenAI API key is missing/,
+  );
+});
+
+test("redeploy wizard backfills missing self-hosted Supabase JWT secret", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  delete config.database.supabaseJwtSecret;
+
+  const state = configToWizardState(config);
+
+  assert.equal(typeof state.supabaseJwtSecret, "string");
+  assert.ok(state.supabaseJwtSecret.length >= 32);
+  assert.equal(
+    collectConfigIssues({ ...state, name: "redeploy-test" }).some((issue) =>
+      issue.includes("JWT secret"),
+    ),
+    false,
+  );
+});
+
+test("self-hosted Supabase keys derive from the configured JWT secret", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  config.database.supabaseJwtSecret = "test-jwt-secret-used-for-derived-keys";
+
+  const values = buildHelmValues(config) as Record<string, any>;
+
+  assert.equal(
+    values.global.supabase.anonKey,
+    signSupabaseJwt("anon", config.database.supabaseJwtSecret),
+  );
+  assert.equal(
+    values.global.supabase.serviceKey,
+    signSupabaseJwt("service_role", config.database.supabaseJwtSecret),
+  );
+  assert.equal(
+    values.supabase.secret.jwt.secret,
+    config.database.supabaseJwtSecret,
+  );
 });
 
 test("wizard orders storage before observability and skips feature config for built-in observability alone", () => {
@@ -218,6 +253,7 @@ test("wizard orders storage before observability and skips feature config for bu
     metricsExportEnabled: false,
     tracingEnabled: false,
     appLogsEnabled: false,
+    valkeyAdminEnabled: false,
     loggingSink: "console",
     customEmailsEnabled: false,
   };
@@ -234,6 +270,26 @@ test("wizard orders storage before observability and skips feature config for bu
   assert.equal(steps.includes("feature-config"), false);
 });
 
+test("wizard routes enabled AI without key through feature config", () => {
+  const steps = getActiveWizardSteps(
+    {
+      databaseType: "self-hosted",
+      aiEnabled: true,
+      ssoEnabled: false,
+      clickStackEnabled: true,
+      metricsExportEnabled: false,
+      tracingEnabled: false,
+      appLogsEnabled: false,
+      valkeyAdminEnabled: false,
+      loggingSink: "console",
+      customEmailsEnabled: false,
+    },
+    "create",
+  );
+
+  assert.ok(steps.includes("feature-config"));
+});
+
 test("wizard includes feature config for BYO observability signals", () => {
   const steps = getActiveWizardSteps(
     {
@@ -244,6 +300,7 @@ test("wizard includes feature config for BYO observability signals", () => {
       metricsExportEnabled: true,
       tracingEnabled: true,
       appLogsEnabled: false,
+      valkeyAdminEnabled: false,
       loggingSink: "console",
       customEmailsEnabled: false,
     },
@@ -255,7 +312,53 @@ test("wizard includes feature config for BYO observability signals", () => {
   assert.ok(steps.includes("feature-config"));
 });
 
-test("ClickHouse decision-log bootstrap keeps recent and archive behind compatibility view", (t) => {
+test("wizard includes feature config for Valkey Admin options", () => {
+  const steps = getActiveWizardSteps(
+    {
+      databaseType: "self-hosted",
+      aiEnabled: false,
+      ssoEnabled: false,
+      clickStackEnabled: true,
+      metricsExportEnabled: false,
+      tracingEnabled: false,
+      appLogsEnabled: false,
+      valkeyAdminEnabled: true,
+      loggingSink: "console",
+      customEmailsEnabled: false,
+    },
+    "create",
+  );
+
+  assert.ok(steps.includes("feature-config"));
+});
+
+test("Valkey Admin ingress emits public hostname and BasicAuth users", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  config.features.cache = {
+    valkeyAdmin: {
+      enabled: true,
+      exposure: "ingress",
+      basicAuthUsers: ["admin:$2a$10$abcdefghijklmnopqrstuv"],
+      allowedIPs: ["203.0.113.0/24"],
+    },
+    redisExporter: { enabled: true },
+    kafkaExporter: { enabled: true },
+  };
+
+  const values = buildHelmValues(config) as Record<string, any>;
+  const valkeyAdmin = values.rulebricks.cache.valkeyAdmin;
+
+  assert.equal(valkeyAdmin.enabled, true);
+  assert.equal(valkeyAdmin.exposure, "ingress");
+  assert.equal(valkeyAdmin.ingress.enabled, true);
+  assert.equal(valkeyAdmin.ingress.hostname, "valkey.rb.example.com");
+  assert.deepEqual(valkeyAdmin.ingress.basicAuth.users, [
+    "admin:$2a$10$abcdefghijklmnopqrstuv",
+  ]);
+  assert.deepEqual(valkeyAdmin.ingress.allowedIPs, ["203.0.113.0/24"]);
+});
+
+test("ClickHouse decision-log bootstrap reads only the object-storage archive", (t) => {
   const candidates = [
     process.env.RULEBRICKS_CHART_DIR,
     path.resolve(process.cwd(), "../private/helm"),
@@ -276,11 +379,9 @@ test("ClickHouse decision-log bootstrap keeps recent and archive behind compatib
   );
 
   assert.match(defaults, /rulebricks\.decision_logs_archive/);
-  assert.match(defaults, /rulebricks\.decision_logs_recent/);
   assert.match(defaults, /CREATE OR REPLACE VIEW rulebricks\.decision_logs AS SELECT/);
-  assert.match(defaults, /timestamp >= now\(\) - INTERVAL {{ \$retentionDays }} DAY/);
-  assert.match(defaults, /timestamp < now\(\) - INTERVAL {{ \$retentionDays }} DAY/);
-  assert.match(defaults, /TTL toDateTime\(timestamp\) \+ INTERVAL {{ \$retentionDays }} DAY DELETE/);
+  assert.doesNotMatch(defaults, /rulebricks\.decision_logs_recent/);
+  assert.doesNotMatch(defaults, /TTL toDateTime\(timestamp\)/);
 });
 
 test("BYO observability opt-out disables ClickStack and keeps export paths", () => {
@@ -335,6 +436,27 @@ function tierFixture(name: string): GeneratedKafkaValues {
   return buildHelmValues(entry!.config) as unknown as GeneratedKafkaValues;
 }
 
+test("external MSK IAM topic-provisioning toggle maps to kafka.provisioning.enabled", () => {
+  const entry = matrix.find((c) => c.name === "aws-external-kafka-msk");
+  assert.ok(entry, "missing aws-external-kafka-msk fixture");
+
+  // Default (provisionTopics unset): the chart provisions topics.
+  const on = buildHelmValues(entry!.config) as unknown as {
+    kafka: { provisioning?: { enabled?: boolean }; topics?: unknown[] };
+  };
+  assert.equal(on.kafka.provisioning?.enabled, true);
+
+  // Locked-down: operator manages topics -> provisioning disabled, but the topic
+  // list is still emitted (so it's documented; the Job just won't render).
+  const cfg = JSON.parse(JSON.stringify(entry!.config));
+  cfg.externalServices.kafka.external.provisionTopics = false;
+  const off = buildHelmValues(cfg) as unknown as {
+    kafka: { provisioning?: { enabled?: boolean }; topics?: unknown[] };
+  };
+  assert.equal(off.kafka.provisioning?.enabled, false);
+  assert.equal(off.kafka.topics?.length, 3);
+});
+
 test("in-cluster provisioning uses baseline partitions and the (empty) prefix", () => {
   // Tiers were removed: partition sizing is now a fixed baseline that mirrors
   // the chart defaults, identical across every in-cluster deployment.
@@ -387,16 +509,27 @@ test("in-cluster provisioning uses baseline partitions and the (empty) prefix", 
   }
 });
 
-test("external Kafka disables provisioning (topics are customer-managed)", () => {
-  for (const name of ["gcp-external-kafka", "aws-external-kafka-msk"]) {
-    const values = tierFixture(name);
-    assert.equal(values.kafka.enabled, false, `${name}: kafka subchart off`);
-    assert.equal(
-      values.kafka.topics?.length ?? 0,
-      0,
-      `${name}: no managed topics for external Kafka`,
-    );
-  }
+test("external MSK IAM populates topics for provisioning; other external Kafka stays customer-managed", () => {
+  // AWS MSK IAM: the chart's kafka-topic-provision Job creates these on the
+  // managed broker (through the proxy bridge), so they MUST be populated - MSK
+  // Serverless won't auto-create them.
+  const msk = tierFixture("aws-external-kafka-msk");
+  assert.equal(msk.kafka.enabled, false, "msk: kafka subchart off");
+  assert.equal(
+    msk.kafka.topics?.length ?? 0,
+    3,
+    "msk: topics populated so the provisioning Job can create them",
+  );
+
+  // GCP managed Kafka (no kafka-proxy bridge - a plain client reaches it
+  // directly): topics remain customer-managed, so the CLI emits none.
+  const gcp = tierFixture("gcp-external-kafka");
+  assert.equal(gcp.kafka.enabled, false, "gcp: kafka subchart off");
+  assert.equal(
+    gcp.kafka.topics?.length ?? 0,
+    0,
+    "gcp: no managed topics for non-bridge external Kafka",
+  );
 });
 
 test("invariant checker catches partition/worker and prefix drift", () => {
@@ -460,6 +593,33 @@ test("self-hosted deployments emit supabase.db.enabled so backup validation hold
   };
   assert.equal(values.backup.enabled, true);
   assert.equal(values.supabase.db.enabled, true);
+});
+
+test("external Postgres disables backups even with stale backup config", () => {
+  const config = cloneFixture("aws-external-postgres");
+  config.backup = {
+    enabled: true,
+    schedule: "0 2 * * *",
+    retentionDays: 14,
+  };
+
+  const values = buildHelmValues(config) as {
+    backup: { enabled: boolean; schedule: string; retentionDays: number };
+  };
+
+  assert.equal(values.backup.enabled, false);
+  assert.equal(values.backup.schedule, "0 2 * * *");
+  assert.equal(values.backup.retentionDays, 14);
+});
+
+test("storage wizard derives provider from selected cloud", () => {
+  assert.equal(storageProviderForCloud("aws"), "s3");
+  assert.equal(storageProviderForCloud("azure"), "azure-blob");
+  assert.equal(storageProviderForCloud("gcp"), "gcs");
+  assert.equal(storageProviderForCloud(null), "s3");
+  assert.equal(storageRegionForCloud("aws", "us-east-1", "azure-blob", "eastus"), "us-east-1");
+  assert.equal(storageRegionForCloud("azure", "eastus", "azure-blob", "eastus2"), "eastus2");
+  assert.equal(storageRegionForCloud("gcp", "us-central1-a", undefined, "eastus"), "us-central1");
 });
 
 test("non-semver product versions are omitted from global.version", () => {
@@ -964,6 +1124,45 @@ test("external Postgres maps to supabase.externalDatabase with bootstrap creds",
   assert.equal(sb.secret.db.database, "postgres");
 });
 
+test("external Postgres k8s secret mode keeps compatibility and uses secret refs", () => {
+  const config = cloneFixture("aws-external-postgres");
+  const values = buildHelmValues(config, { secretMode: "k8s" }) as Record<
+    string,
+    any
+  >;
+  const sb = values.supabase;
+
+  assert.equal(sb.externalDatabase.enabled, true);
+  // Keep inline host/port so older charts still render, while new charts prefer
+  // the Secret keys below.
+  assert.equal(
+    sb.externalDatabase.host,
+    "db.cluster-xxxx.us-east-1.rds.amazonaws.com",
+  );
+  assert.equal(sb.externalDatabase.port, 5432);
+  assert.equal(sb.externalDatabase.secretRef, `${config.name}-supabase-db`);
+  assert.deepEqual(sb.externalDatabase.secretRefKey, {
+    host: "host",
+    port: "port",
+    username: "username",
+    password: "password",
+    database: "database",
+  });
+  assert.equal(
+    sb.externalDatabase.bootstrap.secretRef,
+    `${config.name}-supabase-db-bootstrap`,
+  );
+  assert.equal(sb.externalDatabase.bootstrap.masterPassword, undefined);
+  assert.equal(sb.secret.db.secretRef, `${config.name}-supabase-db`);
+  assert.deepEqual(sb.secret.db.secretRefKey, {
+    host: "host",
+    port: "port",
+    username: "username",
+    password: "password",
+    database: "database",
+  });
+});
+
 test("embedded Postgres still deploys the bundled database", () => {
   const config = cloneFixture("aws-self-hosted-minimal");
   const values = buildHelmValues(config) as Record<string, any>;
@@ -972,18 +1171,28 @@ test("embedded Postgres still deploys the bundled database", () => {
 });
 
 import { buildDeploymentSecrets } from "./secrets.js";
-import { signSupabaseJwt, deriveRealtimeSecrets } from "./helmValues.js";
+import { deriveRealtimeSecrets } from "./helmValues.js";
 
 test("k8s secret mode: secretRefs set, zero plaintext secrets in values", () => {
   const config = cloneFixture("aws-self-hosted-minimal");
+  config.features.ai = {
+    enabled: true,
+    openaiApiKey: "sk-test-openai-key-for-secret-mode",
+  };
   const dbPw = config.database.supabaseDbPassword!;
   const jwt = config.database.supabaseJwtSecret!;
   const dashPw = config.database.supabaseDashboardPass!;
   const license = config.licenseKey;
+  const openai = config.features.ai.openaiApiKey!;
   const values = buildHelmValues(config, { secretMode: "k8s" }) as Record<
     string,
     any
   >;
+  const schemaResult = validateHelmValues(values);
+  assert.ok(
+    schemaResult.valid,
+    `k8s secret-mode values should satisfy chart schema:\n${schemaResult.errors.join("\n")}`,
+  );
   // secretRef seams point at the CLI-created Secrets
   assert.equal(values.global.secrets.secretRef, `${config.name}-app-secrets`);
   assert.equal(
@@ -1004,6 +1213,7 @@ test("k8s secret mode: secretRefs set, zero plaintext secrets in values", () => 
   );
   // inline plaintext stripped
   assert.equal(values.global.supabase.jwtSecret, undefined);
+  assert.equal(values.global.ai.openaiApiKey, undefined);
   assert.equal(values.global.licenseKey, undefined);
   // no secret value appears anywhere in the generated values
   const dump = JSON.stringify(values);
@@ -1012,9 +1222,48 @@ test("k8s secret mode: secretRefs set, zero plaintext secrets in values", () => 
     ["jwt secret", jwt],
     ["dashboard password", dashPw],
     ["license key", license],
+    ["openai key", openai],
   ] as const) {
     assert.ok(!dump.includes(secret), `${label} leaked into k8s-mode values`);
   }
+});
+
+test("k8s secret mode: SSO + AI configs validate against the chart schema", () => {
+  // SSO clientId/clientSecret and the OpenAI key are redacted into the app
+  // Secret in k8s mode; the chart schema must accept global.secrets.secretRef
+  // in place of the inline values (delivered via envFrom).
+  const config = cloneFixture("aws-all-features");
+  const values = buildHelmValues(config, { secretMode: "k8s" }) as Record<
+    string,
+    any
+  >;
+  const result = validateHelmValues(values);
+  assert.ok(
+    result.valid,
+    `k8s-mode SSO/AI values should satisfy the chart schema:\n${result.errors.join("\n")}`,
+  );
+  assert.equal(values.global.sso.clientId, undefined);
+  assert.equal(values.global.sso.clientSecret, undefined);
+  assert.equal(values.global.ai.openaiApiKey, undefined);
+  assert.equal(values.global.secrets.secretRef, `${config.name}-app-secrets`);
+});
+
+test("k8s secret mode: managed Supabase config validates against the chart schema", () => {
+  // Managed (Supabase Cloud) redacts the access token into the app Secret; the
+  // schema must accept secretRef instead of an inline global.supabase.accessToken.
+  const config = cloneFixture("aws-supabase-cloud");
+  const values = buildHelmValues(config, { secretMode: "k8s" }) as Record<
+    string,
+    any
+  >;
+  const result = validateHelmValues(values);
+  assert.ok(
+    result.valid,
+    `k8s-mode managed-Supabase values should satisfy the chart schema:\n${result.errors.join("\n")}`,
+  );
+  assert.equal(values.global.supabase.accessToken, undefined);
+  assert.ok(values.global.supabase.url);
+  assert.equal(values.global.secrets.secretRef, `${config.name}-app-secrets`);
 });
 
 test("inline secret mode keeps secrets in values (dev path)", () => {
@@ -1061,6 +1310,27 @@ test("buildDeploymentSecrets: app + supabase secrets with JWT-derived keys", () 
     rt.secretKeyBase,
   );
   assert.equal(byName[`${base}-supabase-realtime`].DB_ENC_KEY.length, 16);
+});
+
+test("buildDeploymentSecrets includes external Postgres host/port and bootstrap creds", () => {
+  const config = cloneFixture("aws-external-postgres");
+  const byName = Object.fromEntries(
+    buildDeploymentSecrets(config).map((s) => [s.name, s.stringData]),
+  );
+  const base = config.name;
+
+  assert.deepEqual(byName[`${base}-supabase-db`], {
+    username: "postgres",
+    password: config.database.supabaseDbPassword,
+    database: "postgres",
+    host: "db.cluster-xxxx.us-east-1.rds.amazonaws.com",
+    port: "5432",
+  });
+  assert.deepEqual(byName[`${base}-supabase-db-bootstrap`], {
+    "master-username": "postgres",
+    "master-password": "master-pw-change-me",
+    "service-password": config.database.supabaseDbPassword,
+  });
 });
 
 // ===========================================================================

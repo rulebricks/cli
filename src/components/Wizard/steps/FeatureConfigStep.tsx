@@ -24,6 +24,8 @@ import {
   RemoteWriteTarget,
 } from "../../../lib/cloudCli.js";
 import { findClusterSetupDefaultIndex } from "../../../lib/clusterSetupDefaults.js";
+import { generateHtpasswdLine } from "../../../lib/htpasswd.js";
+import { generateSecureSecret } from "../../../lib/validation.js";
 
 interface FeatureConfigStepProps {
   onComplete: () => void;
@@ -82,6 +84,10 @@ type SubStep =
   | "applogs-user"
   | "applogs-pass"
   | "applogs-index"
+  // Valkey Admin public ingress
+  | "valkey-admin-username"
+  | "valkey-admin-password"
+  | "valkey-admin-allowed-ips"
   // Custom email template steps
   | "email-subject-invite"
   | "email-subject-confirm"
@@ -157,16 +163,22 @@ export function FeatureConfigStep({
   // Determine what needs to be configured. Metrics export (Prometheus
   // remote_write) is opt-in via the Features step; in-cluster Prometheus is
   // always installed and needs no configuration.
-  const needsAI = state.aiEnabled && !state.openaiApiKey;
+  // Show the OpenAI key step whenever AI is enabled, even if a key is already
+  // in wizard state (e.g. pre-filled from the saved profile or an existing
+  // config on redeploy). The input is seeded with that value so the user can
+  // confirm or change it — previously a pre-filled key silently skipped this
+  // step entirely, which looked like the wizard never collected the key.
+  const needsAI = state.aiEnabled;
   const needsSSO = state.ssoEnabled;
   const needsMonitoring = !state.clickStackEnabled && state.metricsExportEnabled;
   const needsLogging = state.loggingSink !== "console";
   const needsTracing = !state.clickStackEnabled && state.tracingEnabled;
   const needsAppLogs = !state.clickStackEnabled && state.appLogsEnabled;
+  const needsValkeyAdmin = state.valkeyAdminEnabled;
   const needsCustomEmails = state.customEmailsEnabled;
 
   // Configuration order:
-  // AI -> SSO -> Monitoring -> Logging -> Tracing -> AppLogs -> Custom Emails
+  // AI -> SSO -> Monitoring -> Logging -> Tracing -> AppLogs -> Valkey Admin -> Custom Emails
   const getInitialStep = (): SubStep => {
     if (needsAI) return "openai-key";
     if (needsSSO) return "sso-provider";
@@ -174,6 +186,7 @@ export function FeatureConfigStep({
     if (needsLogging) return "logging-sink";
     if (needsTracing) return "tracing-destination";
     if (needsAppLogs) return "applogs-endpoint";
+    if (needsValkeyAdmin) return "valkey-admin-username";
     if (needsCustomEmails) return "email-subject-invite";
     return "done";
   };
@@ -191,28 +204,31 @@ export function FeatureConfigStep({
     return "tracing-token";
   };
 
+  const loggingFinalStep = (): SubStep => {
+    switch (state.loggingSink) {
+      case "datadog":
+        return "logging-datadog-config";
+      case "splunk":
+        return "logging-splunk-config";
+      case "elasticsearch":
+        return "logging-elasticsearch-config";
+      case "loki":
+        return "logging-loki-config";
+      case "newrelic":
+        return "logging-newrelic-config";
+      case "axiom":
+        return "logging-axiom-config";
+      default:
+        return "logging-sink";
+    }
+  };
+
   const getFinalStep = (): SubStep => {
     if (needsCustomEmails) return "email-template-change";
+    if (needsValkeyAdmin) return "valkey-admin-allowed-ips";
     if (needsAppLogs) return "applogs-index";
     if (needsTracing) return tracingFinalStep();
-    if (needsLogging) {
-      switch (state.loggingSink) {
-        case "datadog":
-          return "logging-datadog-config";
-        case "splunk":
-          return "logging-splunk-config";
-        case "elasticsearch":
-          return "logging-elasticsearch-config";
-        case "loki":
-          return "logging-loki-config";
-        case "newrelic":
-          return "logging-newrelic-config";
-        case "axiom":
-          return "logging-axiom-config";
-        default:
-          return "logging-sink";
-      }
-    }
+    if (needsLogging) return loggingFinalStep();
     if (needsMonitoring) return "monitoring-remote-write-destination";
     if (needsSSO) return "sso-client-secret";
     if (needsAI) return "openai-key";
@@ -325,6 +341,16 @@ export function FeatureConfigStep({
     state.appLogsElasticIndex || "rulebricks-app-logs",
   );
 
+  const [defaultValkeyAdminPassword] = useState(() => generateSecureSecret(16));
+  const [valkeyAdminUsername, setValkeyAdminUsername] = useState(() => {
+    const existingUser = state.valkeyAdminBasicAuthUsers[0];
+    return existingUser?.split(":")[0] || "admin";
+  });
+  const [valkeyAdminPassword, setValkeyAdminPassword] = useState("");
+  const [valkeyAdminAllowedIPs, setValkeyAdminAllowedIPs] = useState(
+    state.valkeyAdminAllowedIPs.join(", "),
+  );
+
   // Dynamic resource lists for remote-write identity selection.
   const [rwRegions, setRwRegions] = useState<string[]>([]);
   const [rwIdentities, setRwIdentities] = useState<AzureManagedIdentity[]>([]);
@@ -375,6 +401,7 @@ export function FeatureConfigStep({
       !needsLogging &&
       !needsTracing &&
       !needsAppLogs &&
+      !needsValkeyAdmin &&
       !needsCustomEmails
     ) {
       onComplete();
@@ -512,9 +539,49 @@ export function FeatureConfigStep({
       case "tracing-otlp-cred":
         setSubStep("tracing-otlp-auth");
         break;
+      // Application log shipping steps
+      case "applogs-endpoint":
+        if (needsTracing) setSubStep(tracingFinalStep());
+        else if (needsLogging) setSubStep(loggingFinalStep());
+        else if (needsMonitoring)
+          setSubStep("monitoring-remote-write-destination");
+        else if (needsSSO) setSubStep("sso-client-secret");
+        else if (needsAI) setSubStep("openai-key");
+        else onBack();
+        break;
+      case "applogs-user":
+        setSubStep("applogs-endpoint");
+        break;
+      case "applogs-pass":
+        setSubStep("applogs-user");
+        break;
+      case "applogs-index":
+        setSubStep("applogs-pass");
+        break;
+      // Valkey Admin steps
+      case "valkey-admin-username":
+        if (needsAppLogs) setSubStep("applogs-index");
+        else if (needsTracing) setSubStep(tracingFinalStep());
+        else if (needsLogging) setSubStep(loggingFinalStep());
+        else if (needsMonitoring)
+          setSubStep("monitoring-remote-write-destination");
+        else if (needsSSO) setSubStep("sso-client-secret");
+        else if (needsAI) setSubStep("openai-key");
+        else onBack();
+        break;
+      case "valkey-admin-password":
+        setSubStep("valkey-admin-username");
+        break;
+      case "valkey-admin-allowed-ips":
+        setSubStep("valkey-admin-password");
+        break;
       // Email template steps
       case "email-subject-invite":
-        if (needsLogging) setSubStep("logging-sink");
+        if (needsValkeyAdmin) {
+          setSubStep("valkey-admin-allowed-ips");
+        } else if (needsAppLogs) setSubStep("applogs-index");
+        else if (needsTracing) setSubStep(tracingFinalStep());
+        else if (needsLogging) setSubStep(loggingFinalStep());
         else if (needsMonitoring)
           setSubStep("monitoring-remote-write-destination");
         else if (needsSSO) setSubStep("sso-client-secret");
@@ -547,14 +614,18 @@ export function FeatureConfigStep({
 
   // Section sequencing helpers. Each "goTo<Section>OrAfter" advances to the next
   // enabled section, so adding a section only required inserting it into this
-  // chain (Logging -> Tracing -> AppLogs -> Custom Emails).
+  // chain (Logging -> Tracing -> AppLogs -> Valkey Admin -> Custom Emails).
   const goToCustomEmailsOrDone = () => {
     if (needsCustomEmails) setSubStep("email-subject-invite");
     else onComplete();
   };
+  const goToValkeyAdminOrAfter = () => {
+    if (needsValkeyAdmin) setSubStep("valkey-admin-username");
+    else goToCustomEmailsOrDone();
+  };
   const goToAppLogsOrAfter = () => {
     if (needsAppLogs) setSubStep("applogs-endpoint");
-    else goToCustomEmailsOrDone();
+    else goToValkeyAdminOrAfter();
   };
   const goToTracingOrAfter = () => {
     if (needsTracing) setSubStep("tracing-destination");
@@ -606,6 +677,9 @@ export function FeatureConfigStep({
         goToAppLogsOrAfter();
         break;
       case "applogs-index":
+        goToValkeyAdminOrAfter();
+        break;
+      case "valkey-admin-allowed-ips":
         goToCustomEmailsOrDone();
         break;
       case "email-template-change":
@@ -1303,6 +1377,67 @@ export function FeatureConfigStep({
     advanceToNext("applogs-index");
   };
 
+  // === Valkey Admin Ingress ===
+  const handleValkeyAdminUsernameSubmit = () => {
+    const username = valkeyAdminUsername.trim();
+    if (!username) {
+      setError("Username is required");
+      return;
+    }
+    if (username.includes(":")) {
+      setError("Username cannot contain ':'");
+      return;
+    }
+    setValkeyAdminUsername(username);
+    setError(null);
+    setSubStep("valkey-admin-password");
+  };
+
+  const handleValkeyAdminPasswordSubmit = () => {
+    // Empty means "use a generated secure value", matching the Supabase flow.
+    const effectivePassword =
+      valkeyAdminPassword.trim() || defaultValkeyAdminPassword;
+    if (effectivePassword.length < 8) {
+      setError("Valkey Admin password must be at least 8 characters");
+      return;
+    }
+
+    try {
+      const htpasswdLine = generateHtpasswdLine(
+        valkeyAdminUsername,
+        effectivePassword,
+      );
+      dispatch({
+        type: "SET_EXTERNAL_SERVICES",
+        config: {
+          valkeyAdminExposure: "ingress",
+          valkeyAdminHostname: "",
+          valkeyAdminBasicAuthUsers: [htpasswdLine],
+        },
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to hash password");
+      return;
+    }
+
+    setError(null);
+    setSubStep("valkey-admin-allowed-ips");
+  };
+
+  const handleValkeyAdminAllowedIPsSubmit = () => {
+    const allowedIPs = valkeyAdminAllowedIPs
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    dispatch({
+      type: "SET_EXTERNAL_SERVICES",
+      config: { valkeyAdminAllowedIPs: allowedIPs },
+    });
+    setError(null);
+    advanceToNext("valkey-admin-allowed-ips");
+  };
+
   const handleLokiConfigSubmit = () => {
     if (!lokiUrl) {
       setError("Loki URL is required");
@@ -1467,6 +1602,9 @@ export function FeatureConfigStep({
     !needsSSO &&
     !needsMonitoring &&
     !needsLogging &&
+    !needsTracing &&
+    !needsAppLogs &&
+    !needsValkeyAdmin &&
     !needsCustomEmails
   ) {
     return null;
@@ -2680,7 +2818,7 @@ export function FeatureConfigStep({
           <Text color="gray" dimColor>
             Optional BYO sink via Vector. For AWS/Azure native log collection,
             enable the provider's cluster logging agent instead. Decision logs stay
-            in ClickHouse.
+            in object storage.
           </Text>
           <Box marginTop={1}>
             <TextInput
@@ -2734,6 +2872,62 @@ export function FeatureConfigStep({
               onChange={setAppLogsIndex}
               onSubmit={handleAppLogsIndexSubmit}
               placeholder="rulebricks-app-logs"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {/* Valkey Admin public ingress */}
+      {subStep === "valkey-admin-username" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Valkey Admin BasicAuth Username</Text>
+          <Text color="gray" dimColor>
+            This username protects https://valkey.{state.domain}.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={valkeyAdminUsername}
+              onChange={setValkeyAdminUsername}
+              onSubmit={handleValkeyAdminUsernameSubmit}
+              placeholder="admin"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "valkey-admin-password" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Valkey Admin BasicAuth Password</Text>
+          <Text color="gray" dimColor>
+            Password for accessing the Valkey Admin console. Leave empty to
+            generate a secure value. The CLI stores only an htpasswd bcrypt hash
+            in generated Helm values.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={valkeyAdminPassword}
+              onChange={setValkeyAdminPassword}
+              onSubmit={handleValkeyAdminPasswordSubmit}
+              placeholder="Leave empty to generate a secure value"
+              mask="*"
+            />
+          </Box>
+        </Box>
+      )}
+
+      {subStep === "valkey-admin-allowed-ips" && (
+        <Box flexDirection="column" marginY={1}>
+          <Text bold>Valkey Admin Allowed IPs</Text>
+          <Text color="gray" dimColor>
+            Optional comma-separated CIDR allowlist. Leave blank to allow any IP
+            that can reach Traefik.
+          </Text>
+          <Box marginTop={1}>
+            <TextInput
+              value={valkeyAdminAllowedIPs}
+              onChange={setValkeyAdminAllowedIPs}
+              onSubmit={handleValkeyAdminAllowedIPsSubmit}
+              placeholder="203.0.113.0/24, 198.51.100.10/32"
             />
           </Box>
         </Box>

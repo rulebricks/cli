@@ -12,10 +12,6 @@ interface SupabaseCredentialsStepProps {
 
 type SubStep = "db-password" | "dashboard-user" | "dashboard-pass";
 
-// Fixed JWT secret - users can edit this in the raw config if needed
-const JWT_SECRET =
-  "your-super-secret-jwt-token-with-at-least-32-characters-long";
-
 export function SupabaseCredentialsStep({
   onComplete,
   onBack,
@@ -28,6 +24,9 @@ export function SupabaseCredentialsStep({
   // pre-filled secret to clear.
   const [defaultDbPass] = useState(() => generateSecureSecret(24));
   const [defaultDashboardPass] = useState(() => generateSecureSecret(16));
+  const [defaultJwtSecret] = useState(
+    () => state.supabaseJwtSecret || generateSecureSecret(64),
+  );
 
   const [subStep, setSubStep] = useState<SubStep>("db-password");
   const [dbPassword, setDbPassword] = useState(state.supabaseDbPassword || "");
@@ -85,7 +84,7 @@ export function SupabaseCredentialsStep({
     dispatch({
       type: "SET_SUPABASE_SELF_HOSTED",
       config: {
-        supabaseJwtSecret: JWT_SECRET,
+        supabaseJwtSecret: defaultJwtSecret,
         supabaseDbPassword: dbPassword.trim() || defaultDbPass,
         supabaseDashboardUser: dashboardUser,
         supabaseDashboardPass: effectivePass,

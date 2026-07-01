@@ -295,6 +295,8 @@ export function getRequiredDNSRecords(
   selfHostedSupabase: boolean,
   builtInObservability: boolean = false,
   observabilityHostname?: string,
+  valkeyAdminIngress: boolean = false,
+  valkeyAdminHostname?: string,
 ): DNSRecord[] {
   const records: DNSRecord[] = [
     {
@@ -320,6 +322,16 @@ export function getRequiredDNSRecords(
   if (builtInObservability) {
     records.push({
       hostname: observabilityHostname || `observability.${domain}`,
+      type: loadBalancerType === "ip" ? "A" : "CNAME",
+      target: loadBalancerAddress,
+      verified: false,
+      required: true,
+    });
+  }
+
+  if (valkeyAdminIngress) {
+    records.push({
+      hostname: valkeyAdminHostname || `valkey.${domain}`,
       type: loadBalancerType === "ip" ? "A" : "CNAME",
       target: loadBalancerAddress,
       verified: false,

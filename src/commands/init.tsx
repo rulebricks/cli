@@ -144,6 +144,7 @@ function WizardStepController({
     state.metricsExportEnabled,
     state.tracingEnabled,
     state.appLogsEnabled,
+    state.valkeyAdminEnabled,
     state.loggingSink,
     state.customEmailsEnabled,
   ]);

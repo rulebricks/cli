@@ -29,7 +29,10 @@ import {
   checkClusterAccessible,
   waitForCertificatesReady,
 } from "../lib/kubernetes.js";
-import { updateKubeconfig } from "../lib/cloudCli.js";
+import {
+  updateKubeconfig,
+  checkAuroraLogicalReplication,
+} from "../lib/cloudCli.js";
 import { ensureWorkloadIdentityFederation } from "../lib/workloadIdentity.js";
 import {
   generateHelmValues,
@@ -402,6 +405,37 @@ function DeployCommandInner({
       ...s,
       kubeconfig: s.kubeconfig === "success" ? "success" : "skipped",
     }));
+
+    // External AWS Aurora needs logical replication for Supabase Realtime - a
+    // static cluster parameter bootstrap.sql can't set - so catch it here before
+    // a long deploy ends in a Realtime crashloop. Fail-open: the check returns
+    // "unknown" (and we proceed) on any ambiguity; we only block when the
+    // parameter is definitively off.
+    const pg = cfg.externalServices?.postgres;
+    if (
+      pg?.mode === "external" &&
+      pg.external?.provider === "aws" &&
+      pg.external.host
+    ) {
+      const lr = await checkAuroraLogicalReplication(
+        pg.external.host,
+        cfg.infrastructure.region,
+      );
+      if (lr.status === "disabled") {
+        const pgName = lr.parameterGroup ?? "<db-cluster-parameter-group>";
+        throw new Error(
+          "External Aurora Postgres has logical replication DISABLED" +
+            (lr.parameterGroup ? ` (parameter group ${lr.parameterGroup})` : "") +
+            ". Supabase Realtime requires it, and rds.logical_replication is a " +
+            "static parameter the chart's bootstrap cannot set. Enable it, then " +
+            "reboot the writer, before deploying:\n" +
+            `  aws rds modify-db-cluster-parameter-group --db-cluster-parameter-group-name ${pgName} \\\n` +
+            '    --parameters "ParameterName=rds.logical_replication,ParameterValue=1,ApplyMethod=pending-reboot"\n' +
+            "  aws rds reboot-db-instance --db-instance-identifier <writer-instance>\n" +
+            "(If the cluster uses a default parameter group, create a custom one first and attach it.)",
+        );
+      }
+    }
   }
 
   async function verifyCertificates(namespace: string): Promise<void> {
@@ -478,6 +512,11 @@ function DeployCommandInner({
         builtInObservability={
           config.features.observability?.clickstack?.enabled ?? true
         }
+        valkeyAdminIngress={
+          config.features.cache?.valkeyAdmin?.enabled === true &&
+          config.features.cache.valkeyAdmin.exposure === "ingress"
+        }
+        valkeyAdminHostname={config.features.cache?.valkeyAdmin?.hostname}
         namespace={getNamespace(config.name)}
         onComplete={handleDnsComplete}
         onSkip={handleDnsSkip}

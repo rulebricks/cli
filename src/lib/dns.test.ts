@@ -38,3 +38,39 @@ test("manual DNS records omit observability when built-in observability is disab
   );
   assert.ok(records.every((record) => record.type === "CNAME"));
 });
+
+test("manual DNS records include Valkey Admin ingress when enabled", () => {
+  const records = getRequiredDNSRecords(
+    "az-p055.rulebricks.com",
+    "4.236.203.25",
+    "ip",
+    false,
+    false,
+    undefined,
+    true,
+  );
+
+  assert.deepEqual(
+    records.map((record) => record.hostname),
+    ["az-p055.rulebricks.com", "valkey.az-p055.rulebricks.com"],
+  );
+});
+
+test("manual DNS records use custom Valkey Admin hostname", () => {
+  const records = getRequiredDNSRecords(
+    "az-p055.rulebricks.com",
+    "example-lb.example.net",
+    "hostname",
+    false,
+    false,
+    undefined,
+    true,
+    "redis-tools.example.com",
+  );
+
+  assert.deepEqual(
+    records.map((record) => record.hostname),
+    ["az-p055.rulebricks.com", "redis-tools.example.com"],
+  );
+  assert.ok(records.every((record) => record.type === "CNAME"));
+});

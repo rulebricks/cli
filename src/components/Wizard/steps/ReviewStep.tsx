@@ -94,6 +94,8 @@ export function ReviewStep({
             : 'workload identity';
   const clickStackStorageGi =
     Number.parseInt(state.clickHouseStorageSize || "0", 10) + 10;
+  const usesInClusterPostgres =
+    state.databaseType === 'self-hosted' && state.postgresMode !== 'external';
   
   if (editingName) {
     return (
@@ -216,7 +218,7 @@ export function ReviewStep({
                 />
               )}
             <ConfigRow label="Auth" value={storageAuthValue} />
-            {state.backupEnabled && (
+            {usesInClusterPostgres && state.backupEnabled && (
               <ConfigRow
                 label="DB backups"
                 value={`${state.storageBucket || 'not configured'} / db-backups/`}
@@ -224,7 +226,7 @@ export function ReviewStep({
             )}
           </>
         )}
-        {state.databaseType === 'self-hosted' && (
+        {usesInClusterPostgres && (
           <>
             <SectionHeader title="Backups" />
             <ConfigRow
@@ -278,6 +280,18 @@ export function ReviewStep({
                   valueColor={colors.muted}
                 />
               )}
+            {state.kafkaMode === 'external' &&
+              state.kafkaSaslMechanism === 'aws-iam' && (
+                <ConfigRow
+                  label="Topics"
+                  value={
+                    state.kafkaProvisionTopics
+                      ? 'auto-provisioned by the chart'
+                      : 'self-managed (no CreateTopic)'
+                  }
+                  valueColor={colors.muted}
+                />
+              )}
           </>
         )}
         
@@ -322,7 +336,7 @@ export function ReviewStep({
           <>
             <ConfigRow
               label="Retention"
-              value={`decision logs ${state.decisionLogAccelerationRetentionDays}d / telemetry ${state.clickStackTelemetryRetentionDays}d`}
+              value={`telemetry ${state.clickStackTelemetryRetentionDays}d`}
             />
             <ConfigRow
               label="Storage"

@@ -229,6 +229,20 @@ export function buildConfigMatrix(): { name: string; config: DeploymentConfig }[
       customEmails: true,
     },
     {
+      name: "aws-valkey-admin-ingress",
+      provider: "aws",
+      cache: {
+        valkeyAdmin: {
+          enabled: true,
+          exposure: "ingress",
+          basicAuthUsers: ["admin:$2a$10$abcdefghijklmnopqrstuv"],
+          allowedIPs: ["203.0.113.0/24"],
+        },
+        redisExporter: { enabled: true },
+        kafkaExporter: { enabled: true },
+      },
+    },
+    {
       name: "aws-external-redis",
       provider: "aws",
       externalServices: {

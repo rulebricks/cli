@@ -24,6 +24,7 @@ type Field =
   | "kafka-topic-prefix"
   | "kafka-aws-region"
   | "kafka-aws-role"
+  | "kafka-provision-topics"
   | "kafka-azure-connection"
   | "kafka-gcp-username"
   | "kafka-gcp-password"
@@ -190,6 +191,9 @@ export function ExternalServicesStep({
     state.kafkaSaslRegion || state.region,
   );
   const [awsRole, setAwsRole] = useState(state.kafkaIdentityAwsRoleArn);
+  const [provisionTopics, setProvisionTopics] = useState(
+    state.kafkaProvisionTopics,
+  );
   const [azureConnection, setAzureConnection] = useState(
     state.kafkaSaslPassword,
   );
@@ -236,14 +240,20 @@ export function ExternalServicesStep({
     const order = chosen();
     return order[order.length - 1] === k;
   };
-  const goAfter = (k: ServiceKey, overrides: { customSsl?: boolean } = {}) => {
+  const goAfter = (
+    k: ServiceKey,
+    overrides: { customSsl?: boolean; provisionTopics?: boolean } = {},
+  ) => {
     const order = chosen();
     const next = order[order.indexOf(k) + 1];
     if (next) setField(firstFieldOf(next));
     else persist(overrides);
   };
 
-  const persist = (overrides: { customSsl?: boolean }) => {
+  const persist = (overrides: {
+    customSsl?: boolean;
+    provisionTopics?: boolean;
+  }) => {
     const redisExternal = selected.redis;
     const kafkaExternal = selected.kafka;
     const postgresExternal = selected.postgres;
@@ -304,6 +314,10 @@ export function ExternalServicesStep({
         kafkaSaslPassword: password,
         kafkaIdentityAwsRoleArn: awsRoleArn,
         kafkaIdentityGcpServiceAccountEmail: "",
+        kafkaProvisionTopics:
+          kafkaMode === "external"
+            ? (overrides.provisionTopics ?? provisionTopics)
+            : true,
         postgresMode,
         postgresHost: postgresExternal ? pgHost.trim() : "",
         postgresPort: Number.parseInt(pgPort, 10) || 5432,
@@ -365,7 +379,7 @@ export function ExternalServicesStep({
         setField("kafka-aws-role");
         return;
       case "kafka-aws-role":
-        goAfter("kafka");
+        setField("kafka-provision-topics");
         return;
       case "kafka-azure-connection":
         if (!azureConnection.trim()) {
@@ -483,6 +497,9 @@ export function ExternalServicesStep({
       case "kafka-aws-role":
         setField("kafka-aws-region");
         return;
+      case "kafka-provision-topics":
+        setField("kafka-aws-role");
+        return;
       case "kafka-gcp-password":
         setField("kafka-gcp-username");
         return;
@@ -599,6 +616,13 @@ export function ExternalServicesStep({
     } else {
       goAfter("kafka", { customSsl: ssl });
     }
+  };
+
+  const handleProvisionTopicsSelect = (item: { value: string }) => {
+    const provision = item.value === "yes";
+    setProvisionTopics(provision);
+    // Pass the fresh value so persist doesn't read stale state (as with customSsl).
+    goAfter("kafka", { provisionTopics: provision });
   };
 
   const handlePgModeSelect = (item: { value: string }) => {
@@ -819,9 +843,20 @@ export function ExternalServicesStep({
 
       {field === "kafka-aws-role" &&
         renderText("MSK IAM role ARN", awsRole, setAwsRole, {
-          hint: "IRSA role for HPS and the Vector bridge. Blank if set on the SAs already.",
-          placeholder: "arn:aws:iam::123456789012:role/msk-access",
+          hint: "Pod Identity role for HPS + the Vector bridge (the cluster-setup RulebricksRole). Blank to reuse the SAs' association.",
+          placeholder: "arn:aws:iam::123456789012:role/rulebricks-cluster-rulebricks",
         })}
+
+      {field === "kafka-provision-topics" &&
+        renderSelect(
+          "Kafka topic provisioning",
+          yesNo(
+            "Yes - the chart creates the required topics on the broker",
+            "No - I manage topics myself (locked-down / no CreateTopic)",
+          ),
+          handleProvisionTopicsSelect,
+          provisionTopics ? 1 : 0,
+        )}
 
       {field === "kafka-azure-connection" &&
         renderText(

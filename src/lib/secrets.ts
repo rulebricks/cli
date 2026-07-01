@@ -68,15 +68,33 @@ export function buildDeploymentSecrets(
 
   // Supabase self-hosted component secrets (each maps to a supabase.secret.*.secretRef).
   if (config.database.type === "self-hosted") {
+    const pgExt =
+      config.externalServices?.postgres?.mode === "external"
+        ? config.externalServices.postgres.external
+        : undefined;
+    const dbStringData: Record<string, string> = {
+      username: "postgres",
+      password: config.database.supabaseDbPassword ?? "",
+      database: pgExt?.database ?? "postgres",
+    };
+    if (pgExt) {
+      dbStringData.host = pgExt.host ?? "";
+      dbStringData.port = String(pgExt.port ?? 5432);
+    }
     out.push({
       name: names.db,
-      stringData: {
-        username: "postgres",
-        password: config.database.supabaseDbPassword ?? "",
-        database:
-          config.externalServices?.postgres?.external?.database ?? "postgres",
-      },
+      stringData: dbStringData,
     });
+    if (pgExt) {
+      out.push({
+        name: names.dbBootstrap,
+        stringData: {
+          "master-username": pgExt.bootstrap?.masterUsername ?? "postgres",
+          "master-password": pgExt.bootstrap?.masterPassword ?? "",
+          "service-password": config.database.supabaseDbPassword ?? "",
+        },
+      });
+    }
     const jwt = config.database.supabaseJwtSecret ?? "";
     out.push({
       name: names.jwt,

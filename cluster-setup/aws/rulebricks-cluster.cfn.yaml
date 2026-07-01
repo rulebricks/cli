@@ -305,11 +305,39 @@ Resources:
                   - aps:RemoteWrite
                 Resource:
                   - !GetAtt PrometheusWorkspace.Arn
+        - PolicyName: rulebricks-msk-iam
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # AWS MSK IAM access for HPS + the Vector bridge when Kafka is
+              # externalized to MSK. Account-scoped so any managed cluster works
+              # without re-provisioning; tighten Resource to a specific cluster
+              # ARN to lock it down. Harmless when Kafka runs in-cluster.
+              - Effect: Allow
+                Action:
+                  - kafka-cluster:Connect
+                  - kafka-cluster:DescribeCluster
+                  - kafka-cluster:DescribeClusterDynamicConfiguration
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:kafka:*:${AWS::AccountId}:cluster/*/*"
+              - Effect: Allow
+                Action:
+                  - kafka-cluster:*Topic*
+                  - kafka-cluster:WriteData
+                  - kafka-cluster:ReadData
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:kafka:*:${AWS::AccountId}:topic/*/*/*"
+              - Effect: Allow
+                Action:
+                  - kafka-cluster:AlterGroup
+                  - kafka-cluster:DescribeGroup
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:kafka:*:${AWS::AccountId}:group/*/*/*"
 
-  # Pod Identity associations (vector / backup / prometheus) are namespace-scoped,
-  # so the Rulebricks CLI creates them at `rulebricks deploy` time. This stack
-  # only provisions the deployment-independent role, bucket, and AMP workspace,
-  # so one cluster can host many deployments.
+  # Pod Identity associations (hps / vector / clickhouse / backup / prometheus) are
+  # namespace-scoped, so the Rulebricks CLI creates them at `rulebricks deploy`
+  # time. This stack only provisions the deployment-independent role, bucket, and
+  # AMP workspace, so one cluster can host many deployments.
 
 Outputs:
   ClusterName:

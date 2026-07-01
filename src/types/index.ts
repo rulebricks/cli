@@ -836,6 +836,11 @@ export const DeploymentConfigSchema = z.object({
               topic: z.string().optional(),
               // Prefix namespacing all Kafka topics (e.g. "com.rulebricks.").
               topicPrefix: z.string().optional(),
+              // Whether the chart creates the required topics on the managed
+              // broker (via the kafka-topic-provision Job, MSK IAM only). Set
+              // false for a locked-down broker where topics are managed out of
+              // band and the workload role has no CreateTopic. Default true.
+              provisionTopics: z.boolean().optional(),
               ssl: z.boolean().optional(),
               sasl: z
                 .object({

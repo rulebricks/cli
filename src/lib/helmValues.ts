@@ -34,6 +34,7 @@ interface GenerateOptions {
 export function deploymentSecretNames(config: DeploymentConfig): {
   app: string;
   db: string;
+  dbBootstrap: string;
   jwt: string;
   dashboard: string;
   realtime: string;
@@ -43,6 +44,7 @@ export function deploymentSecretNames(config: DeploymentConfig): {
   return {
     app: `${base}-app-secrets`,
     db: `${base}-supabase-db`,
+    dbBootstrap: `${base}-supabase-db-bootstrap`,
     jwt: `${base}-supabase-jwt`,
     dashboard: `${base}-supabase-dashboard`,
     realtime: `${base}-supabase-realtime`,
@@ -84,12 +86,6 @@ const SEMVER_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 // headroom under the chart's 1 GiB Vector limit while still producing large,
 // scan-efficient files for ClickHouse.
 const DECISION_LOG_BATCH = { max_bytes: 67108864, timeout_secs: 300 } as const;
-const DECISION_LOG_ACCELERATION_RETENTION_DAYS = 30;
-const DECISION_LOG_ACCELERATION_SINK = {
-  batchMaxBytes: 10485760,
-  batchTimeoutSecs: 5,
-  bufferMaxSize: 1073741824,
-} as const;
 
 const SUPABASE_JWT_ISSUED_AT = 1641769200;
 const SUPABASE_JWT_EXPIRES_AT = 4102444800;
@@ -208,32 +204,6 @@ function generateVectorSinks(
         };
         break;
     }
-  }
-
-  if (isClickStackEnabled(config)) {
-    sinks.decision_logs_clickhouse = {
-      type: "clickhouse",
-      inputs: ["normalize_logs"],
-      endpoint: `http://${getReleaseName(config.name)}-clickhouse:8123`,
-      database: "rulebricks",
-      table: "decision_logs_recent",
-      format: "json_each_row",
-      skip_unknown_fields: true,
-      auth: {
-        strategy: "basic",
-        user: "rulebricks",
-        password: "${CLICKHOUSE_PASSWORD}",
-      },
-      batch: {
-        max_bytes: DECISION_LOG_ACCELERATION_SINK.batchMaxBytes,
-        timeout_secs: DECISION_LOG_ACCELERATION_SINK.batchTimeoutSecs,
-      },
-      buffer: {
-        type: "disk",
-        max_size: DECISION_LOG_ACCELERATION_SINK.bufferMaxSize,
-        when_full: "drop_newest",
-      },
-    };
   }
 
   // Add external logging-platform sink if configured. Decision logs always go
@@ -381,18 +351,6 @@ function generateVectorEnv(config: DeploymentConfig): Array<Record<string, unkno
     });
   }
 
-  if (isClickStackEnabled(config)) {
-    env.push({
-      name: "CLICKHOUSE_PASSWORD",
-      valueFrom: {
-        secretKeyRef: {
-          name: `${getReleaseName(config.name)}-clickhouse-credentials`,
-          key: "admin-password",
-        },
-      },
-    });
-  }
-
   const azureBlobSecretRef = config.storage?.azureBlobConnectionStringSecretRef;
 
   if (
@@ -414,12 +372,11 @@ function generateVectorEnv(config: DeploymentConfig): Array<Record<string, unkno
 function generateVectorServiceAccount(
   config: DeploymentConfig,
 ): Record<string, unknown> {
+  // AWS uses EKS Pod Identity: NO eks.amazonaws.com/role-arn annotation - the
+  // CLI's workload-identity step creates a namespace-scoped association for this
+  // SA (to a role granting both the object-storage and MSK access Vector needs).
+  // Azure/GCP still annotate the SA, which is how their workload identity binds.
   const annotations: Record<string, string> = {};
-
-  if (config.storage?.provider === "s3" && config.storage.awsIamRoleArn) {
-    annotations["eks.amazonaws.com/role-arn"] =
-      config.storage.awsIamRoleArn;
-  }
 
   if (
     config.storage?.provider === "azure-blob" &&
@@ -433,15 +390,6 @@ function generateVectorServiceAccount(
   if (config.storage?.provider === "gcs" && config.storage.gcpServiceAccountEmail) {
     annotations["iam.gke.io/gcp-service-account"] =
       config.storage.gcpServiceAccountEmail;
-  }
-
-  // When external Kafka uses MSK IAM, the kafka-proxy bridge sidecar in this pod
-  // authenticates with the pod's IRSA role. This role must also grant the object
-  // storage permissions the Vector sink needs (one IRSA role per service account).
-  const kafkaRoleArn =
-    config.externalServices?.kafka?.external?.identity?.awsRoleArn;
-  if (kafkaUsesBridge(config) && kafkaRoleArn) {
-    annotations["eks.amazonaws.com/role-arn"] = kafkaRoleArn;
   }
 
   return {
@@ -603,9 +551,6 @@ function generateClickStackValues(
   const clickstack = config.features.observability?.clickstack;
   const telemetryRetentionDays =
     clickstack?.telemetryRetentionDays ?? 7;
-  const decisionLogRetentionDays =
-    clickstack?.decisionLogRetentionDays ??
-    DECISION_LOG_ACCELERATION_RETENTION_DAYS;
   const clickHouseStorageSize = clickstack?.clickHouseStorageSize ?? "100Gi";
 
   // Registry host for the clickstack images. The clickstack subchart routes
@@ -622,11 +567,6 @@ function generateClickStackValues(
       existingSecretKey: "admin-password",
       retentionDays: telemetryRetentionDays,
       ttl: "",
-      decisionLogs: {
-        retentionDays: decisionLogRetentionDays,
-        sink: { ...DECISION_LOG_ACCELERATION_SINK },
-        objectStorageFallback: { enabled: true },
-      },
     },
     hyperdx: {
       enabled,
@@ -724,12 +664,11 @@ function generateClickStackValues(
 function generatePrometheusServiceAccount(
   config: DeploymentConfig,
 ): Record<string, unknown> {
+  // AWS (AMP remote write) uses EKS Pod Identity - the association is created by
+  // the CLI's workload-identity step, so no eks.amazonaws.com/role-arn annotation.
+  // Azure Monitor still annotates the SA for its workload identity.
   const annotations: Record<string, string> = {};
   const remoteWrite = config.features.monitoring.remoteWrite;
-
-  if (remoteWrite?.destination === "aws-amp" && remoteWrite.awsRoleArn) {
-    annotations["eks.amazonaws.com/role-arn"] = remoteWrite.awsRoleArn;
-  }
 
   if (
     remoteWrite?.destination === "azure-monitor" &&
@@ -930,8 +869,11 @@ function effectiveTopicPrefix(config: DeploymentConfig): string {
 function generateKafkaTopics(
   config: DeploymentConfig,
 ): Array<Record<string, unknown>> {
-  if (isExternalKafka(config)) {
-    // External/managed Kafka: topics are customer-managed.
+  // External MSK IAM: the chart's kafka-topic-provision Job creates these on the
+  // managed broker (through the proxy bridge), so they must be populated here -
+  // MSK Serverless won't auto-create them. Other external brokers (SCRAM / Event
+  // Hubs / GCP, no bridge) a plain client can reach stay customer-managed.
+  if (isExternalKafka(config) && !kafkaUsesBridge(config)) {
     return [];
   }
 
@@ -1029,8 +971,11 @@ const BURST_POOL_NODE_PREFERENCE: Record<string, unknown> = {
 };
 
 function generateBackupValues(config: DeploymentConfig): Record<string, unknown> {
+  const usesInClusterPostgres =
+    config.database.type === "self-hosted" &&
+    config.externalServices?.postgres?.mode !== "external";
   const enabled =
-    config.database.type === "self-hosted" && config.backup?.enabled === true;
+    usesInClusterPostgres && config.backup?.enabled === true;
 
   // The backup CronJob streams pg_dump from the running DB (using supabase.db.image)
   // and uploads it with rclone, so no backup-specific image is needed here. The
@@ -1138,6 +1083,7 @@ function generateCacheObservabilityBlock(
   const cache = config.features.cache;
   const valkeyAdmin = cache?.valkeyAdmin;
   const redisExporter = cache?.redisExporter;
+  const valkeyAdminIngressEnabled = valkeyAdmin?.exposure === "ingress";
 
   return {
     valkeyAdmin: {
@@ -1145,8 +1091,10 @@ function generateCacheObservabilityBlock(
       exposure: valkeyAdmin?.exposure ?? "internal",
       podLabels: infrastructurePodLabels,
       ingress: {
-        enabled: valkeyAdmin?.exposure === "ingress",
-        hostname: valkeyAdmin?.hostname || "",
+        enabled: valkeyAdminIngressEnabled,
+        hostname: valkeyAdminIngressEnabled
+          ? valkeyAdmin?.hostname || `valkey.${config.domain}`
+          : "",
         basicAuth: {
           users: valkeyAdmin?.basicAuthUsers ?? [],
           existingSecret: valkeyAdmin?.basicAuthExistingSecret ?? "",
@@ -1225,18 +1173,17 @@ function generateAppLogging(config: DeploymentConfig): Record<string, unknown> {
 }
 
 /**
- * HPS service account. When external Kafka uses MSK IAM, HPS authenticates via
- * its pod identity (IRSA), so create the SA and annotate it with the role ARN.
+ * HPS service account. When external Kafka uses MSK IAM, HPS authenticates to the
+ * broker with its pod's cloud identity - under EKS Pod Identity that comes from a
+ * namespace-scoped association (created by the CLI's workload-identity step for
+ * the `<release>-hps` SA), NOT an eks.amazonaws.com/role-arn annotation. We only
+ * CREATE the SA here so the association has a subject to bind.
  */
 function generateHpsServiceAccount(
   config: DeploymentConfig,
 ): Record<string, unknown> {
-  const roleArn = config.externalServices?.kafka?.external?.identity?.awsRoleArn;
-  if (kafkaUsesBridge(config) && roleArn) {
-    return {
-      create: true,
-      annotations: { "eks.amazonaws.com/role-arn": roleArn },
-    };
+  if (kafkaUsesBridge(config)) {
+    return { create: true, annotations: {} };
   }
   return { create: false, annotations: {} };
 }
@@ -1516,6 +1463,20 @@ export function buildHelmValues(
   config: DeploymentConfig,
   options: GenerateOptions = {},
 ): Record<string, unknown> {
+  if (
+    config.database.type === "self-hosted" &&
+    !config.database.supabaseJwtSecret
+  ) {
+    throw new Error(
+      "Self-hosted Supabase is missing a JWT secret. Run `rulebricks redeploy <name>` to regenerate deployment credentials, or set database.supabaseJwtSecret in config.yaml.",
+    );
+  }
+  if (config.features.ai.enabled && !config.features.ai.openaiApiKey) {
+    throw new Error(
+      "AI features are enabled but the OpenAI API key is missing. Run `rulebricks redeploy <name>` and enter your OpenAI API key, or disable AI features in config.yaml.",
+    );
+  }
+
   const { tlsEnabled = true, secretMode = "inline" } = options;
   const useLocalGrafana =
     config.features.monitoring.destination === "local-grafana";
@@ -1598,9 +1559,6 @@ export function buildHelmValues(
   const reg = config.imageRegistry || DEFAULT_IMAGE_REGISTRY;
   const clickStackEnabled = isClickStackEnabled(config);
   const clickStackConfig = config.features.observability?.clickstack;
-  const decisionLogAccelerationRetentionDays =
-    clickStackConfig?.decisionLogRetentionDays ??
-    DECISION_LOG_ACCELERATION_RETENTION_DAYS;
   const clickHouseStorageSize =
     clickStackConfig?.clickHouseStorageSize ?? "100Gi";
   // Distributed tracing (self-hosted only). Lives under global so the
@@ -1707,16 +1665,6 @@ export function buildHelmValues(
       priorityClasses: { enabled: true },
       clickstack: {
         enabled: clickStackEnabled,
-        ...(clickStackEnabled
-          ? {
-              clickhouse: {
-                decisionLogs: {
-                  retentionDays: decisionLogAccelerationRetentionDays,
-                  objectStorageFallback: { enabled: true },
-                },
-              },
-            }
-          : {}),
       },
 
       // SMTP Configuration
@@ -1895,6 +1843,12 @@ export function buildHelmValues(
         // HPS Workers with KEDA autoscaling
         workers: {
           enabled: true,
+          // Workers consume the solution topic directly, so under external MSK
+          // IAM they need their own cloud identity - not the shared/default SA.
+          // Same rule as HPS: a dedicated `<release>-hps-worker` SA (no role-arn
+          // annotation) that the CLI's workload-identity step binds to the Kafka
+          // role via Pod Identity.
+          serviceAccount: generateHpsServiceAccount(config),
           // Partition count of the solution request topic (also exported to
           // HPS as MAX_WORKERS). Must match kafka.provisioning above; it is
           // the fleet-concurrency ceiling, NOT a worker count. Replica count
@@ -1972,8 +1926,16 @@ export function buildHelmValues(
         enabled: true,
         serviceMonitor: { enabled: true },
       },
-      // Topics, reconciled by the Strimzi Topic Operator (KafkaTopic CRs).
+      // Topics, reconciled by the Strimzi Topic Operator (KafkaTopic CRs) for the
+      // in-cluster broker, or created by the kafka-topic-provision Job for an
+      // external MSK IAM broker.
       topics: generateKafkaTopics(config),
+      // When false, the chart never creates topics on an external broker - the
+      // operator manages them (and the workload role needs no CreateTopic).
+      provisioning: {
+        enabled:
+          config.externalServices?.kafka?.external?.provisionTopics ?? true,
+      },
     },
 
     // Strimzi operator: pull secret so the operator pod pulls the private
@@ -2588,6 +2550,11 @@ export function redactSecretsToRefs(
   const names = deploymentSecretNames(config);
   const global = (values.global ?? {}) as Record<string, any>;
   const supabase = (values.supabase ?? {}) as Record<string, any>;
+  const pgExt =
+    config.database.type === "self-hosted" &&
+    config.externalServices?.postgres?.mode === "external"
+      ? config.externalServices.postgres.external
+      : undefined;
 
   // App-level consolidated secret: one secretRef supplies every app cred.
   global.secrets = { ...(global.secrets ?? {}), secretRef: names.app };
@@ -2611,8 +2578,18 @@ export function redactSecretsToRefs(
 
   // Supabase subchart: replace each inline secret block with a secretRef.
   if (supabase.secret) {
+    const dbSecret: Record<string, unknown> = { secretRef: names.db };
+    if (pgExt) {
+      dbSecret.secretRefKey = {
+        host: "host",
+        port: "port",
+        username: "username",
+        password: "password",
+        database: "database",
+      };
+    }
     supabase.secret = {
-      db: { secretRef: names.db },
+      db: dbSecret,
       jwt: { secretRef: names.jwt },
       dashboard: { secretRef: names.dashboard },
       realtime: { secretRef: names.realtime },
@@ -2621,6 +2598,30 @@ export function redactSecretsToRefs(
       ...(config.smtp?.user || config.smtp?.pass
         ? { smtp: { secretRef: names.smtp } }
         : {}),
+    };
+  }
+
+  if (pgExt && supabase.externalDatabase) {
+    supabase.externalDatabase = {
+      ...supabase.externalDatabase,
+      // New charts read host/port/user/pass/db from this single Secret. Keep
+      // externalDatabase.host/port above for older charts that do not yet support
+      // host/port secret keys.
+      secretRef: names.db,
+      secretRefKey: {
+        host: "host",
+        port: "port",
+        username: "username",
+        password: "password",
+        database: "database",
+      },
+      bootstrap: {
+        ...(supabase.externalDatabase.bootstrap ?? {}),
+        secretRef: names.dbBootstrap,
+        // Master credentials move into the hook Secret in k8s mode.
+        masterUsername: undefined,
+        masterPassword: undefined,
+      },
     };
   }
 

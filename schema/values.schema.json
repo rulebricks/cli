@@ -207,24 +207,7 @@
           "type": "object",
           "description": "Cross-chart switch for the built-in ClickStack observability backend.",
           "properties": {
-            "enabled": { "type": "boolean", "default": true },
-            "clickhouse": {
-              "type": "object",
-              "properties": {
-                "decisionLogs": {
-                  "type": "object",
-                  "properties": {
-                    "retentionDays": { "type": "integer", "minimum": 1, "default": 30 },
-                    "objectStorageFallback": {
-                      "type": "object",
-                      "properties": {
-                        "enabled": { "type": "boolean", "default": true }
-                      }
-                    }
-                  }
-                }
-              }
-            }
+            "enabled": { "type": "boolean", "default": true }
           }
         },
         "tracing": {
@@ -936,6 +919,8 @@
             "secretRefKey": {
               "type": "object",
               "properties": {
+                "host": { "type": "string" },
+                "port": { "type": "string" },
                 "username": { "type": "string" },
                 "password": { "type": "string" },
                 "database": { "type": "string" }
@@ -1082,28 +1067,7 @@
             "existingSecret": { "type": "string" },
             "existingSecretKey": { "type": "string" },
             "retentionDays": { "type": "integer", "minimum": 1, "default": 7 },
-            "ttl": { "type": "string", "description": "Advanced ClickHouse exporter TTL override. Leave empty to derive from retentionDays." },
-            "decisionLogs": {
-              "type": "object",
-              "description": "Decision-log acceleration settings used automatically when ClickStack is enabled. Object storage remains the durable archive.",
-              "properties": {
-                "retentionDays": { "type": "integer", "minimum": 1, "default": 30 },
-                "sink": {
-                  "type": "object",
-                  "properties": {
-                    "batchMaxBytes": { "type": "integer", "minimum": 1, "default": 10485760 },
-                    "batchTimeoutSecs": { "type": "integer", "minimum": 1, "default": 5 },
-                    "bufferMaxSize": { "type": "integer", "minimum": 1, "default": 1073741824 }
-                  }
-                },
-                "objectStorageFallback": {
-                  "type": "object",
-                  "properties": {
-                    "enabled": { "type": "boolean", "default": true }
-                  }
-                }
-              }
-            }
+            "ttl": { "type": "string", "description": "Advanced ClickHouse exporter TTL override. Leave empty to derive from retentionDays." }
           }
         },
         "hyperdx": {
@@ -1318,15 +1282,49 @@
             "properties": {
               "supabase": {
                 "type": "object",
-                "required": ["url", "accessToken"],
+                "required": ["url"],
                 "properties": {
-                  "url": { "type": "string", "minLength": 1 },
-                  "accessToken": { "type": "string", "minLength": 1 }
+                  "url": { "type": "string", "minLength": 1 }
                 }
               }
             }
           }
-        }
+        },
+        "anyOf": [
+          {
+            "properties": {
+              "global": {
+                "type": "object",
+                "properties": {
+                  "secrets": {
+                    "type": "object",
+                    "required": ["secretRef"],
+                    "properties": {
+                      "secretRef": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                },
+                "required": ["secrets"]
+              }
+            }
+          },
+          {
+            "properties": {
+              "global": {
+                "type": "object",
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "required": ["accessToken"],
+                    "properties": {
+                      "accessToken": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -1345,20 +1343,41 @@
         "required": ["supabase"]
       },
       "then": {
-        "properties": {
-          "global": {
-            "type": "object",
+        "anyOf": [
+          {
             "properties": {
-              "supabase": {
+              "global": {
                 "type": "object",
-                "required": ["jwtSecret"],
                 "properties": {
-                  "jwtSecret": { "type": "string", "minLength": 1 }
+                  "secrets": {
+                    "type": "object",
+                    "required": ["secretRef"],
+                    "properties": {
+                      "secretRef": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                },
+                "required": ["secrets"]
+              }
+            }
+          },
+          {
+            "properties": {
+              "global": {
+                "type": "object",
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "required": ["jwtSecret"],
+                    "properties": {
+                      "jwtSecret": { "type": "string", "minLength": 1 }
+                    }
+                  }
                 }
               }
             }
           }
-        }
+        ]
       }
     },
     {
@@ -1467,20 +1486,41 @@
         "required": ["global"]
       },
       "then": {
-        "properties": {
-          "global": {
-            "type": "object",
+        "anyOf": [
+          {
             "properties": {
-              "ai": {
+              "global": {
                 "type": "object",
-                "required": ["openaiApiKey"],
                 "properties": {
-                  "openaiApiKey": { "type": "string", "minLength": 1 }
+                  "secrets": {
+                    "type": "object",
+                    "required": ["secretRef"],
+                    "properties": {
+                      "secretRef": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                },
+                "required": ["secrets"]
+              }
+            }
+          },
+          {
+            "properties": {
+              "global": {
+                "type": "object",
+                "properties": {
+                  "ai": {
+                    "type": "object",
+                    "required": ["openaiApiKey"],
+                    "properties": {
+                      "openaiApiKey": { "type": "string", "minLength": 1 }
+                    }
+                  }
                 }
               }
             }
           }
-        }
+        ]
       }
     },
     {
@@ -1573,20 +1613,41 @@
         "required": ["global"]
       },
       "then": {
-        "properties": {
-          "global": {
-            "type": "object",
+        "anyOf": [
+          {
             "properties": {
-              "supabase": {
+              "global": {
                 "type": "object",
-                "required": ["jwtSecret"],
                 "properties": {
-                  "jwtSecret": { "type": "string", "minLength": 1 }
+                  "secrets": {
+                    "type": "object",
+                    "required": ["secretRef"],
+                    "properties": {
+                      "secretRef": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                },
+                "required": ["secrets"]
+              }
+            }
+          },
+          {
+            "properties": {
+              "global": {
+                "type": "object",
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "required": ["jwtSecret"],
+                    "properties": {
+                      "jwtSecret": { "type": "string", "minLength": 1 }
+                    }
+                  }
                 }
               }
             }
           }
-        }
+        ]
       }
     },
     {
@@ -1617,16 +1678,50 @@
             "properties": {
               "sso": {
                 "type": "object",
-                "required": ["provider", "clientId", "clientSecret"],
+                "required": ["provider"],
                 "properties": {
-                  "provider": { "type": "string", "minLength": 1 },
-                  "clientId": { "type": "string", "minLength": 1 },
-                  "clientSecret": { "type": "string", "minLength": 1 }
+                  "provider": { "type": "string", "minLength": 1 }
                 }
               }
             }
           }
-        }
+        },
+        "anyOf": [
+          {
+            "properties": {
+              "global": {
+                "type": "object",
+                "properties": {
+                  "secrets": {
+                    "type": "object",
+                    "required": ["secretRef"],
+                    "properties": {
+                      "secretRef": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                },
+                "required": ["secrets"]
+              }
+            }
+          },
+          {
+            "properties": {
+              "global": {
+                "type": "object",
+                "properties": {
+                  "sso": {
+                    "type": "object",
+                    "required": ["clientId", "clientSecret"],
+                    "properties": {
+                      "clientId": { "type": "string", "minLength": 1 },
+                      "clientSecret": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {

@@ -70,6 +70,77 @@ function shq(value: string): string {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
+export function isAwsPodIdentityCliUnsupported(stderr: string): boolean {
+  return (
+    /Invalid choice/i.test(stderr) &&
+    !/list-pod-identity-associations|create-pod-identity-association/i.test(
+      stderr,
+    )
+  );
+}
+
+export function isAwsPodIdentityTrustPolicyInvalid(stderr: string): boolean {
+  return /InvalidParameterException/i.test(stderr) && /Trust policy/i.test(stderr);
+}
+
+function awsPodIdentityUnsupportedMessage(stderr: string): string {
+  const detail = stderr.trim().split("\n").slice(0, 4).join("\n");
+  return [
+    "Your installed AWS CLI does not support EKS Pod Identity association commands.",
+    "",
+    "Rulebricks AWS cluster setup uses EKS Pod Identity, so deploy needs AWS CLI v2 with:",
+    "  aws eks list-pod-identity-associations",
+    "  aws eks create-pod-identity-association",
+    "",
+    "Update or install AWS CLI v2, then rerun the deploy/init command.",
+    "",
+    "First check which AWS CLI your shell is using:",
+    "  which aws && aws --version",
+    "",
+    "On macOS with Homebrew:",
+    "  brew install awscli",
+    "  # or, if Homebrew already owns it:",
+    "  brew upgrade awscli",
+    "",
+    "Or install the official AWS CLI v2 package:",
+    "  curl \"https://awscli.amazonaws.com/AWSCLIV2.pkg\" -o \"/tmp/AWSCLIV2.pkg\"",
+    "  sudo installer -pkg /tmp/AWSCLIV2.pkg -target /",
+    "",
+    "If aws --version still shows an older binary after installing, update your PATH so the new aws comes first.",
+    "",
+    detail ? `AWS CLI output:\n${detail}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function awsPodIdentityInvalidTrustMessage(input: {
+  stderr: string;
+  subject: string;
+  roleArn: string;
+  cluster: string;
+}): string {
+  const expectedRole = `${input.cluster}-rulebricks`;
+  const detail = input.stderr.trim();
+  return [
+    `The IAM role selected for ${input.subject} cannot be used with EKS Pod Identity.`,
+    "",
+    `Selected role: ${input.roleArn}`,
+    `Expected role from Rulebricks cluster-setup: ${expectedRole}`,
+    "",
+    "The role trust policy must allow the EKS Pod Identity service principal:",
+    "  Principal: { Service: pods.eks.amazonaws.com }",
+    "  Actions: sts:AssumeRole and sts:TagSession",
+    "",
+    "Fix by selecting the RulebricksRoleArn output from the AWS cluster-setup stack,",
+    `or update that role's trust policy to match cluster-setup/aws/rulebricks-cluster.cfn.yaml.`,
+    "",
+    detail ? `AWS CLI output:\n${detail}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 /** A Kubernetes ServiceAccount that needs cloud access, plus the cloud principal it maps to. */
 interface SubjectBinding {
   serviceAccount: string;
@@ -83,7 +154,7 @@ interface SubjectBinding {
  * identity (the consolidated setup makes these the same principal, but we read
  * them independently so split setups still work).
  */
-function plannedBindings(config: DeploymentConfig): SubjectBinding[] {
+export function plannedBindings(config: DeploymentConfig): SubjectBinding[] {
   const bindings: SubjectBinding[] = [];
   const storage = config.storage;
   const releaseName = getReleaseName(config.name);
@@ -111,6 +182,31 @@ function plannedBindings(config: DeploymentConfig): SubjectBinding[] {
         serviceAccount: `${releaseName}-backup`,
         principal: storagePrincipal,
       });
+    }
+  }
+
+  // Workloads that talk directly to the managed broker each need the Kafka cloud
+  // identity under a token mechanism (AWS MSK IAM / GCP OAUTHBEARER). We give each
+  // its OWN service account and bind it here via Pod Identity - the chart no
+  // longer stamps an eks.amazonaws.com/role-arn annotation, so the association is
+  // the single source of credentials (no IRSA/annotation tug-of-war on a shared
+  // SA). HPS + the worker fleet produce/consume; the kafka-topic-provision
+  // pre-install hook creates the topics. (When no identity role is set the broker
+  // uses SCRAM/PLAIN secret auth, so there is no principal to bind.)
+  const kafka = config.externalServices?.kafka;
+  const kafkaPrincipal =
+    kafka?.mode === "external"
+      ? (kafka.external?.identity?.awsRoleArn ??
+        kafka.external?.identity?.gcpServiceAccountEmail ??
+        kafka.external?.identity?.azureClientId)
+      : undefined;
+  if (kafkaPrincipal) {
+    for (const serviceAccount of [
+      `${releaseName}-hps`,
+      `${releaseName}-hps-worker`,
+      `${releaseName}-kafka-topic-provision`,
+    ]) {
+      bindings.push({ serviceAccount, principal: kafkaPrincipal });
     }
   }
 
@@ -275,6 +371,9 @@ async function ensureAws(
         `--region ${shq(region)} --query "associations | length(@)" --output text`,
       { intent, provider: "aws" },
     );
+    if (listRes.code !== 0 && isAwsPodIdentityCliUnsupported(listRes.stderr)) {
+      throw new Error(awsPodIdentityUnsupportedMessage(listRes.stderr));
+    }
     if (listRes.code === 0 && listRes.stdout.trim() !== "0" && listRes.stdout.trim() !== "") {
       existing.push(subject);
       continue;
@@ -287,6 +386,19 @@ async function ensureAws(
       { intent, provider: "aws", mutating: true },
     );
     if (createRes.code !== 0) {
+      if (isAwsPodIdentityCliUnsupported(createRes.stderr)) {
+        throw new Error(awsPodIdentityUnsupportedMessage(createRes.stderr));
+      }
+      if (isAwsPodIdentityTrustPolicyInvalid(createRes.stderr)) {
+        throw new Error(
+          awsPodIdentityInvalidTrustMessage({
+            stderr: createRes.stderr,
+            subject,
+            roleArn,
+            cluster,
+          }),
+        );
+      }
       // Treat an existing association as success (race / prior run).
       if (/ResourceInUse|already exists/i.test(createRes.stderr)) {
         existing.push(subject);

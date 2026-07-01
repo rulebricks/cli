@@ -23,6 +23,7 @@ import {
   TracingDestination,
   validateRemoteWriteConfig,
 } from "../../types/index.js";
+import { generateSecureSecret } from "../../lib/validation.js";
 
 // Partial config during wizard flow
 export interface WizardState {
@@ -106,7 +107,6 @@ export interface WizardState {
   // installed; this toggle only controls exporting metrics via remote_write.
   clickStackEnabled: boolean;
   clickStackTelemetryRetentionDays: number;
-  decisionLogAccelerationRetentionDays: number;
   clickHouseStorageSize: string;
   metricsExportEnabled: boolean;
   prometheusMonitoringDestination: MonitoringDestination | null;
@@ -191,6 +191,9 @@ export interface WizardState {
   kafkaBrokers: string;
   kafkaTopic: string;
   kafkaTopicPrefix: string;
+  // Chart auto-creates the required topics on the managed broker (MSK IAM only);
+  // false = the operator manages topics themselves (locked-down broker).
+  kafkaProvisionTopics: boolean;
   kafkaSsl: boolean;
   kafkaSaslMechanism: KafkaSaslMechanism;
   kafkaSaslRegion: string;
@@ -291,7 +294,6 @@ type WizardAction =
         Pick<
           WizardState,
           | "clickStackTelemetryRetentionDays"
-          | "decisionLogAccelerationRetentionDays"
           | "clickHouseStorageSize"
         >
       >;
@@ -407,6 +409,7 @@ type WizardAction =
           | "kafkaBrokers"
           | "kafkaTopic"
           | "kafkaTopicPrefix"
+          | "kafkaProvisionTopics"
           | "kafkaSsl"
           | "kafkaSaslMechanism"
           | "kafkaSaslRegion"
@@ -477,7 +480,7 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     supabaseServiceKey: "",
     supabaseAccessToken: "",
     supabaseProjectRef: "",
-    supabaseJwtSecret: "",
+    supabaseJwtSecret: generateSecureSecret(64),
     supabaseDbPassword: "",
     supabaseDashboardUser: "supabase",
     supabaseDashboardPass: "",
@@ -526,7 +529,6 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     // is always installed)
     clickStackEnabled: true,
     clickStackTelemetryRetentionDays: 7,
-    decisionLogAccelerationRetentionDays: 30,
     clickHouseStorageSize: "100Gi",
     metricsExportEnabled: false,
     prometheusMonitoringDestination: null,
@@ -610,6 +612,7 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     kafkaBrokers: "",
     kafkaTopic: "logs",
     kafkaTopicPrefix: "com.rulebricks.",
+    kafkaProvisionTopics: true,
     kafkaSsl: false,
     kafkaSaslMechanism: "",
     kafkaSaslRegion: "",
@@ -710,6 +713,7 @@ function buildExternalServices(
             // Always emit the prefix (incl. "") so the choice round-trips and the
             // chart doesn't silently fall back to its default.
             topicPrefix: state.kafkaTopicPrefix,
+            provisionTopics: state.kafkaProvisionTopics,
             ssl: state.kafkaSsl,
             sasl: state.kafkaSaslMechanism
               ? {
@@ -859,6 +863,9 @@ export function collectConfigIssues(state: WizardState): string[] {
       );
     }
   } else if (state.databaseType === "self-hosted") {
+    if (!state.supabaseJwtSecret) {
+      issues.push("Self-hosted Supabase requires a JWT secret.");
+    }
     if (!state.supabaseDbPassword) {
       issues.push("Self-hosted Supabase requires a database password.");
     }
@@ -1066,7 +1073,10 @@ export function configToWizardState(
     supabaseServiceKey: config.database.supabaseServiceKey ?? "",
     supabaseAccessToken: config.database.supabaseAccessToken ?? "",
     supabaseProjectRef: config.database.supabaseProjectRef ?? "",
-    supabaseJwtSecret: config.database.supabaseJwtSecret ?? "",
+    supabaseJwtSecret:
+      config.database.type === "self-hosted"
+        ? config.database.supabaseJwtSecret || base.supabaseJwtSecret
+        : config.database.supabaseJwtSecret ?? "",
     supabaseDbPassword: config.database.supabaseDbPassword ?? "",
     supabaseDashboardUser:
       config.database.supabaseDashboardUser ?? base.supabaseDashboardUser,
@@ -1109,9 +1119,6 @@ export function configToWizardState(
     clickStackTelemetryRetentionDays:
       config.features.observability?.clickstack?.telemetryRetentionDays ??
       base.clickStackTelemetryRetentionDays,
-    decisionLogAccelerationRetentionDays:
-      config.features.observability?.clickstack?.decisionLogRetentionDays ??
-      base.decisionLogAccelerationRetentionDays,
     clickHouseStorageSize:
       config.features.observability?.clickstack?.clickHouseStorageSize ??
       base.clickHouseStorageSize,
@@ -1234,6 +1241,8 @@ export function configToWizardState(
     kafkaTopic: externalKafka?.external?.topic ?? base.kafkaTopic,
     kafkaTopicPrefix:
       externalKafka?.external?.topicPrefix ?? base.kafkaTopicPrefix,
+    kafkaProvisionTopics:
+      externalKafka?.external?.provisionTopics ?? base.kafkaProvisionTopics,
     kafkaSsl: externalKafka?.external?.ssl ?? base.kafkaSsl,
     kafkaSaslMechanism:
       externalKafka?.external?.sasl?.mechanism ?? base.kafkaSaslMechanism,
@@ -1280,6 +1289,16 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
     case "SET_NAME":
       return { ...state, name: action.name };
     case "SET_PROVIDER":
+      if (action.provider === state.provider) {
+        return {
+          ...state,
+          provider: action.provider,
+          region: "",
+          clusterName: "",
+          gcpProjectId: "",
+          azureResourceGroup: "",
+        };
+      }
       return {
         ...state,
         provider: action.provider,
@@ -1287,6 +1306,15 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
         clusterName: "",
         gcpProjectId: "",
         azureResourceGroup: "",
+        storageProvider: null,
+        storageBucket: "",
+        storageRegion: "",
+        storageAwsIamRoleArn: "",
+        storageAzureBlobContainer: "",
+        storageAzureBlobClientId: "",
+        storageAzureBlobTenantId: "",
+        storageAzureBlobConnectionStringSecretRef: "",
+        storageGcpServiceAccountEmail: "",
       };
     case "SET_REGION":
       return { ...state, region: action.region };
@@ -1400,7 +1428,13 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
     case "SET_BACKUP_RETENTION_DAYS":
       return { ...state, backupRetentionDays: action.retentionDays };
     case "SET_EXTERNAL_SERVICES":
-      return { ...state, ...action.config };
+      return {
+        ...state,
+        ...action.config,
+        ...(action.config.postgresMode === "external"
+          ? { backupEnabled: false }
+          : {}),
+      };
     case "SET_CUSTOM_EMAILS_ENABLED":
       return { ...state, customEmailsEnabled: action.enabled };
     case "SET_EMAIL_SUBJECTS":
@@ -1647,7 +1681,6 @@ export function WizardProvider({
           clickstack: {
             enabled: state.clickStackEnabled,
             telemetryRetentionDays: state.clickStackTelemetryRetentionDays,
-            decisionLogRetentionDays: state.decisionLogAccelerationRetentionDays,
             clickHouseStorageSize: state.clickHouseStorageSize,
           },
         },

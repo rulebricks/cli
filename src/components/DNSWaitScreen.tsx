@@ -14,6 +14,8 @@ interface DNSWaitScreenProps {
   selfHostedSupabase: boolean;
   builtInObservability?: boolean;
   observabilityHostname?: string;
+  valkeyAdminIngress?: boolean;
+  valkeyAdminHostname?: string;
   namespace: string;
   onComplete: () => void;
   onSkip?: () => void;
@@ -26,6 +28,8 @@ export function DNSWaitScreen({
   selfHostedSupabase,
   builtInObservability = false,
   observabilityHostname,
+  valkeyAdminIngress = false,
+  valkeyAdminHostname,
   namespace,
   onComplete,
   onSkip,
@@ -95,6 +99,8 @@ export function DNSWaitScreen({
         selfHostedSupabase,
         builtInObservability,
         observabilityHostname,
+        valkeyAdminIngress,
+        valkeyAdminHostname,
       );
 
       setRecords(dnsRecords);
@@ -107,6 +113,8 @@ export function DNSWaitScreen({
     selfHostedSupabase,
     builtInObservability,
     observabilityHostname,
+    valkeyAdminIngress,
+    valkeyAdminHostname,
     namespace,
   ]);
 

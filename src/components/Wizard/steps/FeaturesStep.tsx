@@ -33,7 +33,7 @@ const FEATURES: Feature[] = [
   {
     id: 'valkeyObservability',
     label: 'Valkey Admin + Cache Metrics',
-    description: 'Deploy the official Apache-2.0 Valkey Admin console internally (port-forward by default) and export Valkey/Kafka lag metrics to Prometheus.',
+    description: 'Deploy the official Apache-2.0 Valkey Admin console (internal by default, optionally public via Traefik BasicAuth) and export Valkey/Kafka lag metrics to Prometheus.',
     requiresConfig: false
   },
   // NOTE: Forwarding a copy of decision logs to a third-party platform
@@ -96,17 +96,21 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
       case 'sso':
         dispatch({ type: 'SET_SSO_ENABLED', enabled: !state.ssoEnabled });
         break;
-      case 'valkeyObservability':
+      case 'valkeyObservability': {
+        const enabled = !state.valkeyAdminEnabled;
         dispatch({
           type: 'SET_EXTERNAL_SERVICES',
           config: {
-            valkeyAdminEnabled: !state.valkeyAdminEnabled,
-            redisExporterEnabled: !state.valkeyAdminEnabled,
-            kafkaExporterEnabled: !state.valkeyAdminEnabled,
-            valkeyAdminExposure: 'internal'
+            valkeyAdminEnabled: enabled,
+            redisExporterEnabled: enabled,
+            kafkaExporterEnabled: enabled,
+            valkeyAdminExposure: enabled ? 'ingress' : 'internal',
+            valkeyAdminHostname: '',
+            ...(enabled ? {} : { valkeyAdminBasicAuthUsers: [], valkeyAdminAllowedIPs: [] })
           }
         });
         break;
+      }
       case 'customEmails':
         dispatch({ type: 'SET_CUSTOM_EMAILS_ENABLED', enabled: !state.customEmailsEnabled });
         break;

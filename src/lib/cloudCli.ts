@@ -370,6 +370,62 @@ export async function listEksClusters(region: string): Promise<string[]> {
   }
 }
 
+export type AuroraLogicalReplication = "enabled" | "disabled" | "unknown";
+
+/**
+ * Best-effort preflight for an external AWS Aurora Postgres cluster: Supabase
+ * Realtime needs logical replication (wal_level=logical), which on Aurora is the
+ * STATIC cluster parameter rds.logical_replication - it lives in a custom DB
+ * cluster parameter group and needs a reboot, so bootstrap.sql can't set it and
+ * Realtime crashloops without it. Parses the cluster id + region from the writer
+ * endpoint and reads the attached parameter group. Fails OPEN ("unknown") on any
+ * ambiguity (non-Aurora host, denied describe, unexpected value) so it never
+ * blocks a deploy spuriously.
+ */
+export async function checkAuroraLogicalReplication(
+  host: string,
+  fallbackRegion?: string,
+): Promise<{ status: AuroraLogicalReplication; parameterGroup?: string }> {
+  // <cluster>.cluster[-ro]-<hash>.<region>.rds.amazonaws.com
+  const match =
+    /^([^.]+)\.cluster(?:-ro)?-[^.]+\.([^.]+)\.rds\.amazonaws\.com$/i.exec(
+      host.trim(),
+    );
+  if (!match) return { status: "unknown" };
+  const clusterId = match[1];
+  const region = match[2] || fallbackRegion;
+  if (!region) return { status: "unknown" };
+  try {
+    const pgRes = await execCommand(
+      `aws rds describe-db-clusters --db-cluster-identifier ${clusterId} ` +
+        `--region ${region} --query "DBClusters[0].DBClusterParameterGroup" --output text`,
+      {
+        intent: `Check Aurora logical replication (${clusterId})`,
+        provider: "aws",
+      },
+    );
+    const parameterGroup = pgRes.stdout.trim();
+    if (!parameterGroup || parameterGroup === "None") {
+      return { status: "unknown" };
+    }
+    const valRes = await execCommand(
+      `aws rds describe-db-cluster-parameters ` +
+        `--db-cluster-parameter-group-name ${parameterGroup} --region ${region} ` +
+        `--query "Parameters[?ParameterName=='rds.logical_replication'].ParameterValue | [0]" ` +
+        `--output text`,
+      { intent: "Read rds.logical_replication", provider: "aws" },
+    );
+    const value = valRes.stdout.trim();
+    if (value === "1") return { status: "enabled", parameterGroup };
+    if (value === "0" || value === "" || value === "None") {
+      return { status: "disabled", parameterGroup };
+    }
+    return { status: "unknown", parameterGroup };
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
 async function describeEksCluster(
   name: string,
   region: string,
