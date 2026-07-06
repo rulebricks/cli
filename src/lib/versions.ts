@@ -67,7 +67,7 @@ export const IMAGE_REPOSITORIES = {
   // Self-hosted Supabase Postgres
   supabasePostgres: {
     repository: "rulebricks/supabase-postgres",
-    tag: "17.6.1.141",
+    tag: "17.6.1.142",
   },
   // --- Tier-2: kube-prometheus-stack sub-images ---
   prometheus: "rulebricks/prometheus",
