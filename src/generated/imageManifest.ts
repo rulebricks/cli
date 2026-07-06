@@ -10,7 +10,7 @@ export const BUNDLED_IMAGE_MANIFEST: {
   "images": [
     {
       "name": "clickhouse-server",
-      "tag": "25.8.24-debian13"
+      "tag": "25.8.28-debian13"
     },
     {
       "name": "valkey",
@@ -54,7 +54,7 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "prometheus-config-reloader",
-      "tag": "0.92.0-debian13"
+      "tag": "0.92.1-debian13"
     },
     {
       "name": "kube-webhook-certgen",
@@ -62,15 +62,15 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "k8s-sidecar",
-      "tag": "2.8.0-debian13"
+      "tag": "2.8.1-debian13"
     },
     {
       "name": "prometheus-operator",
-      "tag": "v0.92.0"
+      "tag": "v0.92.1"
     },
     {
       "name": "alertmanager",
-      "tag": "v0.33.0"
+      "tag": "v0.33.1"
     },
     {
       "name": "traefik",
@@ -126,7 +126,7 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "prometheus-operator-admission-webhook",
-      "tag": "0.92.0-debian13"
+      "tag": "0.92.1-debian13"
     },
     {
       "name": "kubectl",
@@ -146,7 +146,7 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "haproxy",
-      "tag": "2.6.30-debian13"
+      "tag": "3.4.2-debian13"
     },
     {
       "name": "windows-exporter",
@@ -163,6 +163,11 @@ export const BUNDLED_IMAGE_MANIFEST: {
       "target": "rulebricks/postgres"
     },
     {
+      "name": "postgres17",
+      "tag": "17-debian13",
+      "target": "rulebricks/postgres"
+    },
+    {
       "name": "busybox",
       "tag": "1.37.0-debian13"
     },
@@ -171,13 +176,13 @@ export const BUNDLED_IMAGE_MANIFEST: {
       "tag": "3.9"
     },
     {
-      "name": "node20",
-      "tag": "20-alpine",
+      "name": "node24",
+      "tag": "24-alpine",
       "target": "rulebricks/node"
     },
     {
       "name": "rclone",
-      "tag": "1.71.1"
+      "tag": "1.74.3"
     },
     {
       "name": "kafka-proxy",
@@ -185,7 +190,7 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "valkey-admin",
-      "tag": "1.0.1"
+      "tag": "1.0.2"
     },
     {
       "name": "serverless-redis-http",
@@ -193,11 +198,11 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "hyperdx",
-      "tag": "2.19.0"
+      "tag": "2.29.0"
     },
     {
       "name": "clickstack-otel-collector",
-      "tag": "2.19.0"
+      "tag": "2.29.0"
     },
     {
       "name": "ferretdb",
@@ -209,11 +214,11 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "supabase-postgres",
-      "tag": "17.6.1.141"
+      "tag": "17.6.1.142"
     },
     {
       "name": "supabase-studio",
-      "tag": "2026.06.29-sha-20290c7"
+      "tag": "2026.07.06-sha-66cf431"
     },
     {
       "name": "supabase-gotrue",
@@ -225,7 +230,7 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "supabase-realtime",
-      "tag": "v2.112.1"
+      "tag": "v2.112.4"
     },
     {
       "name": "supabase-postgres-meta",
