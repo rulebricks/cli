@@ -9,6 +9,7 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import { CloudProvider, CLOUD_REGIONS } from "../types/index.js";
 import { approveCloudCommandOrThrow } from "./commandApproval.js";
+import { filterAzureWorkloadIdentities } from "./clusterSetupDefaults.js";
 
 const execAsync = promisify(exec);
 
@@ -1297,6 +1298,37 @@ export async function listRegions(provider: CloudProvider): Promise<string[]> {
 }
 
 /**
+ * List regions for a provider, falling back to the static CLOUD_REGIONS list
+ * when the CLI is unavailable or returns nothing.
+ */
+export async function listRegionsWithFallback(
+  provider: CloudProvider,
+): Promise<string[]> {
+  try {
+    const regions = await listRegions(provider);
+    return regions.length > 0 ? regions : CLOUD_REGIONS[provider];
+  } catch {
+    return CLOUD_REGIONS[provider];
+  }
+}
+
+/**
+ * List Azure user-assigned identities that can plausibly be the Rulebricks
+ * workload identity, hiding the ones AKS creates for itself (the kubelet
+ * "-agentpool" identity and the control-plane "<cluster>-identity"). Falls back
+ * to the unfiltered list when the filter removes everything.
+ */
+export async function listAzureWorkloadIdentities(
+  clusterName?: string,
+): Promise<AzureManagedIdentity[]> {
+  const identities = await listAzureManagedIdentities();
+  // No unfiltered fallback: an empty list drops the user into manual entry,
+  // which beats offering an agentpool/control-plane identity that federates
+  // fine and then fails at runtime with authorization errors.
+  return filterAzureWorkloadIdentities(identities, clusterName);
+}
+
+/**
  * List buckets/storage for a specific provider
  */
 export async function listBuckets(provider: CloudProvider): Promise<string[]> {
@@ -1591,5 +1623,573 @@ export async function listBucketsInRegion(
       return listAzureStorageAccountsInRegion(region);
     default:
       return [];
+  }
+}
+
+// ============================================================================
+// Managed data services (Redis / Kafka / Postgres)
+// ============================================================================
+//
+// Discovery for the External Services step. Every function is read-only, runs
+// through the approval gate, and returns an empty list (or null) on failure so
+// manual entry always remains available. Credential fetchers print secrets to
+// the CLI process only; the wizard stores them in Kubernetes Secrets.
+
+export interface DiscoveredRedisInstance {
+  name: string;
+  host: string;
+  port: number;
+  tls: boolean;
+  authEnabled?: boolean;
+  /** Azure resource group, needed to fetch access keys. */
+  resourceGroup?: string;
+  /** AWS Secrets Manager id holding the AUTH token (cluster-setup convention). */
+  authSecretId?: string;
+}
+
+export interface DiscoveredKafkaCluster {
+  name: string;
+  /** Bootstrap brokers; empty for MSK until fetched via getMskBootstrapBrokers. */
+  brokers: string;
+  arn?: string;
+  resourceGroup?: string;
+}
+
+export interface DiscoveredPostgresInstance {
+  name: string;
+  host: string;
+  port: number;
+  database?: string;
+  masterUsername?: string;
+  /** AWS Secrets Manager ARN of the RDS-managed master password. */
+  masterSecretArn?: string;
+  engine?: string;
+}
+
+/**
+ * List ElastiCache Valkey/Redis endpoints (replication groups and serverless
+ * caches) in a region.
+ */
+export async function listElastiCacheInstances(
+  region: string,
+  clusterName?: string,
+): Promise<DiscoveredRedisInstance[]> {
+  const instances: DiscoveredRedisInstance[] = [];
+  const authSecretId = clusterName ? `${clusterName}/redis-auth` : undefined;
+
+  try {
+    const result = await execCommand(
+      `aws elasticache describe-replication-groups --region ${region} ` +
+        `--query "ReplicationGroups[].{id:ReplicationGroupId,tls:TransitEncryptionEnabled,auth:AuthTokenEnabled,primary:NodeGroups[0].PrimaryEndpoint,configuration:ConfigurationEndpoint}" --output json`,
+      { intent: "Discover managed Redis", provider: "aws" },
+    );
+    const groups = JSON.parse(result.stdout || "[]") as Array<{
+      id: string;
+      tls?: boolean;
+      auth?: boolean;
+      primary?: { Address?: string; Port?: number };
+      configuration?: { Address?: string; Port?: number };
+    }>;
+    for (const group of groups) {
+      const endpoint = group.configuration ?? group.primary;
+      if (!endpoint?.Address) continue;
+      instances.push({
+        name: group.id,
+        host: endpoint.Address,
+        port: endpoint.Port ?? 6379,
+        tls: group.tls ?? false,
+        authEnabled: group.auth ?? false,
+        authSecretId,
+      });
+    }
+  } catch {
+    // Fall through to serverless caches.
+  }
+
+  try {
+    const result = await execCommand(
+      `aws elasticache describe-serverless-caches --region ${region} ` +
+        `--query "ServerlessCaches[].{name:ServerlessCacheName,endpoint:Endpoint}" --output json`,
+      { intent: "Discover managed Redis", provider: "aws" },
+    );
+    const caches = JSON.parse(result.stdout || "[]") as Array<{
+      name: string;
+      endpoint?: { Address?: string; Port?: number };
+    }>;
+    for (const cache of caches) {
+      if (!cache.endpoint?.Address) continue;
+      instances.push({
+        name: `${cache.name} (serverless)`,
+        host: cache.endpoint.Address,
+        port: cache.endpoint.Port ?? 6379,
+        tls: true,
+        authEnabled: false,
+      });
+    }
+  } catch {
+    // Ignore; replication groups may already be listed.
+  }
+
+  return instances.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * List Azure Cache for Redis instances in the subscription.
+ */
+export async function listAzureRedisInstances(): Promise<
+  DiscoveredRedisInstance[]
+> {
+  try {
+    const result = await execCommand(
+      'az redis list --query "[].{name:name,host:hostName,port:port,sslPort:sslPort,rg:resourceGroup}" --output json',
+      { intent: "Discover managed Redis", provider: "azure" },
+    );
+    const caches = JSON.parse(result.stdout || "[]") as Array<{
+      name: string;
+      host: string;
+      port?: number;
+      sslPort?: number;
+      rg?: string;
+    }>;
+    return caches
+      .filter((cache) => cache.host)
+      .map((cache) => ({
+        name: cache.name,
+        host: cache.host,
+        port: cache.sslPort ?? cache.port ?? 6380,
+        tls: !!cache.sslPort,
+        authEnabled: true,
+        resourceGroup: cache.rg,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * List GCP Memorystore Redis instances in a region.
+ */
+export async function listMemorystoreInstances(
+  region: string,
+): Promise<DiscoveredRedisInstance[]> {
+  try {
+    const result = await execCommand(
+      `gcloud redis instances list --region ${region} --format="json(name,host,port,transitEncryptionMode,authEnabled)"`,
+      { intent: "Discover managed Redis", provider: "gcp" },
+    );
+    const items = JSON.parse(result.stdout || "[]") as Array<{
+      name: string;
+      host?: string;
+      port?: number;
+      transitEncryptionMode?: string;
+      authEnabled?: boolean;
+    }>;
+    return items
+      .filter((item) => item.host)
+      .map((item) => ({
+        name: item.name.split("/").pop() ?? item.name,
+        host: item.host as string,
+        port: item.port ?? 6379,
+        tls: item.transitEncryptionMode === "SERVER_AUTHENTICATION",
+        authEnabled: item.authEnabled ?? false,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * List managed Redis instances for the given provider.
+ */
+export async function listManagedRedis(
+  provider: CloudProvider,
+  region: string,
+  options: { clusterName?: string } = {},
+): Promise<DiscoveredRedisInstance[]> {
+  switch (provider) {
+    case "aws":
+      return listElastiCacheInstances(region, options.clusterName);
+    case "azure":
+      return listAzureRedisInstances();
+    case "gcp":
+      return listMemorystoreInstances(region);
+    default:
+      return [];
+  }
+}
+
+/**
+ * List MSK clusters in a region. Brokers require a second call per cluster
+ * (getMskBootstrapBrokers) so listing stays fast.
+ */
+export async function listMskClusters(
+  region: string,
+): Promise<DiscoveredKafkaCluster[]> {
+  try {
+    const result = await execCommand(
+      `aws kafka list-clusters-v2 --region ${region} ` +
+        `--query "ClusterInfoList[?State=='ACTIVE'].{name:ClusterName,arn:ClusterArn}" --output json`,
+      { intent: "Discover managed Kafka", provider: "aws" },
+    );
+    const clusters = JSON.parse(result.stdout || "[]") as Array<{
+      name: string;
+      arn: string;
+    }>;
+    return clusters
+      .map((cluster) => ({ name: cluster.name, arn: cluster.arn, brokers: "" }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fetch the IAM bootstrap-broker string for an MSK cluster.
+ */
+export async function getMskBootstrapBrokers(
+  clusterArn: string,
+  region: string,
+): Promise<string | null> {
+  try {
+    const result = await execCommand(
+      `aws kafka get-bootstrap-brokers --cluster-arn ${clusterArn} --region ${region} --output json`,
+      { intent: "Fetch MSK bootstrap brokers", provider: "aws" },
+    );
+    const parsed = JSON.parse(result.stdout || "{}") as Record<
+      string,
+      string | undefined
+    >;
+    return (
+      parsed.BootstrapBrokerStringSaslIam ||
+      parsed.BootstrapBrokerStringSaslScram ||
+      parsed.BootstrapBrokerStringTls ||
+      parsed.BootstrapBrokerString ||
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * List Event Hubs namespaces; the Kafka endpoint is <namespace>:9093.
+ */
+export async function listEventHubsNamespaces(): Promise<
+  DiscoveredKafkaCluster[]
+> {
+  try {
+    const result = await execCommand(
+      'az eventhubs namespace list --query "[].{name:name,rg:resourceGroup,host:serviceBusEndpoint}" --output json',
+      { intent: "Discover managed Kafka", provider: "azure" },
+    );
+    const namespaces = JSON.parse(result.stdout || "[]") as Array<{
+      name: string;
+      rg?: string;
+      host?: string;
+    }>;
+    return namespaces
+      .map((ns) => {
+        const host = ns.host
+          ? new URL(ns.host).hostname
+          : `${ns.name}.servicebus.windows.net`;
+        return {
+          name: ns.name,
+          brokers: `${host}:9093`,
+          resourceGroup: ns.rg,
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * List GCP Managed Service for Apache Kafka clusters in a location.
+ */
+export async function listGcpKafkaClusters(
+  region: string,
+): Promise<DiscoveredKafkaCluster[]> {
+  try {
+    const result = await execCommand(
+      `gcloud managed-kafka clusters list --location ${region} --format=json`,
+      { intent: "Discover managed Kafka", provider: "gcp" },
+    );
+    const clusters = JSON.parse(result.stdout || "[]") as Array<{
+      name: string;
+      bootstrapAddress?: string;
+    }>;
+    return clusters
+      .map((cluster) => ({
+        name: cluster.name.split("/").pop() ?? cluster.name,
+        brokers: cluster.bootstrapAddress ?? "",
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * List managed Kafka clusters for the given provider.
+ */
+export async function listManagedKafka(
+  provider: CloudProvider,
+  region: string,
+): Promise<DiscoveredKafkaCluster[]> {
+  switch (provider) {
+    case "aws":
+      return listMskClusters(region);
+    case "azure":
+      return listEventHubsNamespaces();
+    case "gcp":
+      return listGcpKafkaClusters(region);
+    default:
+      return [];
+  }
+}
+
+/**
+ * List Aurora Postgres clusters and standalone RDS Postgres instances.
+ */
+export async function listRdsPostgresInstances(
+  region: string,
+): Promise<DiscoveredPostgresInstance[]> {
+  const instances: DiscoveredPostgresInstance[] = [];
+
+  try {
+    const result = await execCommand(
+      `aws rds describe-db-clusters --region ${region} ` +
+        `--query "DBClusters[].{id:DBClusterIdentifier,endpoint:Endpoint,port:Port,db:DatabaseName,user:MasterUsername,engine:Engine,secretArn:MasterUserSecret.SecretArn}" --output json`,
+      { intent: "Discover managed Postgres", provider: "aws" },
+    );
+    const clusters = JSON.parse(result.stdout || "[]") as Array<{
+      id: string;
+      endpoint?: string;
+      port?: number;
+      db?: string;
+      user?: string;
+      engine?: string;
+      secretArn?: string;
+    }>;
+    for (const cluster of clusters) {
+      if (!cluster.endpoint || !cluster.engine?.includes("postgres")) continue;
+      instances.push({
+        name: cluster.id,
+        host: cluster.endpoint,
+        port: cluster.port ?? 5432,
+        database: cluster.db || undefined,
+        masterUsername: cluster.user || undefined,
+        masterSecretArn: cluster.secretArn || undefined,
+        engine: cluster.engine,
+      });
+    }
+  } catch {
+    // Fall through to standalone instances.
+  }
+
+  try {
+    const result = await execCommand(
+      `aws rds describe-db-instances --region ${region} ` +
+        `--query "DBInstances[?!DBClusterIdentifier].{id:DBInstanceIdentifier,endpoint:Endpoint.Address,port:Endpoint.Port,db:DBName,user:MasterUsername,engine:Engine,secretArn:MasterUserSecret.SecretArn}" --output json`,
+      { intent: "Discover managed Postgres", provider: "aws" },
+    );
+    const dbInstances = JSON.parse(result.stdout || "[]") as Array<{
+      id: string;
+      endpoint?: string;
+      port?: number;
+      db?: string;
+      user?: string;
+      engine?: string;
+      secretArn?: string;
+    }>;
+    for (const instance of dbInstances) {
+      if (!instance.endpoint || !instance.engine?.includes("postgres")) {
+        continue;
+      }
+      instances.push({
+        name: instance.id,
+        host: instance.endpoint,
+        port: instance.port ?? 5432,
+        database: instance.db || undefined,
+        masterUsername: instance.user || undefined,
+        masterSecretArn: instance.secretArn || undefined,
+        engine: instance.engine,
+      });
+    }
+  } catch {
+    // Ignore; clusters may already be listed.
+  }
+
+  return instances.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * List Azure Database for PostgreSQL flexible servers.
+ */
+export async function listAzurePostgresServers(): Promise<
+  DiscoveredPostgresInstance[]
+> {
+  try {
+    const result = await execCommand(
+      'az postgres flexible-server list --query "[].{name:name,host:fullyQualifiedDomainName,user:administratorLogin}" --output json',
+      { intent: "Discover managed Postgres", provider: "azure" },
+    );
+    const servers = JSON.parse(result.stdout || "[]") as Array<{
+      name: string;
+      host?: string;
+      user?: string;
+    }>;
+    return servers
+      .filter((server) => server.host)
+      .map((server) => ({
+        name: server.name,
+        host: server.host as string,
+        port: 5432,
+        masterUsername: server.user || undefined,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * List Cloud SQL Postgres instances with a public address.
+ */
+export async function listCloudSqlPostgresInstances(): Promise<
+  DiscoveredPostgresInstance[]
+> {
+  try {
+    const result = await execCommand(
+      'gcloud sql instances list --format="json(name,databaseVersion,ipAddresses)"',
+      { intent: "Discover managed Postgres", provider: "gcp" },
+    );
+    const items = JSON.parse(result.stdout || "[]") as Array<{
+      name: string;
+      databaseVersion?: string;
+      ipAddresses?: Array<{ type?: string; ipAddress?: string }>;
+    }>;
+    const instances: DiscoveredPostgresInstance[] = [];
+    for (const item of items) {
+      if (!item.databaseVersion?.startsWith("POSTGRES")) continue;
+      const address =
+        item.ipAddresses?.find((ip) => ip.type === "PRIVATE")?.ipAddress ??
+        item.ipAddresses?.find((ip) => ip.type === "PRIMARY")?.ipAddress;
+      if (!address) continue;
+      instances.push({
+        name: item.name,
+        host: address,
+        port: 5432,
+        engine: item.databaseVersion,
+      });
+    }
+    return instances.sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * List managed Postgres instances for the given provider.
+ */
+export async function listManagedPostgres(
+  provider: CloudProvider,
+  region: string,
+): Promise<DiscoveredPostgresInstance[]> {
+  switch (provider) {
+    case "aws":
+      return listRdsPostgresInstances(region);
+    case "azure":
+      return listAzurePostgresServers();
+    case "gcp":
+      return listCloudSqlPostgresInstances();
+    default:
+      return [];
+  }
+}
+
+/**
+ * Read a Secrets Manager secret. When the value is the RDS-managed JSON
+ * ({username, password}), the password field is returned.
+ */
+export async function getAwsSecretValue(
+  secretId: string,
+  region: string,
+): Promise<string | null> {
+  try {
+    const result = await execCommand(
+      `aws secretsmanager get-secret-value --secret-id "${secretId}" --region ${region} --query SecretString --output text`,
+      { intent: "Fetch service credential", provider: "aws" },
+    );
+    const raw = result.stdout.trim();
+    if (!raw || raw === "None") return null;
+    try {
+      const parsed = JSON.parse(raw) as { password?: string };
+      if (typeof parsed.password === "string") return parsed.password;
+    } catch {
+      // Plain string secret.
+    }
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch the primary access key for an Azure Cache for Redis instance.
+ */
+export async function getAzureRedisKey(
+  name: string,
+  resourceGroup: string,
+): Promise<string | null> {
+  try {
+    const result = await execCommand(
+      `az redis list-keys --name ${name} --resource-group ${resourceGroup} --query primaryKey --output tsv`,
+      { intent: "Fetch service credential", provider: "azure" },
+    );
+    return result.stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch the RootManageSharedAccessKey connection string for an Event Hubs
+ * namespace (used as the Kafka SASL PLAIN password).
+ */
+export async function getEventHubsConnectionString(
+  namespace: string,
+  resourceGroup: string,
+): Promise<string | null> {
+  try {
+    const result = await execCommand(
+      `az eventhubs namespace authorization-rule keys list --namespace-name ${namespace} ` +
+        `--resource-group ${resourceGroup} --name RootManageSharedAccessKey --query primaryConnectionString --output tsv`,
+      { intent: "Fetch service credential", provider: "azure" },
+    );
+    return result.stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch the AUTH string for a Memorystore Redis instance.
+ */
+export async function getGcpRedisAuthString(
+  name: string,
+  region: string,
+): Promise<string | null> {
+  try {
+    const result = await execCommand(
+      `gcloud redis instances get-auth-string ${name} --region ${region} --format="value(authString)"`,
+      { intent: "Fetch service credential", provider: "gcp" },
+    );
+    return result.stdout.trim() || null;
+  } catch {
+    return null;
   }
 }

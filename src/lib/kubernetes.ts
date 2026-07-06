@@ -1391,7 +1391,7 @@ const FINALIZER_BLOCKING_CR_TYPES = [
 /**
  * Strips finalizers from the custom resources whose controllers are torn down
  * with the release, so the namespace can finalize instead of hanging in
- * Terminating (NamespaceFinalizersRemaining). Best-effort per type — a missing
+ * Terminating (NamespaceFinalizersRemaining). Best-effort per type; a missing
  * CRD (feature disabled) or already-gone object is fine.
  */
 export async function removeBlockingFinalizers(namespace: string): Promise<void> {
@@ -1427,11 +1427,11 @@ export async function removeBlockingFinalizers(namespace: string): Promise<void>
             { timeout: 15000 },
           );
         } catch {
-          // Ignore — object might already be deleted.
+          // Ignore; object might already be deleted.
         }
       }
     } catch {
-      // Ignore — this CRD might not be installed (feature disabled).
+      // Ignore; this CRD might not be installed (feature disabled).
     }
   }
 }
@@ -1518,7 +1518,7 @@ export async function namespaceExists(namespace: string): Promise<boolean> {
  * sweeps any helm-labeled kube-system objects (exporter Services/Endpoints) a
  * partial uninstall may have stranded. Scoped strictly to this release; matched
  * by the release-name prefix so a coexisting deployment's kubelet Service is
- * never touched. Best-effort — never blocks teardown.
+ * never touched. Best-effort; never blocks teardown.
  */
 export async function cleanupKubeSystemLeftovers(
   releaseName: string,
@@ -1588,7 +1588,7 @@ export async function cleanupKubeSystemLeftovers(
  * resources. Deployments are named `rulebricks-<name>` for both the namespace and
  * the helm release (see getNamespace/getReleaseName), so the "rulebricks-" prefix
  * is a sound cluster-side signal. Fails CLOSED (returns false) if the cluster
- * can't be enumerated — we never purge shared resources on uncertainty.
+ * can't be enumerated; we never purge shared resources on uncertainty.
  */
 export async function isLastRulebricksDeployment(
   releaseName: string,
@@ -1620,7 +1620,7 @@ export async function isLastRulebricksDeployment(
       .filter((n) => n.startsWith("rulebricks-") && n !== releaseName);
     return otherNamespaces.length === 0;
   } catch {
-    return false; // fail closed — do not purge shared resources on uncertainty
+    return false; // fail closed; do not purge shared resources on uncertainty
   }
 }
 
@@ -1639,7 +1639,7 @@ const RULEBRICKS_CRD_GROUP_SUFFIXES = [
  * manager, keda, strimzi, kube-prometheus-stack). CLUSTER-SHARED: deleting a CRD
  * cascade-deletes every custom resource of that kind across ALL namespaces, so
  * callers MUST gate this on isLastRulebricksDeployment() (or an explicit
- * operator --purge) — never call it while another Rulebricks deployment exists.
+ * operator --purge); never call it while another Rulebricks deployment exists.
  * Best-effort, non-blocking; returns the CRD names removed.
  */
 export async function deleteRulebricksCRDs(): Promise<string[]> {

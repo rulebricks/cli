@@ -6,8 +6,23 @@ import {
   SecretKeyRef,
   validateRemoteWriteConfig,
 } from "../types/index.js";
-import { saveHelmValues, getHelmValuesPath } from "./config.js";
+import {
+  loadHelmValues,
+  saveHelmValues,
+  getHelmValuesPath,
+} from "./config.js";
 import { assertValidHelmValues } from "./validateValues.js";
+import {
+  SOLUTION_TOPIC_PARTITIONS,
+  LOGS_TOPIC_PARTITIONS,
+  TOPIC_REPLICATION_FACTOR,
+  DECISION_LOG_BATCH,
+  PROMETHEUS_RETENTION,
+  PROMETHEUS_STORAGE_SIZE,
+  TRAEFIK_MIN_REPLICAS,
+  TRAEFIK_MAX_REPLICAS,
+  DEFAULT_SUPABASE_EMAILS,
+} from "./chartDefaults.js";
 import {
   SUPABASE_POSTGRES_IMAGE_REPOSITORY,
   SUPABASE_POSTGRES_IMAGE_TAG,
@@ -23,7 +38,7 @@ import YAML from "yaml";
 interface GenerateOptions {
   tlsEnabled?: boolean;
   // "k8s" (default at deploy time): sensitive values are created as Kubernetes
-  // Secrets by the CLI and the generated values carry only *.secretRef — no
+  // Secrets by the CLI and the generated values carry only *.secretRef; no
   // plaintext. "inline": secrets are written into the values (dev / direct-chart).
   secretMode?: "k8s" | "inline";
 }
@@ -34,7 +49,7 @@ interface GenerateOptions {
 //
 // The base MUST be the Helm release name, not config.name. Most chart consumers
 // read the secretRef *value* (name-agnostic), but a few templates hardcode the
-// canonical <release>-* name — e.g. templates/migration-job.yaml derives
+// canonical <release>-* name; e.g. templates/migration-job.yaml derives
 // DB_PASSWORD from `{{ .Release.Name }}-supabase-db`. Naming these secrets with
 // the release name keeps the CLI a faithful drop-in for the unmodified chart so
 // we never have to customize the chart to match the CLI.
@@ -59,40 +74,11 @@ export function deploymentSecretNames(config: DeploymentConfig): {
   };
 }
 
-// Baseline Kafka topic partitioning. These are NOT user-tunable sizing knobs
-// (tiers were removed); they are a structural contract that must stay
-// consistent across three places at once: the kafka.provisioning topic
-// partitions, rulebricks.hps.workers.solutionPartitions (the worker-fleet
-// concurrency ceiling the chart cross-checks), and the worker KEDA
-// maxReplicaCount (validated to be <= solutionPartitions). They mirror the Helm
-// chart's own defaults, so operators who need a different size tune the chart
-// values directly. Partitions can never be decreased, so solution is sized with
-// generous headroom up front; idle partitions are effectively free.
-const SOLUTION_TOPIC_PARTITIONS = 128;
-const LOGS_TOPIC_PARTITIONS = 24;
-// RPC + log topics: replication factor 1. RPC traffic is transient and
-// latency-sensitive (the HPS producer's acks=-1 would otherwise wait on full
-// ISR replication); the in-cluster broker is single-replica by default.
-const TOPIC_REPLICATION_FACTOR = 1;
-
 // global.version must be empty or a semantic version per the chart schema. The
 // CLI normally pins a real version, but migrated/legacy configs can carry
 // "latest"; emitting that would fail chart validation, so we omit it instead
 // and let the chart fall back to its default.
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
-
-// Healthy defaults for the decision-log archive that ClickHouse reads:
-// flush a gzipped NDJSON file at ~64 MiB (uncompressed) or after 5 minutes,
-// whichever comes first. Users can override these in their Helm values.
-//
-// max_bytes MUST stay well below the Vector pod's memory limit
-// (vector.resources.limits.memory in the chart): the object-storage sink buffers
-// the whole uncompressed batch in memory before it flushes, so a batch sized at
-// or above the pod limit gets OOMKilled before it can ever write a blob - which
-// silently disables decision-log export entirely. 64 MiB leaves comfortable
-// headroom under the chart's 1 GiB Vector limit while still producing large,
-// scan-efficient files for ClickHouse.
-const DECISION_LOG_BATCH = { max_bytes: 67108864, timeout_secs: 300 } as const;
 
 const SUPABASE_JWT_ISSUED_AT = 1641769200;
 const SUPABASE_JWT_EXPIRES_AT = 4102444800;
@@ -163,7 +149,12 @@ function generateVectorSinks(
           bucket: storage.bucket,
           region: storage.region,
           key_prefix: decisionLogPathPrefix(config),
-          filename_extension: "ndjson",
+          // Extension MUST end in .gz: the ClickHouse decision_logs named
+          // collection globs year=*/month=*/day=*/hour=*/*.gz and relies on
+          // the extension for compression auto-detection. A bare "ndjson"
+          // extension (gzip content) is invisible to the view - decision logs
+          // upload fine but never appear in the app.
+          filename_extension: "ndjson.gz",
           compression: "gzip",
           encoding: { codec: "json" },
           framing: { method: "newline_delimited" },
@@ -203,7 +194,8 @@ function generateVectorSinks(
           inputs: ["normalize_logs"],
           bucket: storage.bucket,
           key_prefix: decisionLogPathPrefix(config),
-          filename_extension: "ndjson",
+          // Must end in .gz - see the aws_s3 sink note above.
+          filename_extension: "ndjson.gz",
           compression: "gzip",
           encoding: { codec: "json" },
           framing: { method: "newline_delimited" },
@@ -332,6 +324,42 @@ function generateVectorSinks(
   return sinks;
 }
 
+/**
+ * CA trust bundle for the Vector pods. The hardened rulebricks/vector image
+ * ships NO system CA store (no /etc/ssl/certs at all), so every TLS connection
+ * a sink makes - S3/GCS/Azure decision-log archive, Datadog/Splunk/Elastic app
+ * logs - fails at the connector level with "dispatch failure". An initContainer
+ * running the (mirrored, cert-carrying) rulebricks/curl image copies its own
+ * bundle into a shared emptyDir via a file:// URL (the hardened images have no
+ * shell), which is then mounted at the standard /etc/ssl/certs path.
+ * SSL_CERT_FILE (set alongside, see generateVectorEnv) covers both the OpenSSL
+ * and rustls code paths inside Vector.
+ */
+function generateVectorCaBundle(config: DeploymentConfig): Record<string, unknown> {
+  const reg = config.imageRegistry || DEFAULT_IMAGE_REGISTRY;
+  const curlImage = `${reg}/${IMAGE_REPOSITORIES.curl.repository}:${IMAGE_REPOSITORIES.curl.tag}`;
+  return {
+    initContainers: [
+      {
+        name: "ca-certs",
+        image: curlImage,
+        command: [
+          "curl",
+          "-sSf",
+          "-o",
+          "/certs/ca-certificates.crt",
+          "file:///etc/ssl/certs/ca-certificates.crt",
+        ],
+        volumeMounts: [{ name: "ca-certs", mountPath: "/certs" }],
+      },
+    ],
+    extraVolumes: [{ name: "ca-certs", emptyDir: {} }],
+    extraVolumeMounts: [
+      { name: "ca-certs", mountPath: "/etc/ssl/certs", readOnly: true },
+    ],
+  };
+}
+
 function generateVectorEnv(config: DeploymentConfig): Array<Record<string, unknown>> {
   // Kafka connection settings come from the templated vector-kafka-env ConfigMap
   // so the in-cluster vs external (and bridge) decision lives in one place.
@@ -342,10 +370,17 @@ function generateVectorEnv(config: DeploymentConfig): Array<Record<string, unkno
     "KAFKA_SASL_MECHANISM",
     "KAFKA_LOG_TOPIC",
   ];
-  const env: Array<Record<string, unknown>> = configMapKeys.map((key) => ({
-    name: key,
-    valueFrom: { configMapKeyRef: { name: "vector-kafka-env", key } },
-  }));
+  const env: Array<Record<string, unknown>> = [
+    // CA bundle seeded by the ca-certs initContainer (generateVectorCaBundle).
+    // The hardened vector image has no system CA store, so without this every
+    // TLS sink (S3/GCS/Azure decision-log archive, Datadog, ...) fails with
+    // "dispatch failure" and decision logs are silently dropped.
+    { name: "SSL_CERT_FILE", value: "/etc/ssl/certs/ca-certificates.crt" },
+    ...configMapKeys.map((key) => ({
+      name: key,
+      valueFrom: { configMapKeyRef: { name: "vector-kafka-env", key } },
+    })),
+  ];
 
   // SASL credentials (inline PLAIN/SCRAM). Optional so in-cluster/token-auth
   // deploys work without the secret existing.
@@ -558,7 +593,6 @@ function generateClickStackValues(
   const clickstack = config.features.observability?.clickstack;
   const telemetryRetentionDays =
     clickstack?.telemetryRetentionDays ?? 7;
-  const clickHouseStorageSize = clickstack?.clickHouseStorageSize ?? "100Gi";
 
   // Registry host for the clickstack images. The clickstack subchart routes
   // these through its own image helper, so the split { registry, repository }
@@ -1439,6 +1473,10 @@ function generateVectorAgent(
       requests: { cpu: "100m", memory: "256Mi" },
       limits: { cpu: "500m", memory: "512Mi" },
     },
+    // The agent ships logs to customer backends over TLS and needs the same
+    // CA-bundle seeding as the decision-log aggregator (hardened image has no
+    // system CA store).
+    ...generateVectorCaBundle(config),
     customConfig: {
       data_dir: "/vector-data-dir",
       sources: {
@@ -1475,12 +1513,12 @@ export function buildHelmValues(
     !config.database.supabaseJwtSecret
   ) {
     throw new Error(
-      "Self-hosted Supabase is missing a JWT secret. Run `rulebricks redeploy <name>` to regenerate deployment credentials, or set database.supabaseJwtSecret in config.yaml.",
+      "Self-hosted Supabase is missing a JWT secret. Run `rulebricks configure <name>` to regenerate deployment credentials, or set database.supabaseJwtSecret in config.yaml.",
     );
   }
   if (config.features.ai.enabled && !config.features.ai.openaiApiKey) {
     throw new Error(
-      "AI features are enabled but the OpenAI API key is missing. Run `rulebricks redeploy <name>` and enter your OpenAI API key, or disable AI features in config.yaml.",
+      "AI features are enabled but the OpenAI API key is missing. Run `rulebricks configure <name>` and enter your OpenAI API key, or disable AI features in config.yaml.",
     );
   }
 
@@ -1624,18 +1662,8 @@ export function buildHelmValues(
     };
   } else {
     supabaseGlobalConfig.emails = {
-      subjects: {
-        invite: "Join your team on Rulebricks",
-        confirmation: "Confirm Your Email",
-        recovery: "Reset Your Password",
-        emailChange: "Confirm Email Change",
-      },
-      templates: {
-        invite: "https://prefix-files.s3.us-west-2.amazonaws.com/templates/invite.html",
-        confirmation: "https://prefix-files.s3.us-west-2.amazonaws.com/templates/verify.html",
-        recovery: "https://prefix-files.s3.us-west-2.amazonaws.com/templates/password_change.html",
-        emailChange: "https://prefix-files.s3.us-west-2.amazonaws.com/templates/email_change.html",
-      },
+      subjects: { ...DEFAULT_SUPABASE_EMAILS.subjects },
+      templates: { ...DEFAULT_SUPABASE_EMAILS.templates },
     };
   }
 
@@ -2031,10 +2059,8 @@ export function buildHelmValues(
       ...coreScheduling,
       autoscaling: {
         enabled: true,
-        minReplicas: 1,
-        // Headroom for colocated clients pushing multi-hundred-RPS bulk
-        // traffic through the ingress.
-        maxReplicas: 4,
+        minReplicas: TRAEFIK_MIN_REPLICAS,
+        maxReplicas: TRAEFIK_MAX_REPLICAS,
       },
       resources: {
         requests: {
@@ -2184,6 +2210,9 @@ export function buildHelmValues(
       ...(generateVectorExtraContainers(config)
         ? { extraContainers: generateVectorExtraContainers(config) }
         : {}),
+      // Seed the CA trust bundle the hardened image lacks; without it the
+      // decision-log object-storage sink cannot complete a TLS handshake.
+      ...generateVectorCaBundle(config),
       service: {
         enabled: true,
         ports: [{ name: "api", port: 8686, protocol: "TCP", targetPort: 8686 }],
@@ -2359,7 +2388,7 @@ export function buildHelmValues(
                   className: "traefik",
                   // The supabase subchart's kong ingress does NOT emit Traefik's
                   // router.entrypoints/router.tls annotations the way the app
-                  // ingress does — without them Traefik only builds a web (HTTP)
+                  // ingress does; without them Traefik only builds a web (HTTP)
                   // router, so https://supabase.<domain> 404s and the app can't
                   // reach Supabase. Inject them via the subchart's annotations
                   // passthrough (kong/ingress.yaml ranges over these), matching
@@ -2466,7 +2495,7 @@ export function buildHelmValues(
         enabled: true,
         serviceAccount: generatePrometheusServiceAccount(config),
         prometheusSpec: {
-          retention: "30d",
+          retention: PROMETHEUS_RETENTION,
           image: {
             registry: reg,
             repository: IMAGE_REPOSITORIES.prometheus,
@@ -2483,7 +2512,7 @@ export function buildHelmValues(
                 accessModes: ["ReadWriteOnce"],
                 resources: {
                   requests: {
-                    storage: "50Gi",
+                    storage: PROMETHEUS_STORAGE_SIZE,
                   },
                 },
               },
@@ -2549,8 +2578,8 @@ export function buildHelmValues(
   };
 
   // The managed-Postgres migration hook (templates/migration-job.yaml) reads the
-  // DB host/port from .Values.migrations.externalDb — a SEPARATE seam from
-  // supabase.externalDatabase.* — and its `pg_isready -h $DB_HOST` loop hangs
+  // DB host/port from .Values.migrations.externalDb; a SEPARATE seam from
+  // supabase.externalDatabase.*; and its `pg_isready -h $DB_HOST` loop hangs
   // forever (empty host) if it is unset. Wire it for external Postgres. We only
   // set host/port: DB_PASSWORD falls back to the <release>-supabase-db secret and
   // DB_USER/DB_NAME default to "postgres", which match deploymentSecretNames()
@@ -2635,7 +2664,7 @@ export function redactSecretsToRefs(
   // the image-pull secret <release>-regcred from inline global.licenseKey at
   // TEMPLATE time (templates/registry-secret.yaml -> imagePullSecret helper). A
   // Kubernetes imagePullSecret cannot be sourced from a secretRef, so the chart
-  // has no k8s-mode seam for it — stripping it makes the chart fall back to the
+  // has no k8s-mode seam for it; stripping it makes the chart fall back to the
   // "evaluation" placeholder -> dckr_pat_evaluation -> 401 on every private
   // rulebricks/* image. Standalone chart users set global.licenseKey in their own
   // values for exactly this reason; the CLI must do the same to stay compatible
@@ -2659,7 +2688,7 @@ export function redactSecretsToRefs(
       jwt: { secretRef: names.jwt },
       dashboard: { secretRef: names.dashboard },
       realtime: { secretRef: names.realtime },
-      // Supabase auth (GoTrue) SMTP — only when SMTP creds are configured;
+      // Supabase auth (GoTrue) SMTP; only when SMTP creds are configured;
       // otherwise the global.smtp we just stripped would leave it empty.
       ...(config.smtp?.user || config.smtp?.pass
         ? { smtp: { secretRef: names.smtp } }
@@ -2704,6 +2733,55 @@ export async function generateHelmValues(
   options: GenerateOptions = {},
 ): Promise<void> {
   const values = buildHelmValues(config, options);
+  // Last-line guardrail: never write/deploy values the chart would reject.
+  assertValidHelmValues(values);
+  await saveHelmValues(config.name, values);
+}
+
+/**
+ * Builds edit-preserving values for a deployment update: fresh generation
+ * deep-merged over the existing values file, so manual values.yaml edits
+ * outside generated keys survive while config-driven values always win. In
+ * k8s secret mode the result is re-redacted so inline secrets carried over
+ * from older values files never survive the merge. Falls back to plain
+ * generation when no values file exists yet.
+ */
+export function buildDeployValues(
+  existing: Record<string, unknown> | null,
+  config: DeploymentConfig,
+  options: GenerateOptions = {},
+): Record<string, unknown> {
+  const generated = buildHelmValues(config, options);
+  if (!existing) return generated;
+  const merged = mergeHelmValues(existing, generated);
+  // Match buildHelmValues' default secret mode so an inline generation is
+  // never immediately scrubbed back to refs.
+  const secretMode = options.secretMode ?? "inline";
+  return secretMode === "k8s" ? redactSecretsToRefs(merged, config) : merged;
+}
+
+/**
+ * Builds the values a configure run writes; same merge strategy as deploy,
+ * always in k8s secret mode.
+ */
+export function buildConfigureValues(
+  existing: Record<string, unknown>,
+  config: DeploymentConfig,
+): Record<string, unknown> {
+  return buildDeployValues(existing, config, { secretMode: "k8s" });
+}
+
+/**
+ * Generates and saves values for a deploy while preserving existing
+ * values.yaml edits (manual or via `rulebricks configure`); see
+ * buildDeployValues for the merge semantics.
+ */
+export async function generateHelmValuesPreservingEdits(
+  config: DeploymentConfig,
+  options: GenerateOptions = {},
+): Promise<void> {
+  const existing = await loadHelmValues(config.name);
+  const values = buildDeployValues(existing, config, options);
   // Last-line guardrail: never write/deploy values the chart would reject.
   assertValidHelmValues(values);
   await saveHelmValues(config.name, values);

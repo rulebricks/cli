@@ -7,7 +7,7 @@ import chalk from "chalk";
 
 import { InitWizard } from "./commands/init.js";
 import { DeployCommand } from "./commands/deploy.js";
-import { RedeployCommand } from "./commands/redeploy.js";
+import { ConfigureCommand } from "./commands/configure.js";
 import { UpgradeCommand } from "./commands/upgrade.js";
 import { DestroyCommand } from "./commands/destroy.js";
 import { StatusCommand } from "./commands/status.js";
@@ -85,14 +85,15 @@ program
     await waitUntilExit();
   });
 
-// Redeploy command
+// Configure command
 program
-  .command("redeploy")
-  .description("Reconfigure and redeploy an existing Rulebricks deployment")
+  .command("configure")
+  .description(
+    "Update the configuration of an existing deployment (run deploy to apply)",
+  )
   .argument("[name]", "Deployment name")
-  .option("--chart-version <version>", "Specific chart version to deploy")
-  .action(async (name, options) => {
-    const deploymentName = name || (await selectDeployment("redeploy"));
+  .action(async (name) => {
+    const deploymentName = name || (await selectDeployment("configure"));
     if (!deploymentName) {
       console.error(
         chalk.red('No deployments found. Run "rulebricks init" first.'),
@@ -101,10 +102,7 @@ program
     }
 
     const { waitUntilExit } = render(
-      <RedeployCommand
-        name={deploymentName}
-        chartVersion={options.chartVersion}
-      />,
+      <ConfigureCommand name={deploymentName} />,
     );
     await waitUntilExit();
   });

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "clusterName": { "value": "rulebricks-cluster" },
+    "location": { "value": "eastus" },
+    "kubernetesVersion": { "value": "1.34" },
+    "enablePrivateCluster": { "value": false },
+    "enableEntraRbac": { "value": false },
+
+    "vnetAddressSpace": { "value": "10.240.0.0/16" },
+    "aksSubnetPrefix": { "value": "10.240.0.0/22" },
+    "privateEndpointsSubnetPrefix": { "value": "10.240.4.0/24" },
+    "postgresSubnetPrefix": { "value": "10.240.5.0/24" },
+    "serviceCidr": { "value": "172.16.0.0/16" },
+    "dnsServiceIP": { "value": "172.16.0.10" },
+    "podCidr": { "value": "192.168.0.0/16" },
+    "enableDataServicePrivateEndpoints": { "value": false },
+
+    "nodeCount": { "value": 3 },
+    "maxNodeCount": { "value": 5 },
+    "nodeVmSize": { "value": "Standard_F4as_v6" },
+    "maxPods": { "value": 110 },
+    "osDiskSizeGB": { "value": 64 },
+    "osDiskType": { "value": "Managed" },
+    "enableBurstPool": { "value": true },
+    "burstVmSize": { "value": "Standard_F16as_v6" },
+    "burstMaxCount": { "value": 1 },
+
+    "createStorage": { "value": true },
+    "existingStorageAccountName": { "value": "" },
+    "enableDecisionLogExport": { "value": true },
+    "enableBackupExport": { "value": true },
+    "createMonitorWorkspace": { "value": true },
+    "existingDataCollectionRuleId": { "value": "" },
+    "enableMetricsRemoteWrite": { "value": true },
+    "enableExternalDns": { "value": false },
+    "dnsZoneResourceGroup": { "value": "" },
+
+    "enableManagedKafka": { "value": false },
+    "eventHubsCapacityUnits": { "value": 1 },
+    "kafkaTopicPrefix": { "value": "com.rulebricks." },
+    "solutionPartitions": { "value": 64 },
+    "logsPartitions": { "value": 24 },
+    "kafkaRetentionHours": { "value": 168 },
+
+    "enableManagedRedis": { "value": false },
+    "redisSkuName": { "value": "Balanced_B1" },
+
+    "enableManagedDatabase": { "value": false },
+    "postgresVersion": { "value": "17" },
+    "postgresAdminUsername": { "value": "rbadmin" },
+    "postgresSkuName": { "value": "Standard_D4ds_v5" },
+    "postgresSkuTier": { "value": "GeneralPurpose" },
+    "postgresStorageSizeGB": { "value": 128 },
+    "postgresHighAvailability": { "value": false },
+    "postgresBackupRetentionDays": { "value": 7 }
+  }
+}

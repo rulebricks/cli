@@ -10,7 +10,6 @@ import { Box, Text, useApp, useInput } from "ink";
 import {
   BorderBox,
   Spinner,
-  StatusLine,
   ThemeProvider,
   useTheme,
   Logo,

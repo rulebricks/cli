@@ -1,22 +1,25 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import SelectInput from "ink-select-input";
-import TextInput from "ink-text-input";
 import { useWizard } from "../WizardContext.js";
-import { BorderBox, useGatedInput, useTheme } from "../../common/index.js";
-import { Spinner } from "../../common/Spinner.js";
+import { useFieldFlow, FlowField } from "../fieldFlow.js";
 import {
-  CloudProvider,
-  CLOUD_PROVIDER_NAMES,
-  CLOUD_REGIONS,
-} from "../../../types/index.js";
+  BorderBox,
+  DiscoveredSelect,
+  FieldError,
+  StepFooter,
+  TextField,
+  useTheme,
+} from "../../common/index.js";
+import { Spinner } from "../../common/Spinner.js";
+import { CloudProvider, CLOUD_PROVIDER_NAMES } from "../../../types/index.js";
 import {
   checkAllCloudClis,
   AllCloudCliStatus,
   CloudCliStatus,
   DiscoveredCluster,
   discoverClustersInRegion,
-  listRegions,
+  listRegionsWithFallback,
   getGcpProjectId,
   updateKubeconfig,
   CLI_INSTALL_URLS,
@@ -26,308 +29,85 @@ import {
 interface CloudProviderStepProps {
   onComplete: () => void;
   onBack: () => void;
+  entryDirection?: "forward" | "back";
 }
 
-type SubStep =
-  | "checking"
-  | "no-cli"
-  | "provider"
-  | "region-loading"
-  | "region"
-  | "cluster"
-  | "cluster-loading"
-  | "cluster-select"
-  | "manual-region-loading"
-  | "manual-region"
-  | "manual-rg"
-  | "kubeconfig-loading";
+function formatClusterColumns(
+  name: string,
+  location: string,
+  details: string,
+  nodes: string,
+): string {
+  return [fit(name, 26), fit(location, 16), fit(details, 24), fit(nodes, 5)].join(
+    " ",
+  );
+}
 
-interface ProviderItem {
-  label: string;
-  value: CloudProvider;
-  status: CloudCliStatus;
-  disabled: boolean;
+function fit(value: string, width: number): string {
+  const text = value || "-";
+  const clipped =
+    text.length > width ? `${text.slice(0, Math.max(width - 1, 0))}~` : text;
+  return clipped.padEnd(width, " ");
+}
+
+function formatClusterRow(cluster: DiscoveredCluster): string {
+  const details =
+    cluster.resourceGroup || cluster.projectId || cluster.version || "-";
+  const nodes =
+    cluster.nodeCount === undefined || cluster.nodeCount === null
+      ? "-"
+      : String(cluster.nodeCount);
+  return formatClusterColumns(cluster.name, cluster.region, details, nodes);
 }
 
 export function CloudProviderStep({
   onComplete,
   onBack,
+  entryDirection,
 }: CloudProviderStepProps) {
   const { state, dispatch } = useWizard();
   const { colors } = useTheme();
+  const [error, setError] = useState<string | null>(null);
 
-  const [subStep, setSubStep] = useState<SubStep>("checking");
   const [cliStatus, setCliStatus] = useState<AllCloudCliStatus | null>(null);
+  const [provider, setProvider] = useState<CloudProvider | null>(state.provider);
+  const [region, setRegion] = useState(state.region || "");
+  const [regionManual, setRegionManual] = useState(false);
   const [clusterName, setClusterName] = useState(
     state.clusterName || "rulebricks-cluster",
   );
-  const [clusters, setClusters] = useState<DiscoveredCluster[]>([]);
-  const [selectedProvider, setSelectedProvider] = useState<CloudProvider | null>(
-    state.provider,
-  );
-  // Manual-entry path (no clusters discovered): region and, on Azure, the
-  // resource group still need to be captured so downstream steps (kubeconfig,
-  // storage/monitoring discovery) aren't left blind.
-  const [manualRegion, setManualRegion] = useState(state.region || "");
-  const [manualRegions, setManualRegions] = useState<string[]>([]);
-  const [manualResourceGroup, setManualResourceGroup] = useState(
+  const [clusterManual, setClusterManual] = useState(false);
+  const [resourceGroup, setResourceGroup] = useState(
     state.azureResourceGroup || "",
   );
-  const [rgError, setRgError] = useState<string | null>(null);
+  const [clustersByKey] = useState(new Map<string, DiscoveredCluster>());
+  const [finishing, setFinishing] = useState(false);
 
-  // Check CLIs on mount
   useEffect(() => {
-    async function checkClis() {
-      const status = await checkAllCloudClis();
-
-      setCliStatus(status);
-
-      if (!status.anyInstalled) {
-        setSubStep("no-cli");
-      } else {
-        setSubStep("provider");
-      }
-    }
-
-    checkClis();
+    checkAllCloudClis().then(setCliStatus);
   }, []);
 
-  useGatedInput((input, key) => {
-    if (key.escape) {
-      if (
-        subStep === "provider" ||
-        subStep === "no-cli" ||
-        subStep === "checking"
-      ) {
-        onBack();
-      } else if (subStep === "region" || subStep === "region-loading") {
-        setSubStep("provider");
-      } else if (
-        subStep === "manual-region" ||
-        subStep === "manual-region-loading"
-      ) {
-        setSubStep("cluster");
-      } else if (subStep === "manual-rg") {
-        setRgError(null);
-        setSubStep("manual-region");
-      } else if (
-        subStep === "cluster" ||
-        subStep === "cluster-loading" ||
-        subStep === "cluster-select" ||
-        subStep === "kubeconfig-loading"
-      ) {
-        setSubStep("region");
-      }
-    }
-  });
+  const providerItems = cliStatus
+    ? [
+        { label: "AWS (EKS)", value: "aws" as const, status: cliStatus.aws },
+        {
+          label: "Google Cloud (GKE)",
+          value: "gcp" as const,
+          status: cliStatus.gcp,
+        },
+        {
+          label: "Azure (AKS)",
+          value: "azure" as const,
+          status: cliStatus.azure,
+        },
+      ].map((item) => ({ ...item, disabled: !item.status.authenticated }))
+    : [];
 
-  // Build provider items with status
-  const getProviderItems = (): ProviderItem[] => {
-    if (!cliStatus) return [];
-
-    const providers: {
-      label: string;
-      value: CloudProvider;
-      status: CloudCliStatus;
-    }[] = [
-      { label: "AWS (EKS)", value: "aws", status: cliStatus.aws },
-      { label: "Google Cloud (GKE)", value: "gcp", status: cliStatus.gcp },
-      { label: "Azure (AKS)", value: "azure", status: cliStatus.azure },
-    ];
-
-    return providers.map((p) => ({
-      ...p,
-      disabled: !p.status.authenticated,
-    }));
-  };
-
-  const providerItems = getProviderItems();
-
-  const handleProviderSelect = (item: { value: string }) => {
-    const selectedItem = providerItems.find((p) => p.value === item.value);
-    if (!selectedItem || selectedItem.disabled) return;
-
-    const provider = item.value as CloudProvider;
-    setSelectedProvider(provider);
-    setClusterName("rulebricks-cluster");
-    setManualRegion("");
-    setManualResourceGroup("");
-    dispatch({ type: "SET_PROVIDER", provider });
-    loadProviderRegions(provider);
-  };
-
-  const loadProviderRegions = async (provider: CloudProvider) => {
-    setSubStep("region-loading");
-    try {
-      const regions = await listRegions(provider);
-      setManualRegions(regions.length > 0 ? regions : CLOUD_REGIONS[provider]);
-    } catch {
-      setManualRegions(CLOUD_REGIONS[provider]);
-    }
-    setSubStep("region");
-  };
-
-  const loadClusters = async (provider: CloudProvider, region: string) => {
-    setSubStep("cluster-loading");
-
-    try {
-      const availableClusters = await discoverClustersInRegion(provider, region);
-
-      setClusters(availableClusters);
-
-      if (availableClusters.length > 0) {
-        setSubStep("cluster-select");
-      } else {
-        // No clusters found, fall back to manual input
-        setSubStep("cluster");
-      }
-    } catch {
-      // On error, fall back to manual input
-      setClusters([]);
-      setSubStep("cluster");
-    }
-  };
-
-  const completeWithCluster = async (cluster: DiscoveredCluster) => {
-    dispatch({ type: "SET_REGION", region: cluster.region });
-    dispatch({ type: "SET_CLUSTER_NAME", clusterName: cluster.name });
-    dispatch({ type: "SET_AZURE_RG", resourceGroup: cluster.resourceGroup || "" });
-    dispatch({ type: "SET_GCP_PROJECT", projectId: cluster.projectId || "" });
-
-    if (cluster.provider && cluster.region) {
-      setSubStep("kubeconfig-loading");
-      try {
-        await updateKubeconfig(cluster.provider, cluster.name, cluster.region, {
-          gcpProjectId: cluster.projectId,
-          azureResourceGroup: cluster.resourceGroup,
-        });
-      } catch {
-        // The next step performs a direct kubectl scan and will show a concrete
-        // access error if kubeconfig still points at the wrong cluster.
-      }
-    }
-
-    onComplete();
-  };
-
-  const handleClusterSelect = (item: { value: string }) => {
-    const cluster = clusters.find((c) => getClusterKey(c) === item.value);
-    if (!cluster) return;
-
-    setClusterName(cluster.name);
-    completeWithCluster(cluster);
-  };
-
-  const handleClusterSubmit = () => {
-    dispatch({ type: "SET_CLUSTER_NAME", clusterName });
-
-    const provider = selectedProvider || state.provider;
-    if (!manualRegion) {
-      loadManualRegions();
-      return;
-    }
-    if (provider === "azure" && !manualResourceGroup.trim()) {
-      setSubStep("manual-rg");
-      return;
-    }
-    completeManual(manualRegion, manualResourceGroup.trim());
-  };
-
-  // Manual path: the cluster wasn't discovered, so the region (and Azure
-  // resource group) are collected explicitly before refreshing kubeconfig
-  // otherwise the cluster capability scan runs against whatever kubectl happens
-  // to point at and storage/monitoring discovery start without a region.
-  const loadManualRegions = async () => {
-    const provider = selectedProvider || state.provider;
-    if (!provider) {
-      onComplete();
-      return;
-    }
-    setSubStep("manual-region-loading");
-    try {
-      const regions = await listRegions(provider);
-      setManualRegions(regions.length > 0 ? regions : CLOUD_REGIONS[provider]);
-    } catch {
-      setManualRegions(CLOUD_REGIONS[provider]);
-    }
-    setSubStep("manual-region");
-  };
-
-  const handleManualRegionSelect = (item: { value: string }) => {
-    setManualRegion(item.value);
-    dispatch({ type: "SET_REGION", region: item.value });
-
-    const provider = selectedProvider || state.provider;
-    if (provider === "azure") {
-      setSubStep("manual-rg");
-    } else {
-      completeManual(item.value, "");
-    }
-  };
-
-  const handleRegionSelect = (item: { value: string }) => {
-    const provider = selectedProvider || state.provider;
-    if (!provider) return;
-
-    setManualRegion(item.value);
-    dispatch({ type: "SET_REGION", region: item.value });
-    loadClusters(provider, item.value);
-  };
-
-  const handleManualResourceGroupSubmit = () => {
-    if (!manualResourceGroup.trim()) {
-      setRgError("Resource group is required for AKS clusters");
-      return;
-    }
-    setRgError(null);
-    dispatch({
-      type: "SET_AZURE_RG",
-      resourceGroup: manualResourceGroup.trim(),
-    });
-    completeManual(manualRegion, manualResourceGroup.trim());
-  };
-
-  const completeManual = async (region: string, resourceGroup: string) => {
-    const provider = selectedProvider || state.provider;
-    if (!provider) {
-      onComplete();
-      return;
-    }
-
-    setSubStep("kubeconfig-loading");
-    // GCP: derive the project from the active gcloud config instead of asking.
-    let gcpProjectId: string | undefined;
-    if (provider === "gcp") {
-      try {
-        gcpProjectId = (await getGcpProjectId()) || undefined;
-      } catch {
-        gcpProjectId = undefined;
-      }
-      if (gcpProjectId) {
-        dispatch({ type: "SET_GCP_PROJECT", projectId: gcpProjectId });
-      }
-    }
-
-    try {
-      await updateKubeconfig(provider, clusterName, region, {
-        gcpProjectId,
-        azureResourceGroup: resourceGroup || undefined,
-      });
-    } catch {
-      // The next step performs a direct kubectl scan and will show a concrete
-      // access error if kubeconfig still points at the wrong cluster.
-    }
-
-    onComplete();
-  };
-
-  // Render status indicator for a provider
   const renderStatusIndicator = (status: CloudCliStatus) => {
     if (!status.installed) {
       return <Text color="gray"> (not installed)</Text>;
     }
     if (!status.authenticated) {
-      // Check for specific error types to show more helpful messages
       if (status.error?.toLowerCase().includes("quota")) {
         return <Text color="yellow"> (insufficient quota)</Text>;
       }
@@ -339,332 +119,368 @@ export function CloudProviderStep({
     return <Text color="green"> ✓</Text>;
   };
 
-  const clusterItems = clusters.map((cluster) => ({
-    label: formatClusterRow(cluster),
-    value: getClusterKey(cluster),
-  }));
+  // Refresh kubeconfig for the selected cluster, then leave the step. Failures
+  // are non-fatal: the cluster scan in the Version step surfaces a concrete
+  // access error if kubeconfig still points at the wrong cluster.
+  const finish = async (
+    selected: {
+      name: string;
+      region: string;
+      resourceGroup?: string;
+      projectId?: string;
+    },
+    advance: () => void,
+  ) => {
+    setFinishing(true);
 
-  const activeProvider = selectedProvider || state.provider;
-  const providerName = activeProvider
-    ? CLOUD_PROVIDER_NAMES[activeProvider]
-    : "";
+    let projectId = selected.projectId;
+    if (provider === "gcp" && !projectId) {
+      try {
+        projectId = (await getGcpProjectId()) || undefined;
+      } catch {
+        projectId = undefined;
+      }
+    }
 
-  return (
-    <BorderBox title="Cloud Provider">
-      {subStep === "checking" && (
-        <Box flexDirection="column" marginY={1}>
-          <Spinner label="Checking cloud CLI tools..." />
-          <Box marginTop={1}>
-            <Text color="gray" dimColor>
-              Detecting AWS, GCP, and Azure CLIs...
-            </Text>
-          </Box>
-        </Box>
-      )}
+    dispatch({ type: "SET_REGION", region: selected.region });
+    dispatch({ type: "SET_CLUSTER_NAME", clusterName: selected.name });
+    dispatch({
+      type: "SET_AZURE_RG",
+      resourceGroup: selected.resourceGroup || "",
+    });
+    dispatch({ type: "SET_GCP_PROJECT", projectId: projectId || "" });
 
-      {subStep === "no-cli" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text color="red" bold>
-            No cloud CLI tools detected
-          </Text>
-          <Box marginTop={1} flexDirection="column">
-            <Text>
-              To discover clusters, install at least one cloud CLI:
-            </Text>
-          </Box>
-          <Box marginTop={1} flexDirection="column" marginLeft={2}>
-            {Object.entries(CLI_INSTALL_URLS).map(([provider, info]) => (
-              <Box key={provider} flexDirection="column" marginBottom={1}>
-                <Text bold>{info.name}:</Text>
-                <Text color="gray"> {info.installCmd}</Text>
-                <Text color="gray"> {info.url}</Text>
+    if (provider) {
+      try {
+        await updateKubeconfig(provider, selected.name, selected.region, {
+          gcpProjectId: projectId,
+          azureResourceGroup: selected.resourceGroup,
+        });
+      } catch {
+        // Non-fatal; see note above.
+      }
+    }
+
+    setFinishing(false);
+    advance();
+  };
+
+  const fields: FlowField[] = [
+    {
+      id: "provider",
+      render: (flow) => {
+        if (!cliStatus) {
+          return (
+            <Box flexDirection="column" marginY={1}>
+              <Spinner label="Checking cloud CLI tools..." />
+              <Box marginTop={1}>
+                <Text color="gray" dimColor>
+                  Detecting AWS, GCP, and Azure CLIs...
+                </Text>
               </Box>
-            ))}
-          </Box>
-          <Box marginTop={1}>
-            <Text color="gray">After installing, authenticate:</Text>
-          </Box>
-          <Box marginLeft={2} flexDirection="column">
-            {Object.entries(CLI_LOGIN_COMMANDS).map(([provider, cmd]) => (
-              <Box key={provider} flexDirection="column">
-                {Array.isArray(cmd) ? (
-                  <>
-                    <Text color="gray"> {provider}:</Text>
-                    {cmd.map((c, i) => (
-                      <Text key={i} color="gray">   {c}</Text>
-                    ))}
-                  </>
-                ) : (
-                  <Text color="gray"> {provider}: {cmd}</Text>
-                )}
-              </Box>
-            ))}
-          </Box>
-        </Box>
-      )}
+            </Box>
+          );
+        }
 
-      {subStep === "provider" && cliStatus && (
-        <>
+        if (!cliStatus.anyInstalled) {
+          return (
+            <Box flexDirection="column" marginY={1}>
+              <Text color={colors.error} bold>
+                No cloud CLI tools detected
+              </Text>
+              <Box marginTop={1}>
+                <Text>To discover clusters, install at least one cloud CLI:</Text>
+              </Box>
+              <Box marginTop={1} flexDirection="column" marginLeft={2}>
+                {Object.entries(CLI_INSTALL_URLS).map(([key, info]) => (
+                  <Box key={key} flexDirection="column" marginBottom={1}>
+                    <Text bold>{info.name}:</Text>
+                    <Text color="gray"> {info.installCmd}</Text>
+                    <Text color="gray"> {info.url}</Text>
+                  </Box>
+                ))}
+              </Box>
+              <Box marginTop={1}>
+                <Text color="gray">After installing, authenticate:</Text>
+              </Box>
+              <Box marginLeft={2} flexDirection="column">
+                {Object.entries(CLI_LOGIN_COMMANDS).map(([key, cmd]) => (
+                  <Box key={key} flexDirection="column">
+                    {Array.isArray(cmd) ? (
+                      <>
+                        <Text color="gray"> {key}:</Text>
+                        {cmd.map((c, i) => (
+                          <Text key={i} color="gray">
+                            {"   "}
+                            {c}
+                          </Text>
+                        ))}
+                      </>
+                    ) : (
+                      <Text color="gray">
+                        {" "}
+                        {key}: {cmd}
+                      </Text>
+                    )}
+                  </Box>
+                ))}
+              </Box>
+            </Box>
+          );
+        }
+
+        return (
           <Box flexDirection="column" marginY={1}>
-            <Text>Select your cloud provider:</Text>
-            {!cliStatus.anyAvailable && cliStatus.anyInstalled && (
+            <Text bold>Select your cloud provider</Text>
+            {!cliStatus.anyAvailable && (
               <Text color="yellow" dimColor>
                 Some CLIs are installed but not authenticated
               </Text>
             )}
+            <Box marginTop={1} flexDirection="column">
+              <SelectInput
+                items={providerItems.map((p) => ({
+                  label: p.label,
+                  value: p.value,
+                }))}
+                initialIndex={Math.max(
+                  0,
+                  providerItems.findIndex((p) => p.value === provider),
+                )}
+                onSelect={(item: { value: string }) => {
+                  const selected = providerItems.find(
+                    (p) => p.value === item.value,
+                  );
+                  if (!selected || selected.disabled) return;
+                  const next = item.value as CloudProvider;
+                  if (next !== provider) {
+                    setRegion("");
+                    setClusterName("rulebricks-cluster");
+                    setResourceGroup("");
+                  }
+                  setProvider(next);
+                  setClusterManual(false);
+                  dispatch({ type: "SET_PROVIDER", provider: next });
+                  flow.next();
+                }}
+                indicatorComponent={() => null}
+                itemComponent={({ isSelected, label }) => {
+                  const item = providerItems.find((p) => p.label === label);
+                  if (!item) return <Text>{label}</Text>;
+                  const textColor = item.disabled
+                    ? "gray"
+                    : isSelected
+                      ? colors.accent
+                      : undefined;
+                  return (
+                    <Box>
+                      <Text color={textColor} dimColor={item.disabled}>
+                        {isSelected && !item.disabled ? "❯ " : "  "}
+                        {label}
+                      </Text>
+                      {renderStatusIndicator(item.status)}
+                      {item.status.identity && item.status.authenticated && (
+                        <Text color="gray" dimColor>
+                          {" "}
+                          ({item.status.identity})
+                        </Text>
+                      )}
+                    </Box>
+                  );
+                }}
+              />
+            </Box>
           </Box>
-          <SelectInput
-            items={providerItems.map((p) => ({
-              label: p.label,
-              value: p.value,
-            }))}
-            onSelect={handleProviderSelect}
-            indicatorComponent={() => null}
-            itemComponent={({ isSelected, label }) => {
-              const item = providerItems.find((p) => p.label === label);
-              if (!item) return <Text>{label}</Text>;
-
-              const textColor = item.disabled
-                ? "gray"
-                : isSelected
-                  ? colors.accent
-                  : undefined;
-
-              return (
-                <Box>
-                  <Text color={textColor} dimColor={item.disabled}>
-                    {isSelected && !item.disabled ? "> " : "  "}
-                    {label}
-                  </Text>
-                  {renderStatusIndicator(item.status)}
-                  {item.status.identity && item.status.authenticated && (
-                    <Text color="gray" dimColor>
-                      {" "}
-                      ({item.status.identity})
-                    </Text>
-                  )}
-                </Box>
+        );
+      },
+    },
+    {
+      id: "region",
+      when: () => !!provider && !regionManual,
+      render: (flow) => (
+        <DiscoveredSelect
+          label="Select the cluster's region"
+          hint={`Rulebricks will only search ${provider ? CLOUD_PROVIDER_NAMES[provider] : ""} clusters in this region.`}
+          loadingLabel="Loading available regions..."
+          emptyHint="No regions listed. Press R to refresh or enter one manually."
+          load={async () =>
+            (await listRegionsWithFallback(provider as CloudProvider)).map(
+              (r) => ({ label: r, value: r }),
+            )
+          }
+          initialValue={region || undefined}
+          onSelect={(value) => {
+            setRegion(value);
+            dispatch({ type: "SET_REGION", region: value });
+            flow.next();
+          }}
+          onManual={() => {
+            setRegionManual(true);
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "region-manual",
+      onEscape: () => setRegionManual(false),
+      when: () => !!provider && regionManual,
+      render: (flow) => (
+        <TextField
+          label="Region"
+          value={region}
+          onChange={setRegion}
+          placeholder={provider === "azure" ? "eastus" : "us-east-1"}
+          onSubmit={() => {
+            if (!region.trim()) {
+              setError("Region is required");
+              return;
+            }
+            setError(null);
+            dispatch({ type: "SET_REGION", region: region.trim() });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "cluster",
+      when: () => !!provider && !clusterManual,
+      render: (flow) => (
+        <Box flexDirection="column">
+          <DiscoveredSelect
+            label="Select your Kubernetes cluster"
+            hint={`${formatClusterColumns("Name", "Location", "Details", "Nodes")}`}
+            loadingLabel={`Fetching ${provider ? CLOUD_PROVIDER_NAMES[provider] : ""} clusters in ${region}...`}
+            emptyHint={`No clusters found in ${region}. Press R to refresh, or enter a name manually (see cluster-setup/ for minimum Rulebricks examples).`}
+            manualLabel="Enter cluster name manually…"
+            load={async () => {
+              const clusters = await discoverClustersInRegion(
+                provider as CloudProvider,
+                region,
               );
+              clustersByKey.clear();
+              for (const cluster of clusters) {
+                const key = [
+                  cluster.provider,
+                  cluster.region,
+                  cluster.resourceGroup || cluster.projectId || "",
+                  cluster.name,
+                ].join(":");
+                clustersByKey.set(key, cluster);
+              }
+              return [...clustersByKey.entries()].map(([key, cluster]) => ({
+                label: formatClusterRow(cluster),
+                value: key,
+              }));
+            }}
+            recommendIndex={(items) =>
+              items.findIndex(
+                (item) => clustersByKey.get(item.value)?.name === clusterName,
+              )
+            }
+            onSelect={(value) => {
+              const cluster = clustersByKey.get(value);
+              if (!cluster) return;
+              setClusterName(cluster.name);
+              finish(cluster, flow.next);
+            }}
+            onManual={() => {
+              setClusterManual(true);
+              flow.next();
             }}
           />
-        </>
-      )}
-
-      {subStep === "region-loading" && (
-        <Box flexDirection="column" marginY={1}>
-          <Spinner label="Loading available regions..." />
         </Box>
-      )}
+      ),
+    },
+    {
+      id: "cluster-name",
+      onEscape: () => setClusterManual(false),
+      when: () => !!provider && clusterManual,
+      render: (flow) => (
+        <TextField
+          label="Enter the Kubernetes cluster name"
+          hint="If kubectl already points at the cluster, you can enter its name manually. Need a basic cluster? See cluster-setup/."
+          value={clusterName}
+          onChange={setClusterName}
+          placeholder="rulebricks-cluster"
+          onSubmit={() => {
+            if (!clusterName.trim()) {
+              setError("Cluster name is required");
+              return;
+            }
+            setError(null);
+            dispatch({
+              type: "SET_CLUSTER_NAME",
+              clusterName: clusterName.trim(),
+            });
+            if (provider === "azure") {
+              flow.next();
+              return;
+            }
+            finish(
+              { name: clusterName.trim(), region },
+              flow.next,
+            );
+          }}
+        />
+      ),
+    },
+    {
+      id: "azure-rg",
+      when: () => provider === "azure" && clusterManual,
+      render: (flow) => (
+        <TextField
+          label="Enter the cluster's resource group"
+          hint="The Azure resource group containing the AKS cluster (needed for kubeconfig access)."
+          value={resourceGroup}
+          onChange={setResourceGroup}
+          placeholder="my-resource-group"
+          onSubmit={() => {
+            if (!resourceGroup.trim()) {
+              setError("Resource group is required for AKS clusters");
+              return;
+            }
+            setError(null);
+            dispatch({
+              type: "SET_AZURE_RG",
+              resourceGroup: resourceGroup.trim(),
+            });
+            finish(
+              {
+                name: clusterName.trim(),
+                region,
+                resourceGroup: resourceGroup.trim(),
+              },
+              flow.next,
+            );
+          }}
+        />
+      ),
+    },
+  ];
 
-      {subStep === "region" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text>Select the cluster's region:</Text>
-          <Text color="gray" dimColor>
-            Rulebricks will only search {providerName} clusters in this region.
-          </Text>
-          <Box
-            marginTop={1}
-            height={10}
-            flexDirection="column"
-            overflowY="hidden"
-          >
-            <SelectInput
-              items={manualRegions.map((r) => ({ label: r, value: r }))}
-              onSelect={handleRegionSelect}
-              limit={8}
-              initialIndex={Math.max(0, manualRegions.indexOf(manualRegion))}
-              indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "> " : "  "}
-                  {label}
-                </Text>
-              )}
-            />
-          </Box>
-        </Box>
-      )}
+  const flow = useFieldFlow({
+    fields,
+    onDone: onComplete,
+    onExit: onBack,
+    entry: entryDirection === "back" ? "end" : "start",
+    escapeGoesBack: !finishing,
+    onNavigate: () => setError(null),
+  });
 
-      {subStep === "cluster-loading" && (
-        <Box flexDirection="column" marginY={1}>
-          <Spinner
-            label={`Fetching ${providerName} clusters in ${manualRegion}...`}
-          />
-          <Box marginTop={1}>
-            <Text color="gray" dimColor>
-              This keeps discovery targeted to the selected region.
-            </Text>
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "cluster-select" && (
-        <>
-          <Box flexDirection="column" marginY={1}>
-            <Text>Select your Kubernetes cluster:</Text>
-            <Text color="gray" dimColor>
-              {clusters.length} cluster{clusters.length !== 1 ? "s" : ""} found
-              for {providerName} in {manualRegion}
-            </Text>
-          </Box>
-          <Text color="gray" dimColor>
-            {`  ${formatClusterColumns("Name", "Location", "Details", "Nodes")}`}
-          </Text>
-          <Box height={10} flexDirection="column" overflowY="hidden">
-            <SelectInput
-              items={clusterItems}
-              onSelect={handleClusterSelect}
-              limit={8}
-              indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "> " : "  "}
-                  {label}
-                </Text>
-              )}
-            />
-          </Box>
-        </>
-      )}
-
-      {subStep === "cluster" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text>Enter the Kubernetes cluster name:</Text>
-          <Text color="gray" dimColor>
-            No clusters were discovered for {providerName}. If kubectl already
-            points at the cluster, you can enter its name manually.
-          </Text>
-          <Box marginTop={1} flexDirection="column">
-            <Text color="yellow">
-              Need a basic cluster? See cluster-setup/ for minimum Rulebricks
-              examples.
-            </Text>
-          </Box>
-          <Box marginTop={1}>
-            <Text color={colors.accent}>{" > "}</Text>
-            <TextInput
-              value={clusterName}
-              onChange={setClusterName}
-              onSubmit={handleClusterSubmit}
-              placeholder="rulebricks-cluster"
-            />
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "manual-region-loading" && (
-        <Box flexDirection="column" marginY={1}>
-          <Spinner label="Loading available regions..." />
-        </Box>
-      )}
-
-      {subStep === "manual-region" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text>Select the cluster's region:</Text>
-          <Text color="gray" dimColor>
-            Used to refresh kubeconfig and discover storage and monitoring
-            resources for {clusterName}.
-          </Text>
-          <Box
-            marginTop={1}
-            height={10}
-            flexDirection="column"
-            overflowY="hidden"
-          >
-            <SelectInput
-              items={manualRegions.map((r) => ({ label: r, value: r }))}
-              onSelect={handleManualRegionSelect}
-              limit={8}
-              initialIndex={Math.max(0, manualRegions.indexOf(manualRegion))}
-              indicatorComponent={() => null}
-              itemComponent={({ isSelected, label }) => (
-                <Text color={isSelected ? colors.accent : undefined}>
-                  {isSelected ? "> " : "  "}
-                  {label}
-                </Text>
-              )}
-            />
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "manual-rg" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text>Enter the cluster's resource group:</Text>
-          <Text color="gray" dimColor>
-            The Azure resource group containing the AKS cluster (needed for
-            kubeconfig access).
-          </Text>
-          <Box marginTop={1}>
-            <Text color={colors.accent}>{" > "}</Text>
-            <TextInput
-              value={manualResourceGroup}
-              onChange={setManualResourceGroup}
-              onSubmit={handleManualResourceGroupSubmit}
-              placeholder="my-resource-group"
-            />
-          </Box>
-          {rgError && (
-            <Box marginTop={1}>
-              <Text color="red">✗ {rgError}</Text>
-            </Box>
-          )}
-        </Box>
-      )}
-
-      {subStep === "kubeconfig-loading" && (
+  return (
+    <BorderBox title="Cloud Provider">
+      {finishing ? (
         <Box flexDirection="column" marginY={1}>
           <Spinner label="Refreshing kubeconfig for selected cluster..." />
         </Box>
+      ) : (
+        flow.render()
       )}
 
-      <Box marginTop={1}>
-        <Text color="gray" dimColor>
-          Esc to go back • Enter to continue
-        </Text>
-      </Box>
+      <FieldError error={error} />
+      <StepFooter />
     </BorderBox>
   );
-}
-
-function getClusterKey(cluster: DiscoveredCluster): string {
-  return [
-    cluster.provider,
-    cluster.region,
-    cluster.resourceGroup || cluster.projectId || "",
-    cluster.name,
-  ].join(":");
-}
-
-function formatClusterRow(cluster: DiscoveredCluster): string {
-  const details =
-    cluster.resourceGroup || cluster.projectId || cluster.version || "-";
-  const nodes =
-    cluster.nodeCount === undefined || cluster.nodeCount === null
-      ? "-"
-      : String(cluster.nodeCount);
-
-  return formatClusterColumns(cluster.name, cluster.region, details, nodes);
-}
-
-function formatClusterColumns(
-  name: string,
-  location: string,
-  details: string,
-  nodes: string,
-): string {
-  return [
-    fit(name, 26),
-    fit(location, 16),
-    fit(details, 24),
-    fit(nodes, 5),
-  ].join(" ");
-}
-
-function fit(value: string, width: number): string {
-  const text = value || "-";
-  const clipped =
-    text.length > width ? `${text.slice(0, Math.max(width - 1, 0))}~` : text;
-
-  return clipped.padEnd(width, " ");
 }

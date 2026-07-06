@@ -27,7 +27,6 @@ import { generateSecureSecret } from "../../lib/validation.js";
 
 // Partial config during wizard flow
 export interface WizardState {
-  step: number;
   name: string;
 
   // Infrastructure
@@ -223,7 +222,6 @@ export interface WizardState {
 }
 
 type WizardAction =
-  | { type: "SET_STEP"; step: number }
   | { type: "SET_NAME"; name: string }
   | { type: "SET_PROVIDER"; provider: CloudProvider }
   | { type: "SET_REGION"; region: string }
@@ -433,9 +431,7 @@ type WizardAction =
   | { type: "SET_EMAIL_TEMPLATES"; templates: Partial<EmailTemplates> }
   | { type: "SET_LICENSE_KEY"; key: string }
   | { type: "SET_VERSION"; version: string }
-  | { type: "SET_CHART_VERSION"; version: string }
-  | { type: "NEXT_STEP" }
-  | { type: "PREV_STEP" };
+  | { type: "SET_CHART_VERSION"; version: string };
 
 /**
  * Creates the initial wizard state, optionally pre-populated from a user profile.
@@ -443,7 +439,6 @@ type WizardAction =
  */
 function getInitialState(profile?: ProfileConfig | null): WizardState {
   return {
-    step: 0,
     name: "",
 
     // Infrastructure - pre-populate from profile
@@ -457,7 +452,7 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     domain: "", // Domain is intentionally left empty - user should enter unique domain per deployment
     adminEmail: profile?.adminEmail ?? "",
     // The TLS email is no longer asked in the wizard; it defaults to the admin
-    // email in toConfig. Only an existing config (redeploy) can carry a custom
+    // email in toConfig. Only an existing config (configure) can carry a custom
     // value, so it is intentionally not pre-populated from the profile.
     tlsEmail: "",
 
@@ -640,9 +635,6 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
   };
 }
 
-// Default initial state (for backwards compatibility)
-const initialState: WizardState = getInitialState();
-
 /**
  * Derives the Supabase project ref from a managed-Supabase project URL
  * (https://<ref>.supabase.co), so the wizard never has to ask for it.
@@ -733,10 +725,7 @@ function buildExternalServices(
       mode: state.postgresMode,
       external: postgresExternal
         ? {
-            provider:
-              state.provider === "aws" || state.provider === "azure"
-                ? state.provider
-                : undefined,
+            provider: state.provider ?? undefined,
             host: state.postgresHost.trim() || undefined,
             port: state.postgresPort || undefined,
             database: state.postgresDatabase.trim() || undefined,
@@ -1033,6 +1022,70 @@ export function collectConfigIssues(state: WizardState): string[] {
     );
   }
 
+  issues.push(...collectCrossProviderIssues(state));
+
+  return issues;
+}
+
+/**
+ * Catches provider-specific selections that don't match the cluster's cloud
+ * (typically stale state from an older profile or hand-edited config).
+ */
+function collectCrossProviderIssues(state: WizardState): string[] {
+  const issues: string[] = [];
+  const provider = state.provider;
+  if (!provider) return issues;
+
+  const expectedStorage: ObjectStorageProvider =
+    provider === "azure" ? "azure-blob" : provider === "gcp" ? "gcs" : "s3";
+  if (state.storageProvider && state.storageProvider !== expectedStorage) {
+    issues.push(
+      `Object storage provider "${state.storageProvider}" does not match the ${provider} cluster (expected ${expectedStorage}).`,
+    );
+  }
+
+  if (state.kafkaMode === "external" && state.kafkaPreset) {
+    const presetProvider: Record<string, CloudProvider | undefined> = {
+      "aws-msk-iam": "aws",
+      "azure-event-hubs": "azure",
+      "gcp-managed": "gcp",
+    };
+    const required = presetProvider[state.kafkaPreset];
+    if (required && required !== provider) {
+      issues.push(
+        `Kafka preset "${state.kafkaPreset}" requires a ${required} cluster; this deployment targets ${provider}.`,
+      );
+    }
+  }
+
+  if (!state.clickStackEnabled && state.metricsExportEnabled) {
+    if (
+      state.prometheusRemoteWriteDestination === "aws-amp" &&
+      provider !== "aws"
+    ) {
+      issues.push(
+        "AWS Managed Prometheus metrics export requires an AWS cluster.",
+      );
+    }
+    if (
+      state.prometheusRemoteWriteDestination === "azure-monitor" &&
+      provider !== "azure"
+    ) {
+      issues.push(
+        "Azure Monitor metrics export requires an Azure cluster.",
+      );
+    }
+  }
+
+  if (
+    !state.clickStackEnabled &&
+    state.tracingEnabled &&
+    state.tracingDestination === "azure-monitor" &&
+    provider !== "azure"
+  ) {
+    issues.push("Azure Monitor tracing requires an Azure cluster.");
+  }
+
   return issues;
 }
 
@@ -1122,8 +1175,8 @@ export function configToWizardState(
     clickHouseStorageSize:
       config.features.observability?.clickstack?.clickHouseStorageSize ??
       base.clickHouseStorageSize,
-    // The toggle reflects whether remote_write is actually configured, so a
-    // redeploy resumes with the metrics-export sub-flow only when in use.
+    // The toggle reflects whether remote_write is actually configured, so
+    // configure resumes with the metrics-export sub-flow only when in use.
     metricsExportEnabled: !!(
       remoteWrite || config.features.monitoring.remoteWriteUrl
     ),
@@ -1284,8 +1337,6 @@ export function configToWizardState(
 
 function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   switch (action.type) {
-    case "SET_STEP":
-      return { ...state, step: action.step };
     case "SET_NAME":
       return { ...state, name: action.name };
     case "SET_PROVIDER":
@@ -1299,6 +1350,9 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
           azureResourceGroup: "",
         };
       }
+      // A provider change invalidates everything tied to the old cloud:
+      // storage, external data services, metrics-export identity, and
+      // Azure-only tracing.
       return {
         ...state,
         provider: action.provider,
@@ -1315,6 +1369,51 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
         storageAzureBlobTenantId: "",
         storageAzureBlobConnectionStringSecretRef: "",
         storageGcpServiceAccountEmail: "",
+        redisMode: "embedded",
+        redisHost: "",
+        redisPort: 6379,
+        redisPassword: "",
+        redisExistingSecret: "",
+        redisTls: false,
+        kafkaMode: "embedded",
+        kafkaPreset: null,
+        kafkaBrokers: "",
+        kafkaTopicPrefix: "com.rulebricks.",
+        kafkaProvisionTopics: true,
+        kafkaSsl: false,
+        kafkaSaslMechanism: "",
+        kafkaSaslRegion: "",
+        kafkaSaslUsername: "",
+        kafkaSaslPassword: "",
+        kafkaSaslExistingSecret: "",
+        kafkaIdentityAwsRoleArn: "",
+        kafkaIdentityGcpServiceAccountEmail: "",
+        kafkaIdentityAzureClientId: "",
+        postgresMode: "embedded",
+        postgresHost: "",
+        postgresPort: 5432,
+        postgresDatabase: "postgres",
+        postgresMasterUsername: "postgres",
+        postgresMasterPassword: "",
+        prometheusMonitoringDestination: null,
+        prometheusRemoteWriteUrl: "",
+        prometheusRemoteWriteDestination: null,
+        prometheusRemoteWriteAuthType: null,
+        prometheusRemoteWriteAwsRegion: "",
+        prometheusRemoteWriteAwsRoleArn: "",
+        prometheusRemoteWriteClientId: "",
+        prometheusRemoteWriteTenantId: "",
+        prometheusRemoteWriteSecretRef: "",
+        prometheusRemoteWriteUsernameSecretRef: "",
+        prometheusRemoteWritePasswordSecretRef: "",
+        prometheusRemoteWriteBearerTokenSecretRef: "",
+        tracingDestination:
+          state.tracingDestination === "azure-monitor" &&
+          action.provider !== "azure"
+            ? "elastic"
+            : state.tracingDestination,
+        tracingAzureConnectionString:
+          action.provider === "azure" ? state.tracingAzureConnectionString : "",
       };
     case "SET_REGION":
       return { ...state, region: action.region };
@@ -1456,10 +1555,6 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       };
     case "SET_CHART_VERSION":
       return { ...state, chartVersion: action.version };
-    case "NEXT_STEP":
-      return { ...state, step: state.step + 1 };
-    case "PREV_STEP":
-      return { ...state, step: Math.max(0, state.step - 1) };
     default:
       return state;
   }
@@ -1482,7 +1577,6 @@ interface WizardContextValue {
   }) => DeploymentConfig | null;
   /** Human-readable reasons the current state can't be saved (empty = valid). */
   configIssues: () => string[];
-  skipToStep: (stepId: string) => void;
   profile: ProfileConfig | null;
 }
 
@@ -1593,7 +1687,7 @@ export function WizardProvider({
         supabaseServiceKey: state.supabaseServiceKey || undefined,
         supabaseAccessToken: state.supabaseAccessToken || undefined,
         // Derived from the project URL when not set explicitly (config.yaml
-        // edits and redeploy merges still win).
+        // edits and configure merges still win).
         supabaseProjectRef:
           state.supabaseProjectRef ||
           (state.databaseType === "supabase-cloud" && state.supabaseUrl
@@ -1661,8 +1755,6 @@ export function WizardProvider({
           clientSecret: state.ssoClientSecret || undefined,
         },
         monitoring: {
-          // In-cluster Prometheus is always installed.
-          enabled: true,
           destination: !state.clickStackEnabled && state.metricsExportEnabled
             ? state.prometheusMonitoringDestination ||
               remoteWrite?.destination ||
@@ -1818,26 +1910,6 @@ export function WizardProvider({
     };
   };
 
-  const skipToStep = (stepId: string) => {
-    const stepIndex = [
-      "cloud",
-      "domain",
-      "smtp",
-      "database",
-      "database-creds",
-      "external-services",
-      "storage",
-      "observability",
-      "features",
-      "feature-config",
-      "version",
-      "review",
-    ].indexOf(stepId);
-    if (stepIndex >= 0) {
-      dispatch({ type: "SET_STEP", step: stepIndex });
-    }
-  };
-
   return (
     <WizardContext.Provider
       value={{
@@ -1845,7 +1917,6 @@ export function WizardProvider({
         dispatch,
         toConfig,
         configIssues: () => collectConfigIssues(state),
-        skipToStep,
         profile: profile ?? null,
       }}
     >

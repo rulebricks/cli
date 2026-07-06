@@ -872,17 +872,16 @@ export const DeploymentConfigSchema = z.object({
             .optional(),
         })
         .optional(),
-      // Managed external PostgreSQL (AWS RDS/Aurora or Azure Flexible Server).
-      // Self-hosted Supabase runs against this instead of the bundled in-cluster
-      // database. Maps to the chart's supabase.externalDatabase.* values.
+      // Managed external PostgreSQL (AWS RDS/Aurora, Azure Flexible Server, or
+      // GCP Cloud SQL). Self-hosted Supabase runs against this instead of the
+      // bundled in-cluster database. Maps to supabase.externalDatabase.*.
       postgres: z
         .object({
           mode: z.enum(["embedded", "external"]),
           external: z
             .object({
-              // Managed provider this database lives on (gates CLI prompts; only
-              // aws/azure are supported for the structured/managed flow).
-              provider: z.enum(["aws", "azure"]).optional(),
+              // Managed provider this database lives on (gates CLI prompts).
+              provider: z.enum(["aws", "azure", "gcp"]).optional(),
               host: z.string().optional(),
               port: z.number().int().min(1).max(65535).optional(),
               database: z.string().optional(),
@@ -930,7 +929,9 @@ export const DeploymentConfigSchema = z.object({
       clientSecret: z.string().optional(),
     }),
     monitoring: z.object({
-      enabled: z.boolean(),
+      // Legacy flag kept for existing config files; the in-cluster metrics
+      // stack is always installed and this value is ignored.
+      enabled: z.boolean().optional(),
       destination: MonitoringDestinationSchema.optional(),
       // Legacy optional URL retained for existing config files.
       remoteWriteUrl: z.string().url().optional(),
@@ -941,7 +942,6 @@ export const DeploymentConfigSchema = z.object({
         clickstack: z.object({
           enabled: z.boolean(),
           telemetryRetentionDays: z.number().int().min(1).optional(),
-          decisionLogRetentionDays: z.number().int().min(1).optional(),
           clickHouseStorageSize: z.string().optional(),
         }),
       })
@@ -1143,6 +1143,11 @@ export const ProfileConfigSchema = z.object({
   ssoUrl: z.string().optional(),
   ssoClientId: z.string().optional(),
   ssoClientSecret: z.string().optional(),
+
+  // Cloud CLI command intents the user approved with "Approve all"; these
+  // skip the approval prompt in future CLI runs. One-off approvals and
+  // denials are never persisted.
+  approvedCommandIntents: z.array(z.string()).optional(),
 });
 
 export type ProfileConfig = z.infer<typeof ProfileConfigSchema>;

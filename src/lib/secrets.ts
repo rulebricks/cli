@@ -2,7 +2,7 @@
 //
 // In k8s mode the CLI creates the deployment's Secrets directly (idempotent
 // `kubectl apply`) and the generated values.yaml carries only secretRef
-// references — no plaintext secrets on disk or in the Helm release. Secret names
+// references; no plaintext secrets on disk or in the Helm release. Secret names
 // come from deploymentSecretNames() so they always match the secretRef seams the
 // value generator writes.
 import { execa } from "execa";

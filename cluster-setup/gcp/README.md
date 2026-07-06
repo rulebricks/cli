@@ -2,9 +2,15 @@
 
 Use these commands to create a compact GKE cluster that can run Rulebricks before installing with the Rulebricks CLI. GCP does not have an `eksctl`-style cluster YAML or a concise Bicep equivalent; the most familiar native interface is `gcloud`.
 
+For a production/enterprise deployment — private nodes, Dataplane V2, a
+least-privilege node identity, and true/false toggles for Managed Kafka /
+Memorystore / Cloud SQL — use the Terraform stack in `enterprise/` instead of
+the commands below.
+
 ## Files
 
 - `check-gke-prereqs.sh` verifies `gcloud` auth, Application Default Credentials, required APIs, selected-region quota, GKE access, `kubectl`, and Helm.
+- `enterprise/` — Terraform stack: everything below plus hardening and the managed data-service toggles (see `enterprise/README.md`).
 
 ## Core Cluster Parameters
 

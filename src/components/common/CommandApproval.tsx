@@ -105,7 +105,10 @@ function CommandApprovalScreen({
 
   const items: ApprovalItem[] = [
     { label: "Approve", value: "once" },
-    { label: `Approve all "${request.intent}" commands`, value: "all-like" },
+    {
+      label: `Approve all "${request.intent}" commands (never ask again)`,
+      value: "all-like",
+    },
     { label: "Deny", value: "deny" },
   ];
 
@@ -162,7 +165,7 @@ function CommandApprovalScreen({
         </Box>
         <Box marginTop={1} flexDirection="column">
           <Text color={colors.muted} dimColor>
-            y approve • a approve all like this • n deny
+            y approve • a approve all like this (remembered) • n deny
           </Text>
           <Text color={colors.muted} dimColor>
             You can run this yourself in another terminal, then choose Deny.

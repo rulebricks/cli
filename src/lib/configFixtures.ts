@@ -297,6 +297,27 @@ export function buildConfigMatrix(): { name: string; config: DeploymentConfig }[
       },
     },
     {
+      name: "gcp-external-postgres",
+      provider: "gcp",
+      externalServices: {
+        postgres: {
+          mode: "external",
+          external: {
+            provider: "gcp",
+            host: "10.10.0.3",
+            port: 5432,
+            database: "postgres",
+            bootstrap: {
+              enabled: true,
+              masterUsername: "postgres",
+              masterPassword: "master-pw-change-me",
+              appRole: "postgres",
+            },
+          },
+        },
+      },
+    },
+    {
       name: "azure-external-postgres",
       provider: "azure",
       externalServices: {

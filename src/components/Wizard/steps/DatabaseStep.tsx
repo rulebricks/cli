@@ -1,219 +1,190 @@
 import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
-import SelectInput from "ink-select-input";
-import TextInput from "ink-text-input";
 import { useWizard } from "../WizardContext.js";
-import { BorderBox, useTheme } from "../../common/index.js";
+import { useFieldFlow, FlowField } from "../fieldFlow.js";
+import {
+  BorderBox,
+  CheckRows,
+  FieldError,
+  StepFooter,
+  TextField,
+  WizardSelect,
+} from "../../common/index.js";
 import { DatabaseType } from "../../../types/index.js";
 
 interface DatabaseStepProps {
   onComplete: () => void;
   onBack: () => void;
+  entryDirection?: "forward" | "back";
 }
 
-type SubStep = "type" | "supabase-url" | "supabase-keys" | "access-token";
+const DATABASE_TYPES = [
+  { label: "Self-hosted Supabase", value: "self-hosted" },
+  { label: "Supabase Cloud", value: "supabase-cloud" },
+];
 
-export function DatabaseStep({ onComplete, onBack }: DatabaseStepProps) {
+export function DatabaseStep({
+  onComplete,
+  onBack,
+  entryDirection,
+}: DatabaseStepProps) {
   const { state, dispatch } = useWizard();
-  const { colors } = useTheme();
-  const [subStep, setSubStep] = useState<SubStep>("type");
+  const [error, setError] = useState<string | null>(null);
+
+  const [dbType, setDbType] = useState<DatabaseType | null>(state.databaseType);
   const [supabaseUrl, setSupabaseUrl] = useState(state.supabaseUrl || "");
   const [anonKey, setAnonKey] = useState(state.supabaseAnonKey || "");
   const [serviceKey, setServiceKey] = useState(state.supabaseServiceKey || "");
   const [accessToken, setAccessToken] = useState(
     state.supabaseAccessToken || "",
   );
-  const [currentField, setCurrentField] = useState<"anon" | "service">("anon");
 
-  useInput((input, key) => {
-    if (key.escape) {
-      if (subStep === "type") {
-        onBack();
-      } else if (subStep === "supabase-url") {
-        setSubStep("type");
-      } else if (subStep === "supabase-keys") {
-        if (currentField === "service") {
-          setCurrentField("anon");
-        } else {
-          setSubStep("supabase-url");
-        }
-      } else if (subStep === "access-token") {
-        setSubStep("supabase-keys");
-        setCurrentField("service");
-      }
-    }
-  });
+  const cloud = () => dbType === "supabase-cloud";
 
-  const items = [
+  const fields: FlowField[] = [
     {
-      label: "Self-hosted Supabase",
-      value: "self-hosted",
-      description: "Deploy Supabase as part of the Helm chart",
+      id: "type",
+      render: (flow) => (
+        <WizardSelect
+          label="Choose your database setup"
+          hint="Self-hosted deploys Supabase as part of the Helm chart; Supabase Cloud uses your existing project."
+          items={DATABASE_TYPES}
+          initialValue={dbType ?? undefined}
+          onSelect={(value) => {
+            const selected = value as DatabaseType;
+            setDbType(selected);
+            dispatch({ type: "SET_DATABASE_TYPE", dbType: selected });
+            flow.next();
+          }}
+        />
+      ),
     },
     {
-      label: "Supabase Cloud",
-      value: "supabase-cloud",
-      description: "Use your existing Supabase Cloud project",
+      id: "supabase-url",
+      when: cloud,
+      render: (flow) => (
+        <TextField
+          label="Supabase project URL"
+          hint="Find this in your Supabase Dashboard under Project Settings"
+          value={supabaseUrl}
+          onChange={setSupabaseUrl}
+          placeholder="https://xxxxx.supabase.co"
+          onSubmit={() => {
+            if (!supabaseUrl) {
+              setError("Supabase project URL is required");
+              return;
+            }
+            setError(null);
+            dispatch({ type: "SET_SUPABASE_CONFIG", config: { supabaseUrl } });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "anon-key",
+      when: cloud,
+      render: (flow) => (
+        <TextField
+          label="Anon (public) key"
+          value={anonKey}
+          onChange={setAnonKey}
+          placeholder="eyJhbGciOiJIUzI1NiIs..."
+          onSubmit={() => {
+            if (!anonKey) {
+              setError("Anon key is required");
+              return;
+            }
+            setError(null);
+            dispatch({
+              type: "SET_SUPABASE_CONFIG",
+              config: { supabaseAnonKey: anonKey },
+            });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "service-key",
+      when: cloud,
+      render: (flow) => (
+        <TextField
+          label="Service role key"
+          value={serviceKey}
+          onChange={setServiceKey}
+          placeholder="eyJhbGciOiJIUzI1NiIs..."
+          onSubmit={() => {
+            if (!serviceKey) {
+              setError("Service role key is required");
+              return;
+            }
+            setError(null);
+            dispatch({
+              type: "SET_SUPABASE_CONFIG",
+              config: {
+                supabaseAnonKey: anonKey,
+                supabaseServiceKey: serviceKey,
+              },
+            });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "access-token",
+      when: cloud,
+      render: (flow) => (
+        <TextField
+          label="Supabase Access Token"
+          hint="Account Settings > Access Tokens. Required for managing your Supabase project."
+          value={accessToken}
+          onChange={setAccessToken}
+          placeholder="sbp_..."
+          mask
+          onSubmit={() => {
+            if (!accessToken) {
+              setError("Access token is required");
+              return;
+            }
+            setError(null);
+            dispatch({
+              type: "SET_SUPABASE_CONFIG",
+              config: { supabaseAccessToken: accessToken },
+            });
+            flow.next();
+          }}
+        />
+      ),
     },
   ];
 
-  const handleTypeSelect = (item: { value: string }) => {
-    const dbType = item.value as DatabaseType;
-    dispatch({ type: "SET_DATABASE_TYPE", dbType });
+  const flow = useFieldFlow({
+    fields,
+    onDone: onComplete,
+    onExit: onBack,
+    entry: entryDirection === "back" ? "end" : "start",
+    onNavigate: () => setError(null),
+  });
 
-    if (dbType === "supabase-cloud") {
-      setSubStep("supabase-url");
-    } else {
-      onComplete();
+  const progress = () => {
+    const rows: { label: string }[] = [];
+    if (cloud() && supabaseUrl && flow.current !== "supabase-url") {
+      rows.push({ label: "Supabase URL configured" });
     }
-  };
-
-  const handleUrlSubmit = () => {
-    if (!supabaseUrl) return;
-    dispatch({ type: "SET_SUPABASE_CONFIG", config: { supabaseUrl } });
-    setSubStep("supabase-keys");
-  };
-
-  const handleAnonKeySubmit = () => {
-    if (!anonKey) return;
-    setCurrentField("service");
-  };
-
-  const handleServiceKeySubmit = () => {
-    if (!serviceKey) return;
-    dispatch({
-      type: "SET_SUPABASE_CONFIG",
-      config: {
-        supabaseAnonKey: anonKey,
-        supabaseServiceKey: serviceKey,
-      },
-    });
-    setSubStep("access-token");
-  };
-
-  const handleAccessTokenSubmit = () => {
-    if (!accessToken) return;
-    dispatch({
-      type: "SET_SUPABASE_CONFIG",
-      config: { supabaseAccessToken: accessToken },
-    });
-    onComplete();
+    if (cloud() && anonKey && serviceKey && flow.current === "access-token") {
+      rows.push({ label: "API keys configured" });
+    }
+    return rows;
   };
 
   return (
     <BorderBox title="Database">
-      {subStep === "type" && (
-        <>
-          <Box flexDirection="column" marginY={1}>
-            <Text>Choose your database setup:</Text>
-          </Box>
-          <SelectInput
-            items={items}
-            onSelect={handleTypeSelect}
-            itemComponent={({ isSelected, label }) => (
-              <Text color={isSelected ? colors.accent : undefined}>
-                {label}
-              </Text>
-            )}
-          />
-        </>
-      )}
+      {flow.render()}
 
-      {subStep === "supabase-url" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text>Enter your Supabase project URL:</Text>
-          <Text color="gray" dimColor>
-            Find this in your Supabase Dashboard → Project Settings
-          </Text>
-          <Box marginTop={1}>
-            <Text color={colors.accent}>❯ </Text>
-            <TextInput
-              value={supabaseUrl}
-              onChange={setSupabaseUrl}
-              onSubmit={handleUrlSubmit}
-              placeholder="https://xxxxx.supabase.co"
-            />
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "supabase-keys" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text>Enter your Supabase API keys:</Text>
-
-          {currentField === "anon" ? (
-            <Box marginTop={1} flexDirection="column">
-              <Text>Anon (public) key:</Text>
-              <Box>
-                <Text color={colors.accent}>❯ </Text>
-                <TextInput
-                  value={anonKey}
-                  onChange={setAnonKey}
-                  onSubmit={handleAnonKeySubmit}
-                  placeholder="eyJhbGciOiJIUzI1NiIs..."
-                />
-              </Box>
-            </Box>
-          ) : (
-            <Box marginTop={1} flexDirection="column">
-              <Box>
-                <Text color="green">✓</Text>
-                <Text> Anon key: {anonKey.substring(0, 20)}...</Text>
-              </Box>
-              <Box marginTop={1}>
-                <Text>Service role key:</Text>
-              </Box>
-              <Box>
-                <Text color={colors.accent}>❯ </Text>
-                <TextInput
-                  value={serviceKey}
-                  onChange={setServiceKey}
-                  onSubmit={handleServiceKeySubmit}
-                  placeholder="eyJhbGciOiJIUzI1NiIs..."
-                />
-              </Box>
-            </Box>
-          )}
-        </Box>
-      )}
-
-      {subStep === "access-token" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text>Enter your Supabase Access Token:</Text>
-          <Text color="gray" dimColor>
-            Find this in Supabase Dashboard → Account Settings → Access Tokens
-          </Text>
-          <Text color="gray" dimColor>
-            This is required for managing your Supabase project.
-          </Text>
-          <Box marginTop={1}>
-            <Text color={colors.accent}>❯ </Text>
-            <TextInput
-              value={accessToken}
-              onChange={setAccessToken}
-              onSubmit={handleAccessTokenSubmit}
-              placeholder="sbp_..."
-              mask="*"
-            />
-          </Box>
-          <Box marginTop={1} flexDirection="column">
-            <Box>
-              <Text color="green">✓</Text>
-              <Text color="gray"> Supabase URL configured</Text>
-            </Box>
-            <Box>
-              <Text color="green">✓</Text>
-              <Text color="gray"> API keys configured</Text>
-            </Box>
-          </Box>
-        </Box>
-      )}
-
-      <Box marginTop={1}>
-        <Text color="gray" dimColor>
-          Esc to go back • Enter to continue
-        </Text>
-      </Box>
+      <CheckRows rows={progress()} />
+      <FieldError error={error} />
+      <StepFooter />
     </BorderBox>
   );
 }

@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text } from 'ink';
 import TextInput from 'ink-text-input';
 import { useWizard } from '../WizardContext.js';
-import { BorderBox, useTheme } from '../../common/index.js';
+import { BorderBox, useGatedInput, useTheme } from '../../common/index.js';
 import { DNS_PROVIDER_NAMES, CLOUD_PROVIDER_NAMES, LOGGING_SINK_INFO, isSupportedDnsProvider, KafkaPreset } from '../../../types/index.js';
 
 interface ReviewStepProps {
@@ -31,19 +31,21 @@ export function ReviewStep({
   onBack,
   allowEditName = true,
 }: ReviewStepProps) {
-  const { state, dispatch } = useWizard();
+  const { state, dispatch, configIssues } = useWizard();
   const { colors } = useTheme();
   const [editingName, setEditingName] = useState(allowEditName && !state.name);
   const [name, setName] = useState(state.name || '');
   const [error, setError] = useState<string | null>(null);
-  
-  useInput((input, key) => {
+
+  const issues = configIssues();
+
+  useGatedInput((input, key) => {
     if (editingName) return;
     
     if (key.escape) {
       onBack();
     } else if (key.return) {
-      if (state.name) {
+      if (state.name && issues.length === 0) {
         onComplete();
       }
     } else if (allowEditName && input === 'e') {
@@ -115,7 +117,7 @@ export function ReviewStep({
           </Box>
           {error && (
             <Box marginTop={1}>
-              <Text color="red">✗ {error}</Text>
+              <Text color={colors.error}>✗ {error}</Text>
             </Box>
           )}
         </Box>
@@ -241,7 +243,9 @@ export function ReviewStep({
           </>
         )}
 
-        {(state.redisMode === 'external' || state.kafkaMode === 'external') && (
+        {(state.redisMode === 'external' ||
+          state.kafkaMode === 'external' ||
+          state.postgresMode === 'external') && (
           <>
             <SectionHeader title="External Services" />
             <ConfigRow
@@ -264,6 +268,17 @@ export function ReviewStep({
               }
               valueColor={
                 state.kafkaMode === 'external' ? colors.success : colors.muted
+              }
+            />
+            <ConfigRow
+              label="Postgres"
+              value={
+                state.postgresMode === 'external'
+                  ? `external (${state.postgresHost || 'not configured'}:${state.postgresPort}/${state.postgresDatabase})`
+                  : 'in-cluster'
+              }
+              valueColor={
+                state.postgresMode === 'external' ? colors.success : colors.muted
               }
             />
             {state.kafkaMode === 'external' && (
@@ -370,10 +385,29 @@ export function ReviewStep({
         <ConfigRow label="Key" value={`${state.licenseKey?.substring(0, 12)}...`} />
       </Box>
       
+      {issues.length > 0 && (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={colors.warning} bold>
+            Resolve before saving:
+          </Text>
+          {issues.map((issue) => (
+            <Text key={issue} color={colors.warning}>
+              {'  '}• {issue}
+            </Text>
+          ))}
+        </Box>
+      )}
+
       <Box marginTop={1} flexDirection="column">
-        <Text color={colors.success} bold>
-          Press Enter to save this configuration
-        </Text>
+        {issues.length === 0 ? (
+          <Text color={colors.success} bold>
+            Press Enter to save this configuration
+          </Text>
+        ) : (
+          <Text color={colors.muted}>
+            Go back (Esc) to fix the items above, then return here to save.
+          </Text>
+        )}
         <Text color={colors.muted} dimColor>
           {allowEditName ? 'e to edit name • ' : ''}Esc to go back
         </Text>

@@ -208,7 +208,7 @@ test("buildHelmValues rejects enabled AI without an OpenAI key early", () => {
   );
 });
 
-test("redeploy wizard backfills missing self-hosted Supabase JWT secret", () => {
+test("configure wizard backfills missing self-hosted Supabase JWT secret", () => {
   const config = cloneFixture("aws-self-hosted-minimal");
   delete config.database.supabaseJwtSecret;
 
@@ -217,7 +217,7 @@ test("redeploy wizard backfills missing self-hosted Supabase JWT secret", () => 
   assert.equal(typeof state.supabaseJwtSecret, "string");
   assert.ok(state.supabaseJwtSecret.length >= 32);
   assert.equal(
-    collectConfigIssues({ ...state, name: "redeploy-test" }).some((issue) =>
+    collectConfigIssues({ ...state, name: "configure-test" }).some((issue) =>
       issue.includes("JWT secret"),
     ),
     false,
@@ -845,7 +845,10 @@ test("decision_logs sink writes gzipped NDJSON (never parquet) for every cloud",
     );
     assert.equal(sink.compression, "gzip", `${name}: compression`);
     // azure_blob has no filename_extension field (always writes .log/.log.gz);
-    // aws_s3 and gcs support it and we set ndjson.
+    // aws_s3 and gcs support it. The extension MUST end in .gz because the
+    // ClickHouse decision_logs named collection globs *.gz and relies on the
+    // extension for compression auto-detection - files without it upload fine
+    // but never show up in the app.
     if (sink.type === "azure_blob") {
       assert.equal(
         sink.filename_extension,
@@ -855,7 +858,7 @@ test("decision_logs sink writes gzipped NDJSON (never parquet) for every cloud",
     } else {
       assert.equal(
         sink.filename_extension,
-        "ndjson",
+        "ndjson.gz",
         `${name}: filename_extension`,
       );
     }

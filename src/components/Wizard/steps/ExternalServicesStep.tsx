@@ -1,44 +1,37 @@
 import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
-import TextInput from "ink-text-input";
-import SelectInput from "ink-select-input";
+import { Box, Text } from "ink";
 import { useWizard } from "../WizardContext.js";
-import { BorderBox, useTheme } from "../../common/index.js";
-import { KafkaPreset } from "../../../types/index.js";
+import { useFieldFlow, FlowField } from "../fieldFlow.js";
+import {
+  BorderBox,
+  CheckboxList,
+  DiscoveredSelect,
+  FieldError,
+  StepFooter,
+  TextField,
+  WizardSelect,
+} from "../../common/index.js";
+import {
+  DiscoveredKafkaCluster,
+  DiscoveredPostgresInstance,
+  DiscoveredRedisInstance,
+  getAwsSecretValue,
+  getAzureRedisKey,
+  getEventHubsConnectionString,
+  getGcpRedisAuthString,
+  getMskBootstrapBrokers,
+  listManagedKafka,
+  listManagedPostgres,
+  listManagedRedis,
+} from "../../../lib/cloudCli.js";
+import { CloudProvider, KafkaPreset } from "../../../types/index.js";
+import { externalServicesFieldOrder } from "../../../lib/wizardFlow.js";
 
 interface ExternalServicesStepProps {
   onComplete: () => void;
   onBack: () => void;
+  entryDirection?: "forward" | "back";
 }
-
-type Field =
-  | "mode"
-  | "which"
-  | "redis-host"
-  | "redis-port"
-  | "redis-tls"
-  | "redis-password"
-  | "redis-existing-secret"
-  | "kafka-preset"
-  | "kafka-brokers"
-  | "kafka-topic-prefix"
-  | "kafka-aws-region"
-  | "kafka-aws-role"
-  | "kafka-provision-topics"
-  | "kafka-azure-connection"
-  | "kafka-gcp-username"
-  | "kafka-gcp-password"
-  | "kafka-custom-mechanism"
-  | "kafka-custom-ssl"
-  | "kafka-custom-username"
-  | "kafka-custom-password"
-  | "pg-input-mode"
-  | "pg-conn"
-  | "pg-host"
-  | "pg-port"
-  | "pg-database"
-  | "pg-master-username"
-  | "pg-master-password";
 
 type ServiceKey = "redis" | "kafka" | "postgres";
 
@@ -84,19 +77,21 @@ const CUSTOM_MECH: { id: string; label: string }[] = [
   { id: "scram-sha-512", label: "SCRAM-SHA-512" },
 ];
 
-const PG_INPUT_MODES = [
-  {
-    label: "Enter connection details (AWS RDS / Azure)",
-    value: "structured",
-  },
-  { label: "Paste a Postgres connection string", value: "connstring" },
-];
+// Select value that switches Postgres entry to a pasted connection string.
+const CONN_STRING = "__connstring__";
 
 function defaultPresetForCloud(provider: string | null): KafkaPreset {
   if (provider === "aws") return "aws-msk-iam";
   if (provider === "azure") return "azure-event-hubs";
   if (provider === "gcp") return "gcp-managed";
   return "custom";
+}
+
+function managedPostgresName(provider: CloudProvider | null): string {
+  if (provider === "aws") return "RDS / Aurora";
+  if (provider === "azure") return "Flexible Server";
+  if (provider === "gcp") return "Cloud SQL";
+  return "managed Postgres";
 }
 
 // Parse a postgres:// URL into parts. Returns null when it isn't parseable.
@@ -124,48 +119,32 @@ function parsePostgresUrl(raw: string): {
   }
 }
 
-const SERVICE_ORDER: ServiceKey[] = ["redis", "kafka", "postgres"];
-
 export function ExternalServicesStep({
   onComplete,
   onBack,
+  entryDirection,
 }: ExternalServicesStepProps) {
   const { state, dispatch } = useWizard();
-  const { colors } = useTheme();
-
-  const [field, setField] = useState<Field>("mode");
   const [error, setError] = useState<string | null>(null);
 
-  // Postgres external is only offered for self-hosted Supabase (there is no
-  // in-cluster database to externalize with Supabase Cloud) on providers we
-  // support a managed flow for.
-  const pgAvailable =
-    (state.provider === "aws" || state.provider === "azure") &&
-    state.databaseType === "self-hosted";
+  const provider = state.provider;
+  const anyExternal =
+    state.redisMode === "external" ||
+    state.kafkaMode === "external" ||
+    state.postgresMode === "external";
 
-  // Multi-select of which services to connect to existing/managed providers.
+  // Externalizing the Postgres database applies to self-hosted Supabase only
+  // (with Supabase Cloud there is no in-cluster database to replace).
+  const pgAvailable = provider !== null && state.databaseType === "self-hosted";
+
+  const [modeChoice, setModeChoice] = useState<"dedicated" | "existing">(
+    anyExternal ? "existing" : "dedicated",
+  );
   const [selected, setSelected] = useState<Record<ServiceKey, boolean>>({
     redis: state.redisMode === "external",
     kafka: state.kafkaMode === "external",
     postgres: pgAvailable && state.postgresMode === "external",
   });
-  const whichItems: { key: ServiceKey; label: string; hint: string }[] = [
-    { key: "redis", label: "Redis", hint: "Managed cache (ElastiCache, etc.)" },
-    { key: "kafka", label: "Kafka", hint: "Managed event streaming (MSK, Event Hubs, etc.)" },
-    ...(pgAvailable
-      ? [
-          {
-            key: "postgres" as ServiceKey,
-            label: "Postgres database",
-            hint:
-              state.provider === "aws"
-                ? "Managed RDS / Aurora for the Supabase database."
-                : "Azure Flexible Server for the Supabase database.",
-          },
-        ]
-      : []),
-  ];
-  const [whichIndex, setWhichIndex] = useState(0);
 
   // Redis
   const [redisHost, setRedisHost] = useState(state.redisHost);
@@ -177,12 +156,9 @@ export function ExternalServicesStep({
   );
 
   // Kafka
-  const initialPreset =
-    state.kafkaPreset ?? defaultPresetForCloud(state.provider);
-  const [presetIndex, setPresetIndex] = useState(
-    Math.max(0, PRESETS.findIndex((p) => p.id === initialPreset)),
+  const [preset, setPreset] = useState<KafkaPreset>(
+    state.kafkaPreset ?? defaultPresetForCloud(provider),
   );
-  const preset = PRESETS[presetIndex]?.id ?? "custom";
   const [brokers, setBrokers] = useState(state.kafkaBrokers);
   const [topicPrefix, setTopicPrefix] = useState(
     state.kafkaTopicPrefix || "com.rulebricks.",
@@ -199,16 +175,15 @@ export function ExternalServicesStep({
   );
   const [gcpUsername, setGcpUsername] = useState(state.kafkaSaslUsername);
   const [gcpPassword, setGcpPassword] = useState(state.kafkaSaslPassword);
-  const [mechIndex, setMechIndex] = useState(
-    Math.max(0, CUSTOM_MECH.findIndex((m) => m.id === state.kafkaSaslMechanism)),
+  const [customMechanism, setCustomMechanism] = useState(
+    state.kafkaSaslMechanism as string,
   );
-  const customMechanism = CUSTOM_MECH[mechIndex]?.id ?? "";
   const [customSsl, setCustomSsl] = useState(state.kafkaSsl);
   const [customUsername, setCustomUsername] = useState(state.kafkaSaslUsername);
   const [customPassword, setCustomPassword] = useState(state.kafkaSaslPassword);
 
   // Postgres
-  const [pgModeIndex, setPgModeIndex] = useState(0);
+  const [pgUseConnString, setPgUseConnString] = useState(false);
   const [pgConn, setPgConn] = useState("");
   const [pgHost, setPgHost] = useState(state.postgresHost);
   const [pgPort, setPgPort] = useState(String(state.postgresPort || 5432));
@@ -220,46 +195,25 @@ export function ExternalServicesStep({
   );
   const [pgMasterPass, setPgMasterPass] = useState(state.postgresMasterPassword);
 
-  // ----- chaining across the chosen services -----
-  const chosen = (): ServiceKey[] => SERVICE_ORDER.filter((k) => selected[k]);
-  const firstFieldOf = (k: ServiceKey): Field =>
-    k === "redis"
-      ? "redis-host"
-      : k === "kafka"
-        ? "kafka-preset"
-        : "pg-input-mode";
-  const goToFirstService = () => {
-    const order = chosen();
-    if (order.length === 0) {
-      persist({});
-      return;
-    }
-    setField(firstFieldOf(order[0]));
-  };
-  const isLastChosen = (k: ServiceKey) => {
-    const order = chosen();
-    return order[order.length - 1] === k;
-  };
-  const goAfter = (
-    k: ServiceKey,
-    overrides: { customSsl?: boolean; provisionTopics?: boolean } = {},
-  ) => {
-    const order = chosen();
-    const next = order[order.indexOf(k) + 1];
-    if (next) setField(firstFieldOf(next));
-    else persist(overrides);
-  };
+  // Lookup maps from discovered-list values (names) to full records, so
+  // selections can prefill connection fields and fetch credentials.
+  const [redisByName] = useState(new Map<string, DiscoveredRedisInstance>());
+  const [kafkaByName] = useState(new Map<string, DiscoveredKafkaCluster>());
+  const [pgByName] = useState(new Map<string, DiscoveredPostgresInstance>());
 
-  const persist = (overrides: {
-    customSsl?: boolean;
-    provisionTopics?: boolean;
-  }) => {
+  // Committed answers are written to wizard state as the user advances, so
+  // leaving the step and returning never loses what was already entered.
+  type ExternalServicesPatch = Extract<
+    Parameters<typeof dispatch>[0],
+    { type: "SET_EXTERNAL_SERVICES" }
+  >["config"];
+  const save = (config: ExternalServicesPatch) =>
+    dispatch({ type: "SET_EXTERNAL_SERVICES", config });
+
+  const persist = () => {
     const redisExternal = selected.redis;
     const kafkaExternal = selected.kafka;
     const postgresExternal = selected.postgres;
-    const redisMode = redisExternal ? "external" : "embedded";
-    const kafkaMode = kafkaExternal ? "external" : "embedded";
-    const postgresMode = postgresExternal ? "external" : "embedded";
 
     // Derive Kafka SASL/SSL/identity from the chosen preset.
     let kafkaSsl = false;
@@ -269,7 +223,7 @@ export function ExternalServicesStep({
     let password = "";
     let awsRoleArn = "";
 
-    if (kafkaMode === "external") {
+    if (kafkaExternal) {
       if (preset === "aws-msk-iam") {
         kafkaSsl = true;
         mechanism = "aws-iam";
@@ -286,7 +240,7 @@ export function ExternalServicesStep({
         username = gcpUsername;
         password = gcpPassword;
       } else {
-        kafkaSsl = overrides.customSsl ?? customSsl;
+        kafkaSsl = customSsl;
         mechanism = customMechanism as typeof state.kafkaSaslMechanism;
         username = customMechanism ? customUsername : "";
         password = customMechanism ? customPassword : "";
@@ -296,17 +250,18 @@ export function ExternalServicesStep({
     dispatch({
       type: "SET_EXTERNAL_SERVICES",
       config: {
-        redisMode,
+        redisMode: redisExternal ? "external" : "embedded",
         redisHost: redisExternal ? redisHost.trim() : "",
         redisPort: Number.parseInt(redisPort, 10) || 6379,
         redisPassword: redisExternal ? redisPassword : "",
         redisExistingSecret: redisExternal ? redisExistingSecret.trim() : "",
         redisTls: redisExternal ? redisTls : false,
-        kafkaMode,
-        kafkaPreset: kafkaMode === "external" ? preset : null,
-        kafkaBrokers: kafkaMode === "external" ? brokers.trim() : "",
-        kafkaTopicPrefix:
-          kafkaMode === "external" ? topicPrefix.trim() : "com.rulebricks.",
+        kafkaMode: kafkaExternal ? "external" : "embedded",
+        kafkaPreset: kafkaExternal ? preset : null,
+        kafkaBrokers: kafkaExternal ? brokers.trim() : "",
+        kafkaTopicPrefix: kafkaExternal
+          ? topicPrefix.trim()
+          : "com.rulebricks.",
         kafkaSsl,
         kafkaSaslMechanism: mechanism,
         kafkaSaslRegion: region,
@@ -314,11 +269,9 @@ export function ExternalServicesStep({
         kafkaSaslPassword: password,
         kafkaIdentityAwsRoleArn: awsRoleArn,
         kafkaIdentityGcpServiceAccountEmail: "",
-        kafkaProvisionTopics:
-          kafkaMode === "external"
-            ? (overrides.provisionTopics ?? provisionTopics)
-            : true,
-        postgresMode,
+        kafkaIdentityAzureClientId: "",
+        kafkaProvisionTopics: kafkaExternal ? provisionTopics : true,
+        postgresMode: postgresExternal ? "external" : "embedded",
         postgresHost: postgresExternal ? pgHost.trim() : "",
         postgresPort: Number.parseInt(pgPort, 10) || 5432,
         postgresDatabase: postgresExternal
@@ -333,649 +286,784 @@ export function ExternalServicesStep({
     onComplete();
   };
 
-  const firstKafkaAuthField = (): Field => {
-    if (preset === "aws-msk-iam") return "kafka-aws-region";
-    if (preset === "azure-event-hubs") return "kafka-azure-connection";
-    if (preset === "gcp-managed") return "kafka-gcp-username";
-    return "kafka-custom-mechanism";
-  };
-
-  // Forward navigation for text fields (selects advance in their onSelect).
-  const advance = (from: Field) => {
-    setError(null);
-    switch (from) {
-      case "redis-host":
-        if (!redisHost.trim()) {
-          setError("Redis host is required for an external instance.");
-          return;
-        }
-        setField("redis-port");
-        return;
-      case "redis-port":
-        setField("redis-tls");
-        return;
-      case "redis-password":
-        if (redisPassword) goAfter("redis");
-        else setField("redis-existing-secret");
-        return;
-      case "redis-existing-secret":
-        goAfter("redis");
-        return;
-      case "kafka-brokers":
-        if (!brokers.trim()) {
-          setError("At least one broker is required for external Kafka.");
-          return;
-        }
-        setField("kafka-topic-prefix");
-        return;
-      case "kafka-topic-prefix":
-        setField(firstKafkaAuthField());
-        return;
-      case "kafka-aws-region":
-        if (!awsRegion.trim()) {
-          setError("Region is required for MSK IAM signing.");
-          return;
-        }
-        setField("kafka-aws-role");
-        return;
-      case "kafka-aws-role":
-        setField("kafka-provision-topics");
-        return;
-      case "kafka-azure-connection":
-        if (!azureConnection.trim()) {
-          setError("Event Hubs connection string is required.");
-          return;
-        }
-        goAfter("kafka");
-        return;
-      case "kafka-gcp-username":
-        setField("kafka-gcp-password");
-        return;
-      case "kafka-gcp-password":
-        goAfter("kafka");
-        return;
-      case "kafka-custom-username":
-        setField("kafka-custom-password");
-        return;
-      case "kafka-custom-password":
-        goAfter("kafka");
-        return;
-      case "pg-conn": {
-        const parsed = parsePostgresUrl(pgConn);
-        if (!parsed || !parsed.host) {
-          setError(
-            "Enter a valid connection string, e.g. postgresql://user:pass@host:5432/postgres",
-          );
-          return;
-        }
-        setPgHost(parsed.host);
-        if (parsed.port) setPgPort(String(parsed.port));
-        if (parsed.database) setPgDatabase(parsed.database);
-        if (parsed.user) setPgMasterUser(parsed.user);
-        if (parsed.password) setPgMasterPass(parsed.password);
-        // Confirm/edit the parsed values via the structured fields.
-        setField("pg-host");
-        return;
-      }
-      case "pg-host":
-        if (!pgHost.trim()) {
-          setError("Database host/endpoint is required.");
-          return;
-        }
-        setField("pg-port");
-        return;
-      case "pg-port":
-        setField("pg-database");
-        return;
-      case "pg-database":
-        setField("pg-master-username");
-        return;
-      case "pg-master-username":
-        setField("pg-master-password");
-        return;
-      case "pg-master-password":
-        if (!pgMasterPass) {
-          setError(
-            "Master password is required to initialize the database (roles, schemas).",
-          );
-          return;
-        }
-        goAfter("postgres");
-        return;
-    }
-  };
-
-  const prevServiceField = (k: ServiceKey): Field => {
-    const order = chosen();
-    const prev = order[order.indexOf(k) - 1];
-    if (!prev) return "which";
-    // Land on the last field of the previous service.
-    if (prev === "redis") return "redis-password";
-    if (prev === "kafka") return "kafka-preset";
-    return "pg-master-password";
-  };
-
-  const handleBack = () => {
-    setError(null);
-    switch (field) {
-      case "mode":
-        onBack();
-        return;
-      case "which":
-        setField("mode");
-        return;
-      case "redis-host":
-        setField(prevServiceField("redis"));
-        return;
-      case "redis-port":
-        setField("redis-host");
-        return;
-      case "redis-tls":
-        setField("redis-port");
-        return;
-      case "redis-password":
-        setField("redis-tls");
-        return;
-      case "redis-existing-secret":
-        setField("redis-password");
-        return;
-      case "kafka-preset":
-        setField(prevServiceField("kafka"));
-        return;
-      case "kafka-brokers":
-        setField("kafka-preset");
-        return;
-      case "kafka-topic-prefix":
-        setField("kafka-brokers");
-        return;
-      case "kafka-aws-region":
-      case "kafka-azure-connection":
-      case "kafka-gcp-username":
-      case "kafka-custom-mechanism":
-        setField("kafka-topic-prefix");
-        return;
-      case "kafka-aws-role":
-        setField("kafka-aws-region");
-        return;
-      case "kafka-provision-topics":
-        setField("kafka-aws-role");
-        return;
-      case "kafka-gcp-password":
-        setField("kafka-gcp-username");
-        return;
-      case "kafka-custom-ssl":
-        setField("kafka-custom-mechanism");
-        return;
-      case "kafka-custom-username":
-        setField("kafka-custom-ssl");
-        return;
-      case "kafka-custom-password":
-        setField("kafka-custom-username");
-        return;
-      case "pg-input-mode":
-        setField(prevServiceField("postgres"));
-        return;
-      case "pg-conn":
-        setField("pg-input-mode");
-        return;
-      case "pg-host":
-        setField("pg-input-mode");
-        return;
-      case "pg-port":
-        setField("pg-host");
-        return;
-      case "pg-database":
-        setField("pg-port");
-        return;
-      case "pg-master-username":
-        setField("pg-database");
-        return;
-      case "pg-master-password":
-        setField("pg-master-username");
-        return;
-    }
-  };
-
-  useInput((input, key) => {
-    if (field === "which") {
-      if (key.escape) {
-        setField("mode");
-        return;
-      }
-      if (key.upArrow) {
-        setWhichIndex((i) => Math.max(0, i - 1));
-      } else if (key.downArrow) {
-        setWhichIndex((i) => Math.min(whichItems.length, i + 1));
-      } else if (input === " " || input === "x") {
-        if (whichIndex < whichItems.length) {
-          const k = whichItems[whichIndex].key;
-          setSelected((s) => ({ ...s, [k]: !s[k] }));
-        }
-      } else if (key.return) {
-        if (whichIndex === whichItems.length) {
-          if (!selected.redis && !selected.kafka && !selected.postgres) {
-            setError("Select at least one service to externalize.");
-            return;
-          }
-          setError(null);
-          goToFirstService();
-        } else {
-          const k = whichItems[whichIndex].key;
-          setSelected((s) => ({ ...s, [k]: !s[k] }));
-        }
-      }
-      return;
-    }
-    if (key.escape) {
-      handleBack();
-    }
-  });
-
-  // ===== Select handlers =====
-  const handleModeSelect = (item: { value: string }) => {
-    if (item.value === "dedicated") {
-      setSelected({ redis: false, kafka: false, postgres: false });
-      dispatch({
-        type: "SET_EXTERNAL_SERVICES",
-        config: {
-          redisMode: "embedded",
-          kafkaMode: "embedded",
-          postgresMode: "embedded",
-        },
+  // Prefill handlers for discovery selections. Credential fetches run in the
+  // background (behind the approval gate) and never clobber typed values.
+  const applyRedisSelection = (instance: DiscoveredRedisInstance) => {
+    setRedisHost(instance.host);
+    setRedisPort(String(instance.port));
+    setRedisTls(instance.tls);
+    save({
+      redisHost: instance.host,
+      redisPort: instance.port,
+      redisTls: instance.tls,
+    });
+    if (!instance.authEnabled) return;
+    if (provider === "aws" && instance.authSecretId) {
+      getAwsSecretValue(instance.authSecretId, state.region).then((secret) => {
+        if (secret) setRedisPassword((current) => current || secret);
       });
-      onComplete();
-      return;
-    }
-    setField("which");
-  };
-
-  const handleRedisTlsSelect = (item: { value: string }) => {
-    setRedisTls(item.value === "yes");
-    setField("redis-password");
-  };
-
-  const handlePresetSelect = (item: { value: string }) => {
-    setPresetIndex(Math.max(0, PRESETS.findIndex((p) => p.id === item.value)));
-    setField("kafka-brokers");
-  };
-
-  const handleMechanismSelect = (item: { value: string }) => {
-    setMechIndex(
-      Math.max(0, CUSTOM_MECH.findIndex((m) => m.id === item.value)),
-    );
-    setField("kafka-custom-ssl");
-  };
-
-  const handleCustomSslSelect = (item: { value: string }) => {
-    const ssl = item.value === "yes";
-    setCustomSsl(ssl);
-    // A SASL mechanism needs credentials next; SSL-only ends Kafka here. Pass the
-    // freshly chosen ssl value to avoid reading stale state when persisting.
-    if (customMechanism) {
-      setField("kafka-custom-username");
-    } else {
-      goAfter("kafka", { customSsl: ssl });
+    } else if (provider === "azure" && instance.resourceGroup) {
+      getAzureRedisKey(instance.name, instance.resourceGroup).then((key) => {
+        if (key) setRedisPassword((current) => current || key);
+      });
+    } else if (provider === "gcp") {
+      getGcpRedisAuthString(instance.name, state.region).then((auth) => {
+        if (auth) setRedisPassword((current) => current || auth);
+      });
     }
   };
 
-  const handleProvisionTopicsSelect = (item: { value: string }) => {
-    const provision = item.value === "yes";
-    setProvisionTopics(provision);
-    // Pass the fresh value so persist doesn't read stale state (as with customSsl).
-    goAfter("kafka", { provisionTopics: provision });
+  const applyKafkaSelection = (cluster: DiscoveredKafkaCluster) => {
+    if (cluster.brokers) {
+      setBrokers(cluster.brokers);
+      save({ kafkaBrokers: cluster.brokers });
+    }
+    if (provider === "aws" && cluster.arn) {
+      getMskBootstrapBrokers(cluster.arn, state.region).then((discovered) => {
+        if (discovered) setBrokers((current) => current || discovered);
+      });
+    } else if (provider === "azure" && cluster.resourceGroup) {
+      getEventHubsConnectionString(cluster.name, cluster.resourceGroup).then(
+        (connection) => {
+          if (connection) {
+            setAzureConnection((current) => current || connection);
+          }
+        },
+      );
+    }
   };
 
-  const handlePgModeSelect = (item: { value: string }) => {
-    setPgModeIndex(
-      Math.max(0, PG_INPUT_MODES.findIndex((m) => m.value === item.value)),
-    );
-    setField(item.value === "connstring" ? "pg-conn" : "pg-host");
+  const applyPostgresSelection = (instance: DiscoveredPostgresInstance) => {
+    setPgHost(instance.host);
+    setPgPort(String(instance.port));
+    if (instance.database) setPgDatabase(instance.database);
+    if (instance.masterUsername) setPgMasterUser(instance.masterUsername);
+    save({
+      postgresHost: instance.host,
+      postgresPort: instance.port,
+      ...(instance.database ? { postgresDatabase: instance.database } : {}),
+      ...(instance.masterUsername
+        ? { postgresMasterUsername: instance.masterUsername }
+        : {}),
+    });
+    if (instance.masterSecretArn) {
+      getAwsSecretValue(instance.masterSecretArn, state.region).then(
+        (secret) => {
+          if (secret) setPgMasterPass((current) => current || secret);
+        },
+      );
+    }
   };
 
-  // ===== Renderers =====
-  const renderSelect = (
-    label: string,
-    items: { label: string; value: string }[],
-    onSelect: (item: { value: string }) => void,
-    initialIndex = 0,
-    note?: string,
-  ) => (
-    <Box flexDirection="column" marginY={1}>
-      <Text bold>{label}</Text>
-      {note && (
-        <Text color="gray" dimColor>
-          {note}
-        </Text>
-      )}
-      <Box marginTop={1} flexDirection="column">
-        <SelectInput
-          items={items}
-          onSelect={onSelect}
-          initialIndex={initialIndex}
-          indicatorComponent={() => null}
-          itemComponent={({ isSelected, label: itemLabel }) => (
-            <Text color={isSelected ? colors.accent : undefined}>
-              {isSelected ? "❯ " : "  "}
-              {itemLabel}
-            </Text>
+  const presetChoices = PRESETS.filter(
+    (p) =>
+      p.id === "custom" ||
+      provider === null ||
+      p.id === defaultPresetForCloud(provider),
+  );
+
+  const pgName = managedPostgresName(provider);
+
+  // Field visibility comes from the shared pure sequence definition, so the
+  // component, the tests, and back-navigation always agree on the path.
+  const fieldOrder = new Set(
+    externalServicesFieldOrder({
+      mode: modeChoice,
+      services: selected,
+      provider,
+      pgAvailable,
+      hasRedisPassword: !!redisPassword,
+      preset,
+      hasCustomMechanism: customMechanism !== "",
+      pgUseConnString,
+    }),
+  );
+
+  const fieldDefs: FlowField[] = [
+    {
+      id: "mode",
+      render: (flow) => (
+        <WizardSelect
+          label="How should these services be provided?"
+          items={MODE_OPTIONS}
+          initialValue={modeChoice}
+          onSelect={(value) => {
+            if (value === "dedicated") {
+              setModeChoice("dedicated");
+              setSelected({ redis: false, kafka: false, postgres: false });
+              dispatch({
+                type: "SET_EXTERNAL_SERVICES",
+                config: {
+                  redisMode: "embedded",
+                  kafkaMode: "embedded",
+                  postgresMode: "embedded",
+                },
+              });
+              onComplete();
+              return;
+            }
+            setModeChoice("existing");
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "which",
+      render: (flow) => (
+        <CheckboxList
+          label="Which services do you want to connect to managed providers?"
+          items={[
+            {
+              key: "redis",
+              label: "Redis",
+              hint: "Managed cache (ElastiCache, Azure Cache, Memorystore).",
+              checked: selected.redis,
+            },
+            {
+              key: "kafka",
+              label: "Kafka",
+              hint: "Managed event streaming (MSK, Event Hubs, GCP Managed Kafka).",
+              checked: selected.kafka,
+            },
+            ...(pgAvailable
+              ? [
+                  {
+                    key: "postgres",
+                    label: "Postgres database",
+                    hint: `${pgName} for the Supabase database.`,
+                    checked: selected.postgres,
+                  },
+                ]
+              : []),
+          ]}
+          onToggle={(key) =>
+            setSelected((s) => ({
+              ...s,
+              [key]: !s[key as ServiceKey],
+            }))
+          }
+          onContinue={() => {
+            if (!selected.redis && !selected.kafka && !selected.postgres) {
+              setError("Select at least one service to externalize.");
+              return;
+            }
+            setError(null);
+            save({
+              redisMode: selected.redis ? "external" : "embedded",
+              kafkaMode: selected.kafka ? "external" : "embedded",
+              postgresMode: selected.postgres ? "external" : "embedded",
+            });
+            flow.next();
+          }}
+        />
+      ),
+    },
+
+    // ----- Redis -----
+    {
+      id: "redis-pick",
+      render: (flow) => (
+        <DiscoveredSelect
+          label="Select your managed Redis"
+          hint="Discovered through your cloud CLI; connection details prefill the next prompts."
+          loadingLabel="Discovering managed Redis instances..."
+          emptyHint="None found. Press R to refresh or enter details manually."
+          load={async () => {
+            const instances = await listManagedRedis(
+              provider as CloudProvider,
+              state.region,
+              { clusterName: state.clusterName },
+            );
+            redisByName.clear();
+            for (const instance of instances) {
+              redisByName.set(instance.name, instance);
+            }
+            return instances.map((instance) => ({
+              label: `${instance.name}  (${instance.host})`,
+              value: instance.name,
+            }));
+          }}
+          recommendIndex={(items) =>
+            items.findIndex(
+              (item) => redisByName.get(item.value)?.host === state.redisHost,
+            )
+          }
+          onSelect={(value) => {
+            const instance = redisByName.get(value);
+            if (instance) applyRedisSelection(instance);
+            flow.next();
+          }}
+          onManual={() => flow.next()}
+        />
+      ),
+    },
+    {
+      id: "redis-host",
+      render: (flow) => (
+        <TextField
+          label="Redis host"
+          hint="Hostname of your managed Redis endpoint."
+          value={redisHost}
+          onChange={setRedisHost}
+          placeholder="redis.example.com"
+          onSubmit={() => {
+            if (!redisHost.trim()) {
+              setError("Redis host is required for an external instance.");
+              return;
+            }
+            setError(null);
+            save({ redisHost: redisHost.trim() });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "redis-port",
+      render: (flow) => (
+        <TextField
+          label="Redis port"
+          value={redisPort}
+          onChange={setRedisPort}
+          placeholder="6379"
+          onSubmit={() => {
+            save({ redisPort: Number.parseInt(redisPort, 10) || 6379 });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "redis-tls",
+      render: (flow) => (
+        <WizardSelect
+          label="Redis TLS"
+          items={yesNo(
+            "Yes - connect using rediss:// (TLS)",
+            "No - plaintext redis://",
           )}
+          initialValue={redisTls ? "yes" : "no"}
+          onSelect={(value) => {
+            setRedisTls(value === "yes");
+            save({ redisTls: value === "yes" });
+            flow.next();
+          }}
         />
-      </Box>
-      <Text color={colors.muted}>↑/↓ to choose • Enter to continue</Text>
-    </Box>
-  );
+      ),
+    },
+    {
+      id: "redis-password",
+      render: (flow) => (
+        <TextField
+          label="Redis password"
+          hint="Leave blank to use an existing secret or no auth."
+          value={redisPassword}
+          onChange={setRedisPassword}
+          mask
+          onSubmit={() => {
+            save({ redisPassword });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "redis-existing-secret",
+      render: (flow) => (
+        <TextField
+          label="Redis password secret"
+          hint="Name of an existing Kubernetes secret holding the password. Blank = no auth."
+          value={redisExistingSecret}
+          onChange={setRedisExistingSecret}
+          placeholder="my-redis-auth"
+          onSubmit={() => {
+            save({ redisExistingSecret: redisExistingSecret.trim() });
+            flow.next();
+          }}
+        />
+      ),
+    },
 
-  const renderText = (
-    label: string,
-    value: string,
-    onChange: (v: string) => void,
-    opts: { hint?: string; placeholder?: string; mask?: boolean } = {},
-  ) => (
-    <Box flexDirection="column" marginY={1}>
-      <Text bold>{label}</Text>
-      {opts.hint && (
-        <Text color="gray" dimColor>
-          {opts.hint}
-        </Text>
-      )}
-      <Box marginTop={1}>
-        <TextInput
-          value={value}
-          onChange={onChange}
-          onSubmit={() => advance(field)}
-          placeholder={opts.placeholder}
-          mask={opts.mask ? "*" : undefined}
+    // ----- Kafka -----
+    {
+      id: "kafka-preset",
+      render: (flow) => (
+        <WizardSelect
+          label="Managed Kafka type"
+          hint="Topics/partitions may need to be created by a Kafka admin to match worker counts."
+          items={presetChoices.map((p) => ({ label: p.label, value: p.id }))}
+          initialValue={preset}
+          onSelect={(value) => {
+            setPreset(value as KafkaPreset);
+            save({ kafkaPreset: value as KafkaPreset });
+            flow.next();
+          }}
         />
-      </Box>
-    </Box>
-  );
+      ),
+    },
+    {
+      id: "kafka-pick",
+      render: (flow) => (
+        <DiscoveredSelect
+          label="Select your managed Kafka"
+          hint="Brokers (and credentials where possible) prefill the next prompts."
+          loadingLabel="Discovering managed Kafka clusters..."
+          emptyHint="None found. Press R to refresh or enter brokers manually."
+          load={async () => {
+            const clusters = await listManagedKafka(
+              provider as CloudProvider,
+              state.region,
+            );
+            kafkaByName.clear();
+            for (const cluster of clusters) {
+              kafkaByName.set(cluster.name, cluster);
+            }
+            return clusters.map((cluster) => ({
+              label: cluster.brokers
+                ? `${cluster.name}  (${cluster.brokers.split(",")[0]})`
+                : cluster.name,
+              value: cluster.name,
+            }));
+          }}
+          onSelect={(value) => {
+            const cluster = kafkaByName.get(value);
+            if (cluster) applyKafkaSelection(cluster);
+            flow.next();
+          }}
+          onManual={() => flow.next()}
+        />
+      ),
+    },
+    {
+      id: "kafka-brokers",
+      render: (flow) => (
+        <TextField
+          label="Kafka bootstrap brokers"
+          hint="Comma-separated host:port list."
+          value={brokers}
+          onChange={setBrokers}
+          placeholder="b-1.example:9098,b-2.example:9098"
+          onSubmit={() => {
+            if (!brokers.trim()) {
+              setError("At least one broker is required for external Kafka.");
+              return;
+            }
+            setError(null);
+            save({ kafkaBrokers: brokers.trim() });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "kafka-topic-prefix",
+      render: (flow) => (
+        <TextField
+          label="Topic prefix"
+          hint="Namespaces topic names (e.g. com.rulebricks.solution) to avoid collisions on shared Kafka. Blank = no prefix."
+          value={topicPrefix}
+          onChange={setTopicPrefix}
+          placeholder="com.rulebricks."
+          onSubmit={() => {
+            save({ kafkaTopicPrefix: topicPrefix.trim() });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "kafka-aws-region",
+      render: (flow) => (
+        <TextField
+          label="AWS region"
+          hint="Region of the MSK cluster (used to sign IAM auth tokens)."
+          value={awsRegion}
+          onChange={setAwsRegion}
+          placeholder="us-east-1"
+          onSubmit={() => {
+            if (!awsRegion.trim()) {
+              setError("Region is required for MSK IAM signing.");
+              return;
+            }
+            setError(null);
+            save({ kafkaSaslRegion: awsRegion.trim() });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "kafka-aws-role",
+      render: (flow) => (
+        <TextField
+          label="MSK IAM role ARN"
+          hint="Pod Identity role for HPS + the Vector bridge (the cluster-setup RulebricksRole). Blank to reuse the SAs' association."
+          value={awsRole}
+          onChange={setAwsRole}
+          placeholder="arn:aws:iam::123456789012:role/rulebricks-cluster-rulebricks"
+          onSubmit={() => {
+            save({ kafkaIdentityAwsRoleArn: awsRole.trim() });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "kafka-provision-topics",
+      render: (flow) => (
+        <WizardSelect
+          label="Kafka topic provisioning"
+          items={yesNo(
+            "Yes - the chart creates the required topics on the broker",
+            "No - I manage topics myself (locked-down / no CreateTopic)",
+          )}
+          initialValue={provisionTopics ? "yes" : "no"}
+          onSelect={(value) => {
+            setProvisionTopics(value === "yes");
+            save({ kafkaProvisionTopics: value === "yes" });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "kafka-azure-connection",
+      render: (flow) => (
+        <TextField
+          label="Event Hubs connection string"
+          hint="Namespace connection string (used as the SASL PLAIN password)."
+          value={azureConnection}
+          onChange={setAzureConnection}
+          placeholder="Endpoint=sb://...;SharedAccessKey=..."
+          mask
+          onSubmit={() => {
+            if (!azureConnection.trim()) {
+              setError("Event Hubs connection string is required.");
+              return;
+            }
+            setError(null);
+            save({ kafkaSaslPassword: azureConnection });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "kafka-gcp-username",
+      render: (flow) => (
+        <TextField
+          label="Kafka username"
+          hint="GCP service account principal for SASL PLAIN."
+          value={gcpUsername}
+          onChange={setGcpUsername}
+          placeholder="service-account@project.iam.gserviceaccount.com"
+          onSubmit={() => {
+            save({ kafkaSaslUsername: gcpUsername });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "kafka-gcp-password",
+      render: (flow) => (
+        <TextField
+          label="Kafka password"
+          hint="Service-account key or access token."
+          value={gcpPassword}
+          onChange={setGcpPassword}
+          mask
+          onSubmit={() => {
+            save({ kafkaSaslPassword: gcpPassword });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "kafka-custom-mechanism",
+      render: (flow) => (
+        <WizardSelect
+          label="SASL mechanism"
+          items={CUSTOM_MECH.map((m) => ({ label: m.label, value: m.id }))}
+          initialValue={customMechanism}
+          onSelect={(value) => {
+            setCustomMechanism(value);
+            save({
+              kafkaSaslMechanism: value as ExternalServicesPatch["kafkaSaslMechanism"],
+            });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "kafka-custom-ssl",
+      render: (flow) => (
+        <WizardSelect
+          label="Kafka TLS/SSL"
+          items={yesNo("Yes - connect over TLS", "No - plaintext connection")}
+          initialValue={customSsl ? "yes" : "no"}
+          onSelect={(value) => {
+            setCustomSsl(value === "yes");
+            save({ kafkaSsl: value === "yes" });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "kafka-custom-username",
+      render: (flow) => (
+        <TextField
+          label="Kafka SASL username"
+          value={customUsername}
+          onChange={setCustomUsername}
+          onSubmit={() => {
+            save({ kafkaSaslUsername: customUsername });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "kafka-custom-password",
+      render: (flow) => (
+        <TextField
+          label="Kafka SASL password"
+          value={customPassword}
+          onChange={setCustomPassword}
+          mask
+          onSubmit={() => {
+            save({ kafkaSaslPassword: customPassword });
+            flow.next();
+          }}
+        />
+      ),
+    },
+
+    // ----- Postgres -----
+    {
+      id: "pg-pick",
+      render: (flow) => (
+        <DiscoveredSelect
+          label={`Select your ${pgName} instance`}
+          hint="Self-hosted Supabase will run against this database. A one-time bootstrap initializes roles/schemas."
+          loadingLabel={`Discovering ${pgName} instances...`}
+          emptyHint="None found. Press R to refresh or enter details manually."
+          load={async () => {
+            const instances = await listManagedPostgres(
+              provider as CloudProvider,
+              state.region,
+            );
+            pgByName.clear();
+            for (const instance of instances) {
+              pgByName.set(instance.name, instance);
+            }
+            return [
+              ...instances.map((instance) => ({
+                label: `${instance.name}  (${instance.host})`,
+                value: instance.name,
+              })),
+              {
+                label: "Paste a Postgres connection string…",
+                value: CONN_STRING,
+              },
+            ];
+          }}
+          recommendIndex={(items) =>
+            items.findIndex(
+              (item) => pgByName.get(item.value)?.host === state.postgresHost,
+            )
+          }
+          onSelect={(value) => {
+            if (value === CONN_STRING) {
+              setPgUseConnString(true);
+              flow.next();
+              return;
+            }
+            setPgUseConnString(false);
+            const instance = pgByName.get(value);
+            if (instance) applyPostgresSelection(instance);
+            flow.next();
+          }}
+          onManual={() => {
+            setPgUseConnString(false);
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "pg-conn",
+      onEscape: () => setPgUseConnString(false),
+      render: (flow) => (
+        <TextField
+          label="Postgres connection string"
+          hint="Parsed into the fields below (you can review them next). Use the admin/master user."
+          value={pgConn}
+          onChange={setPgConn}
+          placeholder="postgresql://postgres:pass@host:5432/postgres"
+          mask
+          onSubmit={() => {
+            const parsed = parsePostgresUrl(pgConn);
+            if (!parsed || !parsed.host) {
+              setError(
+                "Enter a valid connection string, e.g. postgresql://user:pass@host:5432/postgres",
+              );
+              return;
+            }
+            setPgHost(parsed.host);
+            if (parsed.port) setPgPort(String(parsed.port));
+            if (parsed.database) setPgDatabase(parsed.database);
+            if (parsed.user) setPgMasterUser(parsed.user);
+            if (parsed.password) setPgMasterPass(parsed.password);
+            save({
+              postgresHost: parsed.host,
+              ...(parsed.port ? { postgresPort: parsed.port } : {}),
+              ...(parsed.database ? { postgresDatabase: parsed.database } : {}),
+              ...(parsed.user ? { postgresMasterUsername: parsed.user } : {}),
+              ...(parsed.password
+                ? { postgresMasterPassword: parsed.password }
+                : {}),
+            });
+            setError(null);
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "pg-host",
+      render: (flow) => (
+        <TextField
+          label={provider === "aws" ? "RDS endpoint" : "Server host"}
+          hint={
+            provider === "aws"
+              ? "Writer/instance endpoint. Use the direct endpoint (not a proxy/pooler)."
+              : "Fully-qualified server name or address."
+          }
+          value={pgHost}
+          onChange={setPgHost}
+          placeholder={
+            provider === "aws"
+              ? "db.cluster-xxxx.us-east-1.rds.amazonaws.com"
+              : provider === "azure"
+                ? "myserver.postgres.database.azure.com"
+                : "10.10.0.3"
+          }
+          onSubmit={() => {
+            if (!pgHost.trim()) {
+              setError("Database host/endpoint is required.");
+              return;
+            }
+            setError(null);
+            save({ postgresHost: pgHost.trim() });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "pg-port",
+      render: (flow) => (
+        <TextField
+          label="Database port"
+          value={pgPort}
+          onChange={setPgPort}
+          placeholder="5432"
+          onSubmit={() => {
+            save({ postgresPort: Number.parseInt(pgPort, 10) || 5432 });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "pg-database",
+      render: (flow) => (
+        <TextField
+          label="Database name"
+          hint="The database Supabase services connect to."
+          value={pgDatabase}
+          onChange={setPgDatabase}
+          placeholder="postgres"
+          onSubmit={() => {
+            save({ postgresDatabase: pgDatabase.trim() || "postgres" });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "pg-master-username",
+      render: (flow) => (
+        <TextField
+          label="Master/admin username"
+          hint={`${pgName} admin username. Used once to create roles/schemas.`}
+          value={pgMasterUser}
+          onChange={setPgMasterUser}
+          placeholder="postgres"
+          onSubmit={() => {
+            save({ postgresMasterUsername: pgMasterUser.trim() || "postgres" });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "pg-master-password",
+      render: (flow) => (
+        <TextField
+          label="Master/admin password"
+          hint="Used by the one-time bootstrap to initialize the database. Stored in a short-lived secret."
+          value={pgMasterPass}
+          onChange={setPgMasterPass}
+          mask
+          onSubmit={() => {
+            if (!pgMasterPass) {
+              setError(
+                "Master password is required to initialize the database (roles, schemas).",
+              );
+              return;
+            }
+            setError(null);
+            flow.next();
+          }}
+        />
+      ),
+    },
+  ];
+
+  const fields: FlowField[] = fieldDefs.map((field) => ({
+    ...field,
+    when: () => fieldOrder.has(field.id),
+  }));
+
+  const flow = useFieldFlow({
+    fields,
+    onDone: persist,
+    onExit: onBack,
+    entry: entryDirection === "back" ? "end" : "start",
+    onNavigate: () => setError(null),
+  });
 
   return (
     <BorderBox title="External Services">
       <Box flexDirection="column" marginY={1}>
         <Text>Managed services for Rulebricks.</Text>
         <Text color="gray" dimColor>
-          By default Redis and Kafka run in-cluster, managed by the chart. You can
-          instead connect to managed providers you already operate
+          By default Redis and Kafka run in-cluster, managed by the chart. You
+          can instead connect to managed providers you already operate
           {pgAvailable ? ", including your Postgres database." : "."}
         </Text>
       </Box>
 
-      {field === "mode" &&
-        renderSelect(
-          "How should these services be provided?",
-          MODE_OPTIONS,
-          handleModeSelect,
-          state.redisMode === "external" ||
-            state.kafkaMode === "external" ||
-            state.postgresMode === "external"
-            ? 1
-            : 0,
-        )}
+      {flow.render()}
 
-      {field === "which" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text bold>Which services do you want to connect to managed providers?</Text>
-          <Text color="gray" dimColor>
-            Space/Enter to toggle • ↑/↓ to navigate
-          </Text>
-          <Box marginTop={1} flexDirection="column">
-            {whichItems.map((item, index) => {
-              const isCursor = index === whichIndex;
-              const isOn = selected[item.key];
-              return (
-                <Box key={item.key} flexDirection="column">
-                  <Box>
-                    <Text color={isCursor ? colors.accent : undefined}>
-                      {isCursor ? "❯ " : "  "}
-                    </Text>
-                    <Text color={isOn ? colors.success : colors.muted}>
-                      {isOn ? "[✓]" : "[ ]"}
-                    </Text>
-                    <Text color={isCursor ? colors.accent : undefined}>
-                      {" "}
-                      {item.label}
-                    </Text>
-                  </Box>
-                  {isCursor && (
-                    <Box marginLeft={6}>
-                      <Text color="gray" dimColor>
-                        {item.hint}
-                      </Text>
-                    </Box>
-                  )}
-                </Box>
-              );
-            })}
-            <Box marginTop={1}>
-              <Text
-                color={
-                  whichIndex === whichItems.length ? colors.accent : colors.muted
-                }
-              >
-                {whichIndex === whichItems.length ? "❯ " : "  "}
-              </Text>
-              <Text
-                color={
-                  whichIndex === whichItems.length
-                    ? colors.success
-                    : colors.muted
-                }
-                bold={whichIndex === whichItems.length}
-              >
-                [Continue →]
-              </Text>
-            </Box>
-          </Box>
-          {!pgAvailable && (
-            <Text color="gray" dimColor>
-              Externalizing the Postgres database is available on AWS and Azure.
-            </Text>
-          )}
-        </Box>
-      )}
-
-      {field === "redis-host" &&
-        renderText("Redis host", redisHost, setRedisHost, {
-          hint: "Hostname of your managed Redis (e.g. ElastiCache/Memorystore endpoint).",
-          placeholder: "redis.example.com",
-        })}
-
-      {field === "redis-port" &&
-        renderText("Redis port", redisPort, setRedisPort, {
-          placeholder: "6379",
-        })}
-
-      {field === "redis-tls" &&
-        renderSelect(
-          "Redis TLS",
-          yesNo(
-            "Yes - connect using rediss:// (TLS)",
-            "No - plaintext redis://",
-          ),
-          handleRedisTlsSelect,
-          redisTls ? 1 : 0,
-        )}
-
-      {field === "redis-password" &&
-        renderText("Redis password", redisPassword, setRedisPassword, {
-          hint: "Leave blank to use an existing secret or no auth.",
-          mask: true,
-        })}
-
-      {field === "redis-existing-secret" &&
-        renderText(
-          "Redis password secret",
-          redisExistingSecret,
-          setRedisExistingSecret,
-          {
-            hint: "Name of an existing Kubernetes secret holding the password. Blank = no auth.",
-            placeholder: "my-redis-auth",
-          },
-        )}
-
-      {field === "kafka-preset" &&
-        renderSelect(
-          "Managed Kafka type",
-          PRESETS.map((p) => ({ label: p.label, value: p.id })),
-          handlePresetSelect,
-          presetIndex,
-          "* Topics/partitions may need to be created by a Kafka admin to match worker counts.",
-        )}
-
-      {field === "kafka-brokers" &&
-        renderText("Kafka bootstrap brokers", brokers, setBrokers, {
-          hint: "Comma-separated host:port list.",
-          placeholder: "b-1.example:9098,b-2.example:9098",
-        })}
-
-      {field === "kafka-topic-prefix" &&
-        renderText("Topic prefix", topicPrefix, setTopicPrefix, {
-          hint: "Namespaces topic names (e.g. com.rulebricks.solution) to avoid collisions on shared Kafka. Blank = no prefix.",
-          placeholder: "com.rulebricks.",
-        })}
-
-      {field === "kafka-aws-region" &&
-        renderText("AWS region", awsRegion, setAwsRegion, {
-          hint: "Region of the MSK cluster (used to sign IAM auth tokens).",
-          placeholder: "us-east-1",
-        })}
-
-      {field === "kafka-aws-role" &&
-        renderText("MSK IAM role ARN", awsRole, setAwsRole, {
-          hint: "Pod Identity role for HPS + the Vector bridge (the cluster-setup RulebricksRole). Blank to reuse the SAs' association.",
-          placeholder: "arn:aws:iam::123456789012:role/rulebricks-cluster-rulebricks",
-        })}
-
-      {field === "kafka-provision-topics" &&
-        renderSelect(
-          "Kafka topic provisioning",
-          yesNo(
-            "Yes - the chart creates the required topics on the broker",
-            "No - I manage topics myself (locked-down / no CreateTopic)",
-          ),
-          handleProvisionTopicsSelect,
-          provisionTopics ? 1 : 0,
-        )}
-
-      {field === "kafka-azure-connection" &&
-        renderText(
-          "Event Hubs connection string",
-          azureConnection,
-          setAzureConnection,
-          {
-            hint: "Namespace connection string (used as the SASL PLAIN password).",
-            placeholder: "Endpoint=sb://...;SharedAccessKey=...",
-            mask: true,
-          },
-        )}
-
-      {field === "kafka-gcp-username" &&
-        renderText("Kafka username", gcpUsername, setGcpUsername, {
-          hint: "GCP service account principal for SASL PLAIN.",
-          placeholder: "service-account@project.iam.gserviceaccount.com",
-        })}
-
-      {field === "kafka-gcp-password" &&
-        renderText("Kafka password", gcpPassword, setGcpPassword, {
-          hint: "Service-account key or access token.",
-          mask: true,
-        })}
-
-      {field === "kafka-custom-mechanism" &&
-        renderSelect(
-          "SASL mechanism",
-          CUSTOM_MECH.map((m) => ({ label: m.label, value: m.id })),
-          handleMechanismSelect,
-          mechIndex,
-        )}
-
-      {field === "kafka-custom-ssl" &&
-        renderSelect(
-          "Kafka TLS/SSL",
-          yesNo("Yes - connect over TLS", "No - plaintext connection"),
-          handleCustomSslSelect,
-          customSsl ? 1 : 0,
-        )}
-
-      {field === "kafka-custom-username" &&
-        renderText("Kafka SASL username", customUsername, setCustomUsername, {})}
-
-      {field === "kafka-custom-password" &&
-        renderText("Kafka SASL password", customPassword, setCustomPassword, {
-          mask: true,
-        })}
-
-      {field === "pg-input-mode" &&
-        renderSelect(
-          state.provider === "aws"
-            ? "How do you want to provide your RDS / Aurora connection?"
-            : "How do you want to provide your Flexible Server connection?",
-          PG_INPUT_MODES,
-          handlePgModeSelect,
-          pgModeIndex,
-          "Self-hosted Supabase will run against this database. A one-time bootstrap initializes roles/schemas; provide the master/admin credentials.",
-        )}
-
-      {field === "pg-conn" &&
-        renderText("Postgres connection string", pgConn, setPgConn, {
-          hint: "Parsed into the fields below (you can review them next). Use the admin/master user.",
-          placeholder: "postgresql://postgres:pass@host:5432/postgres",
-          mask: true,
-        })}
-
-      {field === "pg-host" &&
-        renderText(
-          state.provider === "aws" ? "RDS endpoint" : "Server host",
-          pgHost,
-          setPgHost,
-          {
-            hint:
-              state.provider === "aws"
-                ? "Writer/instance endpoint. Use the direct endpoint (not a proxy/pooler)."
-                : "Fully-qualified server name.",
-            placeholder:
-              state.provider === "aws"
-                ? "db.cluster-xxxx.us-east-1.rds.amazonaws.com"
-                : "myserver.postgres.database.azure.com",
-          },
-        )}
-
-      {field === "pg-port" &&
-        renderText("Database port", pgPort, setPgPort, { placeholder: "5432" })}
-
-      {field === "pg-database" &&
-        renderText("Database name", pgDatabase, setPgDatabase, {
-          hint: "The database Supabase services connect to.",
-          placeholder: "postgres",
-        })}
-
-      {field === "pg-master-username" &&
-        renderText("Master/admin username", pgMasterUser, setPgMasterUser, {
-          hint:
-            state.provider === "aws"
-              ? "RDS master username (recommended: postgres). Used once to create roles/schemas."
-              : "Azure server admin username. Used once to create roles/schemas.",
-          placeholder: "postgres",
-        })}
-
-      {field === "pg-master-password" &&
-        renderText("Master/admin password", pgMasterPass, setPgMasterPass, {
-          hint: "Used by the one-time bootstrap to initialize the database. Stored in a short-lived secret.",
-          mask: true,
-        })}
-
-      {error && (
-        <Box marginTop={1}>
-          <Text color={colors.error}>✗ {error}</Text>
-        </Box>
-      )}
-
-      <Box marginTop={1}>
-        <Text color="gray" dimColor>
-          Esc to go back
-        </Text>
-      </Box>
+      <FieldError error={error} />
+      <StepFooter />
     </BorderBox>
   );
 }

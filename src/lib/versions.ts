@@ -60,7 +60,10 @@ export const IMAGE_REPOSITORIES = {
     tag: "0.155.0-debian13-contrib",
   },
   // Bridge sidecar
-  kafkaProxy: { repository: "rulebricks/kafka-proxy", tag: "v0.4.3" },
+  kafkaProxy: { repository: "rulebricks/kafka-proxy", tag: "0.4.3" },
+  // CA-bundle seeder for the hardened vector image (ships no system CA store);
+  // also a general-purpose curl. Tag mirrors images/manifest.yaml.
+  curl: { repository: "rulebricks/curl", tag: "8.14.1-debian13" },
   // Self-hosted Supabase Postgres
   supabasePostgres: {
     repository: "rulebricks/supabase-postgres",

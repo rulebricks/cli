@@ -9,11 +9,11 @@ param location string = resourceGroup().location
 @description('AKS Kubernetes version.')
 param kubernetesVersion string = '1.34'
 
-@description('Number of nodes in the default node pool.')
-param nodeCount int = 2
+@description('Number of nodes in the default node pool. 3 nodes (12 vCPU / 48 GiB) fit the chart\'s ~10 vCPU / ~23 GiB steady-state request floor with headroom; 2 nodes forced a scale-up mid-install.')
+param nodeCount int = 3
 
-@description('Maximum number of nodes in the default (core) pool. Core services need only 2-4 small nodes; burst capacity lives in the dedicated burst pool, so keeping this ceiling low also steers the autoscaler toward the burst pool when the worker fleet scales out.')
-param maxNodeCount int = 4
+@description('Maximum number of nodes in the default (core) pool. Core services need only 3-5 small nodes; burst capacity lives in the dedicated burst pool, so keeping this ceiling low also steers the autoscaler toward the burst pool when the worker fleet scales out. 5 leaves room for HPS scaling 3->8 (+5 vCPU of requests), which stays on the core pool.')
+param maxNodeCount int = 5
 
 @description('VM size for the default node pool.')
 param nodeVmSize string = 'Standard_F4as_v6'
@@ -38,7 +38,7 @@ param osDiskType string = 'Managed'
 @description('Provision the dedicated burst worker pool: one large VM, scale 0->burstMaxCount, Deallocate scale-down (parked at disk-only cost with images cached, ~30-60s resume). Labeled and tainted rulebricks.com/pool=burst; the Rulebricks chart makes workers tolerate and softly prefer it out of the box.')
 param enableBurstPool bool = true
 
-@description('VM size for the burst worker pool. Default 16 vCPU (the Fas_v6 family has no 24-vCPU size): 2x4 vCPU core floor + 16 = 24 vCPU running steady-state at full burst, and exactly 32 vCPU even with the core pool at its 4-node max - sized to a 32-vCPU family quota. One big node beats many small ones for bang-bang scaling: one start event, one image set, no straggler tail.')
+@description('VM size for the burst worker pool. Default 16 vCPU / 64 GiB (the Fas_v6 family has no 24-vCPU size): 3x4 vCPU core floor + 16 = 28 vCPU running steady-state at full burst, and 36 vCPU with the core pool at its 5-node max - check the Fasv6-family vCPU quota covers this. The 64 GiB matters too: workers request 1 GiB each, so the default 64-worker KEDA ceiling needs ~64 GiB. One big node beats many small ones for bang-bang scaling: one start event, one image set, no straggler tail.')
 param burstVmSize string = 'Standard_F16as_v6'
 
 @description('Maximum nodes in the burst pool.')
@@ -300,7 +300,7 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-05-01' = {
               vnetSubnetID: subnet.id
             }
           ]
-        : [],
+        : []
     )
     // Tuned for bursty traffic: detect pending pods quickly and pick the
     // node pool that wastes the least capacity. With the core pool capped at

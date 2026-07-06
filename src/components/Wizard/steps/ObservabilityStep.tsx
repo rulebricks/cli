@@ -1,20 +1,22 @@
 import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
-import SelectInput from "ink-select-input";
-import TextInput from "ink-text-input";
+import { Box, Text } from "ink";
 import { useWizard } from "../WizardContext.js";
-import { BorderBox, useTheme } from "../../common/index.js";
+import { useFieldFlow, FlowField } from "../fieldFlow.js";
+import {
+  BorderBox,
+  CheckboxList,
+  FieldError,
+  StepFooter,
+  TextField,
+  WizardSelect,
+  useTheme,
+} from "../../common/index.js";
 
 interface ObservabilityStepProps {
   onComplete: () => void;
   onBack: () => void;
+  entryDirection?: "forward" | "back";
 }
-
-type SubStep =
-  | "mode"
-  | "builtin-telemetry-retention"
-  | "builtin-clickhouse-storage"
-  | "byo-signals";
 
 const MODE_OPTIONS = [
   {
@@ -27,118 +29,36 @@ const MODE_OPTIONS = [
   },
 ];
 
-const SIGNALS = [
-  {
-    id: "metrics",
-    label: "Metrics export",
-    description: "Prometheus remote_write to your managed metrics backend.",
-  },
-  {
-    id: "traces",
-    label: "Distributed tracing",
-    description: "OTLP traces to Elastic, Azure Monitor, or another backend.",
-  },
-  {
-    id: "logs",
-    label: "Application log shipping",
-    description: "Pod/app logs to Elasticsearch, Loki, or generic HTTP.",
-  },
-] as const;
-
 function parsePositiveInt(value: string, fallback: number): number {
   const parsed = Number.parseInt(value.trim(), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function normalizeSize(value: string, fallback: string): string {
-  const trimmed = value.trim();
-  return trimmed || fallback;
-}
-
 export function ObservabilityStep({
   onComplete,
   onBack,
+  entryDirection,
 }: ObservabilityStepProps) {
   const { state, dispatch } = useWizard();
   const { colors } = useTheme();
-  const [subStep, setSubStep] = useState<SubStep>("mode");
+  const [error, setError] = useState<string | null>(null);
+
+  const [mode, setMode] = useState<"built-in" | "byo">(
+    state.clickStackEnabled ? "built-in" : "byo",
+  );
   const [telemetryRetention, setTelemetryRetention] = useState(
     String(state.clickStackTelemetryRetentionDays || 7),
   );
   const [clickHouseStorage, setClickHouseStorage] = useState(
     state.clickHouseStorageSize || "100Gi",
   );
-  const [signalIndex, setSignalIndex] = useState(0);
 
   const requestedStorageGi = Number.parseInt(clickHouseStorage, 10) + 10;
   const reportedStorageGi = state.totalPersistentStorageGi || 0;
   const storageWarning =
     reportedStorageGi > 0 && requestedStorageGi > reportedStorageGi * 0.75;
 
-  useInput((input, key) => {
-    if (key.escape) {
-      if (subStep === "mode") {
-        onBack();
-      } else {
-        setSubStep("mode");
-      }
-      return;
-    }
-
-    if (subStep !== "byo-signals") return;
-
-    if (key.upArrow) {
-      setSignalIndex((idx) => Math.max(0, idx - 1));
-    } else if (key.downArrow) {
-      setSignalIndex((idx) => Math.min(SIGNALS.length, idx + 1));
-    } else if (input === " " || input === "x" || key.return) {
-      if (signalIndex === SIGNALS.length) {
-        onComplete();
-        return;
-      }
-      const signal = SIGNALS[signalIndex];
-      if (signal.id === "metrics") {
-        dispatch({
-          type: "SET_METRICS_EXPORT",
-          enabled: !state.metricsExportEnabled,
-        });
-      } else if (signal.id === "traces") {
-        dispatch({
-          type: "SET_TRACING_ENABLED",
-          enabled: !state.tracingEnabled,
-        });
-      } else {
-        dispatch({
-          type: "SET_APP_LOGS_ENABLED",
-          enabled: !state.appLogsEnabled,
-        });
-      }
-    }
-  });
-
-  const chooseMode = (item: { value: string }) => {
-    if (item.value === "built-in") {
-      dispatch({ type: "SET_CLICKSTACK_ENABLED", enabled: true });
-      setSubStep("builtin-telemetry-retention");
-      return;
-    }
-
-    dispatch({ type: "SET_CLICKSTACK_ENABLED", enabled: false });
-    setSubStep("byo-signals");
-  };
-
-  const saveBuiltInSettings = () => {
-    dispatch({
-      type: "SET_CLICKSTACK_CONFIG",
-      config: {
-        clickStackTelemetryRetentionDays: parsePositiveInt(telemetryRetention, 7),
-        clickHouseStorageSize: normalizeSize(clickHouseStorage, "100Gi"),
-      },
-    });
-    onComplete();
-  };
-
-  const renderCapacitySummary = () => (
+  const capacitySummary = (
     <Box flexDirection="column" marginTop={1}>
       <Text color="gray" dimColor>
         Storage class: {state.storageClass || "not detected"}
@@ -150,134 +70,154 @@ export function ObservabilityStep({
           : "unknown / dynamic provisioning"}
       </Text>
       <Text color={storageWarning ? colors.warning : "gray"} dimColor>
-        Requested ClickStack PVCs: {Number.isFinite(requestedStorageGi) ? requestedStorageGi : 0} Gi
-        {" "}({clickHouseStorage || "100Gi"} ClickHouse + 10Gi HyperDX metadata)
+        Requested ClickStack PVCs:{" "}
+        {Number.isFinite(requestedStorageGi) ? requestedStorageGi : 0} Gi (
+        {clickHouseStorage || "100Gi"} ClickHouse + 10Gi HyperDX metadata)
         {storageWarning ? " (high relative to reported capacity)" : ""}
       </Text>
     </Box>
   );
 
-  if (subStep === "mode") {
-    return (
-      <BorderBox title="Observability">
-        <Box flexDirection="column" marginY={1}>
-          <Text>How should Rulebricks observability be set up?</Text>
-          <Text color="gray" dimColor>
-            Built-in ClickStack gives you logs, traces, mirrored metrics, and
-            operational dashboards. Decision logs stay in object storage and are
-            queried directly when needed.
-          </Text>
+  const fields: FlowField[] = [
+    {
+      id: "mode",
+      render: (flow) => (
+        <WizardSelect
+          label="How should Rulebricks observability be set up?"
+          hint="Built-in ClickStack gives you logs, traces, mirrored metrics, and operational dashboards. Decision logs stay in object storage."
+          items={MODE_OPTIONS}
+          initialValue={mode}
+          onSelect={(value) => {
+            const selected = value as "built-in" | "byo";
+            setMode(selected);
+            dispatch({
+              type: "SET_CLICKSTACK_ENABLED",
+              enabled: selected === "built-in",
+            });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "telemetry-retention",
+      when: () => mode === "built-in",
+      render: (flow) => (
+        <TextField
+          label="Telemetry retention (days)"
+          hint="How many days of ClickStack logs/traces/metrics to retain. Decision logs are archived only to object storage."
+          value={telemetryRetention}
+          onChange={setTelemetryRetention}
+          placeholder="7"
+          onSubmit={() => {
+            dispatch({
+              type: "SET_CLICKSTACK_CONFIG",
+              config: {
+                clickStackTelemetryRetentionDays: parsePositiveInt(
+                  telemetryRetention,
+                  7,
+                ),
+              },
+            });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "clickhouse-storage",
+      when: () => mode === "built-in",
+      render: (flow) => (
+        <Box flexDirection="column">
+          <TextField
+            label="ClickHouse PVC size"
+            hint="Stores ClickStack operational telemetry. Example: 100Gi"
+            value={clickHouseStorage}
+            onChange={setClickHouseStorage}
+            placeholder="100Gi"
+            onSubmit={() => {
+              dispatch({
+                type: "SET_CLICKSTACK_CONFIG",
+                config: {
+                  clickStackTelemetryRetentionDays: parsePositiveInt(
+                    telemetryRetention,
+                    7,
+                  ),
+                  clickHouseStorageSize: clickHouseStorage.trim() || "100Gi",
+                },
+              });
+              flow.next();
+            }}
+          />
+          {capacitySummary}
         </Box>
-        <SelectInput items={MODE_OPTIONS} onSelect={chooseMode} />
-        <Box marginTop={1}>
-          <Text color="gray" dimColor>
-            Esc to go back
-          </Text>
-        </Box>
-      </BorderBox>
-    );
-  }
+      ),
+    },
+    {
+      id: "byo-signals",
+      when: () => mode === "byo",
+      render: (flow) => (
+        <CheckboxList
+          label="Select the signals you want to export to your own systems"
+          hint="Space/Enter to toggle, then Continue. Connection details come later in Feature Settings."
+          items={[
+            {
+              key: "metrics",
+              label: "Metrics export",
+              hint: "Prometheus remote_write to your managed metrics backend.",
+              checked: state.metricsExportEnabled,
+            },
+            {
+              key: "traces",
+              label: "Distributed tracing",
+              hint: "OTLP traces to Elastic, Azure Monitor, or another backend.",
+              checked: state.tracingEnabled,
+            },
+            {
+              key: "logs",
+              label: "Application log shipping",
+              hint: "Pod/app logs to Elasticsearch, Loki, or generic HTTP.",
+              checked: state.appLogsEnabled,
+            },
+          ]}
+          onToggle={(key) => {
+            if (key === "metrics") {
+              dispatch({
+                type: "SET_METRICS_EXPORT",
+                enabled: !state.metricsExportEnabled,
+              });
+            } else if (key === "traces") {
+              dispatch({
+                type: "SET_TRACING_ENABLED",
+                enabled: !state.tracingEnabled,
+              });
+            } else {
+              dispatch({
+                type: "SET_APP_LOGS_ENABLED",
+                enabled: !state.appLogsEnabled,
+              });
+            }
+          }}
+          onContinue={() => flow.next()}
+        />
+      ),
+    },
+  ];
 
-  if (subStep === "builtin-telemetry-retention") {
-    return (
-      <BorderBox title="Telemetry Retention">
-        <Box flexDirection="column" marginY={1}>
-          <Text>How many days of ClickStack logs/traces/metrics should be retained?</Text>
-          <Text color="gray" dimColor>
-            This controls operational telemetry TTL. Decision logs are archived
-            only to object storage.
-          </Text>
-          <Box marginTop={1}>
-            <Text>Days: </Text>
-            <TextInput
-              value={telemetryRetention}
-              onChange={setTelemetryRetention}
-              onSubmit={() => setSubStep("builtin-clickhouse-storage")}
-              placeholder="7"
-            />
-          </Box>
-        </Box>
-      </BorderBox>
-    );
-  }
-
-  if (subStep === "builtin-clickhouse-storage") {
-    return (
-      <BorderBox title="ClickHouse Storage">
-        <Box flexDirection="column" marginY={1}>
-          <Text>How large should the ClickHouse PVC be?</Text>
-          <Text color="gray" dimColor>
-            Stores ClickStack operational telemetry. Example: 100Gi
-          </Text>
-          {renderCapacitySummary()}
-          <Box marginTop={1}>
-            <Text>Size: </Text>
-            <TextInput
-              value={clickHouseStorage}
-              onChange={setClickHouseStorage}
-              onSubmit={saveBuiltInSettings}
-              placeholder="100Gi"
-            />
-          </Box>
-        </Box>
-      </BorderBox>
-    );
-  }
+  const flow = useFieldFlow({
+    fields,
+    onDone: onComplete,
+    onExit: onBack,
+    entry: entryDirection === "back" ? "end" : "start",
+    onNavigate: () => setError(null),
+  });
 
   return (
-    <BorderBox title="BYO Observability Signals">
-      <Box flexDirection="column" marginY={1}>
-        <Text>Select the signals you want to export to your own systems:</Text>
-        <Text color="gray" dimColor>
-          Space/Enter to toggle, then Continue. Connection details come later in
-          Feature Settings.
-        </Text>
-      </Box>
-      <Box flexDirection="column" marginY={1}>
-        {SIGNALS.map((signal, index) => {
-          const enabled =
-            signal.id === "metrics"
-              ? state.metricsExportEnabled
-              : signal.id === "traces"
-                ? state.tracingEnabled
-                : state.appLogsEnabled;
-          const selected = signalIndex === index;
-          return (
-            <Box key={signal.id} flexDirection="column" marginBottom={selected ? 1 : 0}>
-              <Box>
-                <Text color={selected ? colors.accent : undefined}>
-                  {selected ? "❯ " : "  "}
-                </Text>
-                <Text color={enabled ? colors.success : colors.muted}>
-                  {enabled ? "[✓]" : "[ ]"}
-                </Text>
-                <Text color={selected ? colors.accent : undefined}>
-                  {" "}
-                  {signal.label}
-                </Text>
-              </Box>
-              {selected && (
-                <Box marginLeft={6}>
-                  <Text color="gray" dimColor>
-                    {signal.description}
-                  </Text>
-                </Box>
-              )}
-            </Box>
-          );
-        })}
-        <Box marginTop={1}>
-          <Text color={signalIndex === SIGNALS.length ? colors.accent : colors.muted}>
-            {signalIndex === SIGNALS.length ? "❯ " : "  "}
-          </Text>
-          <Text
-            color={signalIndex === SIGNALS.length ? colors.success : colors.muted}
-            bold={signalIndex === SIGNALS.length}
-          >
-            [Continue →]
-          </Text>
-        </Box>
-      </Box>
+    <BorderBox title="Observability">
+      {flow.render()}
+
+      <FieldError error={error} />
+      <StepFooter />
     </BorderBox>
   );
 }

@@ -425,3 +425,27 @@ export async function updateProfile(newValues: ProfileConfig): Promise<void> {
   };
   await saveProfile(merged);
 }
+
+/**
+ * Command intents the user chose to always approve ("Approve all ... commands"
+ * in the cloud CLI approval prompt). Commands with these intents skip the
+ * prompt in future CLI runs.
+ */
+export async function loadApprovedCommandIntents(): Promise<string[]> {
+  const profile = await loadProfile();
+  return profile?.approvedCommandIntents ?? [];
+}
+
+/**
+ * Records an intent approved with "Approve all" in the profile so future CLI
+ * runs auto-approve commands with the same intent.
+ */
+export async function addApprovedCommandIntent(intent: string): Promise<void> {
+  const existing = (await loadProfile()) ?? {};
+  const intents = existing.approvedCommandIntents ?? [];
+  if (intents.includes(intent)) return;
+  await saveProfile({
+    ...existing,
+    approvedCommandIntents: [...intents, intent].sort(),
+  });
+}

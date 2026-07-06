@@ -1,0 +1,9 @@
+# Terraform working files
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Local variable values (may contain the db master password)
+terraform.tfvars
+*.auto.tfvars

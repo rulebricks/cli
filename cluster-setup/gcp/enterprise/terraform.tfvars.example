@@ -1,0 +1,30 @@
+# Copy to terraform.tfvars and edit. Only project_id is required; everything
+# else has working defaults. The three managed data-service toggles default
+# to false (Kafka/Valkey/Postgres run in-cluster) - flip the ones you want
+# managed. Any combination is valid.
+
+project_id = "my-project"
+region     = "us-central1"
+
+cluster_name = "rulebricks-cluster"
+
+# --- Kubernetes API exposure ---------------------------------------------------
+# enable_private_endpoint = true          # VPC-only API (needs VPN/bastion)
+# master_authorized_cidrs = ["10.0.0.0/8"]
+
+# --- Managed Kafka (Google Cloud Managed Service for Apache Kafka) -------------
+# enable_managed_kafka      = true
+# kafka_vcpus               = 4
+# kafka_memory_gb           = 16
+# kafka_solution_partitions = 128
+
+# --- Managed Redis (Memorystore for Redis, STANDARD_HA) ------------------------
+# enable_managed_redis = true
+# redis_memory_size_gb = 4
+
+# --- Managed database (Cloud SQL for PostgreSQL 17) ----------------------------
+# enable_managed_database = true
+# db_tier                 = "db-custom-2-8192"
+# db_high_availability    = true
+# db_master_password: pass via environment, never commit it:
+#   export TF_VAR_db_master_password='<strong-password>'

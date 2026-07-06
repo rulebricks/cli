@@ -21,19 +21,25 @@ Parameters:
     Default: "1.34"
   NodeInstanceType:
     Type: String
-    Default: c7i.xlarge
+    # m7i (4 GiB/vCPU) over c7i (2 GiB/vCPU): the chart's steady-state request
+    # floor is ~10 vCPU / ~23 GiB, i.e. ~2.3 GiB per core before BestEffort
+    # headroom, so compute-optimized nodes run out of memory first.
+    Default: m7i.xlarge
   NodeDesiredCapacity:
     Type: Number
-    Default: 2
+    # 3 nodes (12 vCPU / 48 GiB) fit the chart's ~10 vCPU / ~23 GiB steady-state
+    # request floor with headroom; 2 nodes forced a scale-up mid-install.
+    Default: 3
   NodeMinSize:
     Type: Number
-    Default: 2
+    Default: 3
   NodeMaxSize:
     Type: Number
-    # Core services need only 2-4 small nodes; burst capacity lives in the
+    # Core services need only 3-6 small nodes; burst capacity lives in the
     # dedicated burst nodegroup, and a low core ceiling steers the autoscaler
-    # there when the worker fleet scales out.
-    Default: 4
+    # there when the worker fleet scales out. 6 leaves room for HPS scaling
+    # 3->8 (+5 vCPU of requests), which stays on the core pool.
+    Default: 6
   NodeVolumeSizeGiB:
     Type: Number
     Default: 50
@@ -51,11 +57,13 @@ Parameters:
       of the box, keeping the scaled-out fleet off the core nodes.
   BurstInstanceType:
     Type: String
-    Default: c7i.4xlarge
+    Default: m7i.4xlarge
     Description: >-
-      Instance type for the burst nodegroup. Default 16 vCPU: 2x4 vCPU core
-      floor + 16 = 24 vCPU running steady-state at full burst, and exactly
-      32 vCPU even with the core nodegroup at its 4-node max.
+      Instance type for the burst nodegroup. Default 16 vCPU / 64 GiB: 3x4 vCPU
+      core floor + 16 = 28 vCPU running steady-state at full burst, and 40 vCPU
+      with the core nodegroup at its 6-node max. The 64 GiB (4 GiB/vCPU) matters
+      as much as the cores: the worker fleet requests 1 GiB per pod, so a 64-pod
+      fleet needs ~64 GiB - a c7i.4xlarge (32 GiB) caps out near 28 workers.
   BurstNodeMaxSize:
     Type: Number
     Default: 1
@@ -189,6 +197,17 @@ Resources:
       ClusterName: !Ref Cluster
       AddonName: aws-ebs-csi-driver
 
+  # Resource Metrics API (metrics.k8s.io). EKS does NOT ship this by default,
+  # and without it every CPU/memory-based autoscaler is inert: the chart's KEDA
+  # cpu triggers (the ONLY scaling signal under MSK IAM token auth, where Kafka
+  # lag triggers are skipped) and the Traefik HPA all fail with
+  # FailedGetResourceMetric.
+  MetricsServerAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      ClusterName: !Ref Cluster
+      AddonName: metrics-server
+
   NodeGroup:
     Type: AWS::EKS::Nodegroup
     Properties:
@@ -200,7 +219,7 @@ Resources:
         - !Ref SubnetB
       InstanceTypes:
         - !Ref NodeInstanceType
-      AmiType: AL2023_x86_64_STANDARD # c7i = Intel/x86
+      AmiType: AL2023_x86_64_STANDARD # m7i = Intel/x86
       DiskSize: !Ref NodeVolumeSizeGiB
       ScalingConfig:
         DesiredSize: !Ref NodeDesiredCapacity

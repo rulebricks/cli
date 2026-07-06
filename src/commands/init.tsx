@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { Box, Text, useApp, useStdout } from "ink";
 import {
   WizardProvider,
@@ -38,27 +38,40 @@ import {
   extractProfileFromConfig,
 } from "../lib/config.js";
 import {
-  buildHelmValues,
+  buildConfigureValues,
   generateHelmValues,
-  mergeHelmValues,
 } from "../lib/helmValues.js";
 import { assertValidHelmValues } from "../lib/validateValues.js";
 import { ProfileConfig } from "../types/index.js";
 import {
   getActiveWizardSteps,
+  getConfigureSections,
+  WIZARD_STEP_ORDER,
   WizardStepId,
 } from "../lib/wizardSteps.js";
+import { SectionMenu } from "../components/Wizard/SectionMenu.js";
 
 interface InitWizardProps {
   initialName?: string;
   initialState?: WizardState;
-  mode?: "create" | "redeploy";
+  mode?: "create" | "configure";
   onSaveComplete?: () => void;
   profile?: ProfileConfig | null;
 }
 
 // Define step IDs for conditional navigation
 type StepId = WizardStepId;
+
+// In configure mode the section menu is the hub between edits.
+type ControllerStep = StepId | "menu";
+
+// Sections whose completion must flow into a dependent step (when active)
+// before returning to the configure menu, so required follow-up values are
+// collected just like in the linear create wizard.
+const CONFIGURE_STEP_CHAIN: Partial<Record<StepId, StepId>> = {
+  database: "database-creds",
+  features: "feature-config",
+};
 
 const STEP_INFO: Record<StepId, { title: string; description: string }> = {
   cloud: { title: "Cloud Provider", description: "Select your cloud provider" },
@@ -97,7 +110,7 @@ const STEP_INFO: Record<StepId, { title: string; description: string }> = {
 };
 
 interface WizardStepControllerProps {
-  mode: "create" | "redeploy";
+  mode: "create" | "configure";
   onSaveComplete?: () => void;
 }
 
@@ -105,12 +118,16 @@ function WizardStepController({
   mode,
   onSaveComplete,
 }: WizardStepControllerProps) {
-  const { state, dispatch, toConfig, configIssues } = useWizard();
+  const { state, toConfig, configIssues } = useWizard();
   const { exit } = useApp();
   const { write } = useStdout();
   const { colors } = useTheme();
-  const [currentStep, setCurrentStep] = useState<StepId>(
-    mode === "redeploy" ? "domain" : "cloud",
+  const [currentStep, setCurrentStep] = useState<ControllerStep>(
+    mode === "configure" ? "menu" : "cloud",
+  );
+  // Sections the user has walked through this session (configure mode only).
+  const [editedSections, setEditedSections] = useState<ReadonlySet<StepId>>(
+    () => new Set(),
   );
   const [saving, setSaving] = useState(false);
   const [complete, setComplete] = useState(false);
@@ -151,21 +168,57 @@ function WizardStepController({
 
   // Handle navigation after state updates - this ensures getActiveSteps has the latest state
   useEffect(() => {
-    if (pendingNav) {
-      const steps = getActiveSteps();
-      const currentIndex = steps.indexOf(currentStep);
+    if (!pendingNav) return;
 
-      if (pendingNav === "next" && currentIndex < steps.length - 1) {
+    if (mode === "configure") {
+      const nav = pendingNav;
+      setPendingNav(null);
+      if (currentStep === "menu") return;
+
+      if (nav === "back") {
+        // Esc backs out of a section without treating it as updated.
         setNavDirection("forward");
-        setCurrentStep(steps[currentIndex + 1]);
-      } else if (pendingNav === "back" && currentIndex > 0) {
-        setNavDirection("back");
-        setCurrentStep(steps[currentIndex - 1]);
+        setCurrentStep("menu");
+        return;
       }
 
-      setPendingNav(null);
+      setEditedSections((prev) => new Set(prev).add(currentStep));
+      const dependent = CONFIGURE_STEP_CHAIN[currentStep];
+      setNavDirection("forward");
+      setCurrentStep(
+        dependent && getActiveSteps().includes(dependent) ? dependent : "menu",
+      );
+      return;
     }
-  }, [pendingNav, currentStep, getActiveSteps]);
+
+    const steps = getActiveSteps();
+    const currentIndex = steps.indexOf(currentStep as StepId);
+
+    if (currentIndex === -1) {
+      // The current step fell out of the active list (an earlier answer
+      // changed), so land on the nearest surviving step in the requested
+      // direction instead of freezing.
+      const position = WIZARD_STEP_ORDER.indexOf(currentStep as StepId);
+      const fallback =
+        pendingNav === "next"
+          ? steps.find((s) => WIZARD_STEP_ORDER.indexOf(s) > position)
+          : [...steps]
+              .reverse()
+              .find((s) => WIZARD_STEP_ORDER.indexOf(s) < position);
+      setNavDirection(pendingNav === "next" ? "forward" : "back");
+      setCurrentStep(
+        fallback ?? steps[pendingNav === "next" ? steps.length - 1 : 0],
+      );
+    } else if (pendingNav === "next" && currentIndex < steps.length - 1) {
+      setNavDirection("forward");
+      setCurrentStep(steps[currentIndex + 1]);
+    } else if (pendingNav === "back" && currentIndex > 0) {
+      setNavDirection("back");
+      setCurrentStep(steps[currentIndex - 1]);
+    }
+
+    setPendingNav(null);
+  }, [pendingNav, currentStep, getActiveSteps, mode]);
 
   // Request navigation - will be processed after React renders with updated state
   const goNext = useCallback(() => {
@@ -203,12 +256,14 @@ function WizardStepController({
     setSaving(true);
     try {
       if (await deploymentExists(config.name)) {
-        if (mode === "redeploy") {
-          await saveRedeployValues(config);
+        if (mode === "configure") {
+          await saveConfigureValues(config);
           await saveDeploymentConfig(config);
           const profileData = extractProfileFromConfig(config);
           await updateProfile(profileData);
+          setComplete(true);
           onSaveComplete?.();
+          setTimeout(() => exit(), 4000);
           return;
         }
 
@@ -220,7 +275,9 @@ function WizardStepController({
       }
 
       await saveDeploymentConfig(config);
-      await generateHelmValues(config);
+      // k8s secret mode keeps plaintext secrets out of the generated values;
+      // deploy creates the referenced Kubernetes Secrets before Helm runs.
+      await generateHelmValues(config, { secretMode: "k8s" });
 
       // Save configuration values to profile for future deployments
       const profileData = extractProfileFromConfig(config);
@@ -237,11 +294,10 @@ function WizardStepController({
     }
   }, [toConfig, configIssues, state, exit, onSaveComplete, mode]);
 
-  async function saveRedeployValues(config: ReturnType<typeof toConfig>) {
+  async function saveConfigureValues(config: ReturnType<typeof toConfig>) {
     if (!config) return;
     const existingValues = (await loadHelmValues(config.name)) ?? {};
-    const generatedValues = buildHelmValues(config);
-    const mergedValues = mergeHelmValues(existingValues, generatedValues);
+    const mergedValues = buildConfigureValues(existingValues, config);
     // Guardrail: a merge with stale manual edits must still satisfy the chart.
     assertValidHelmValues(mergedValues);
     await saveHelmValues(config.name, mergedValues);
@@ -249,9 +305,9 @@ function WizardStepController({
 
   // Get step progress
   const steps = getActiveSteps();
-  const stepNumber = steps.indexOf(currentStep) + 1;
+  const stepNumber = Math.max(1, steps.indexOf(currentStep as StepId) + 1);
   const totalSteps = steps.length;
-  const stepInfo = STEP_INFO[currentStep];
+  const stepInfo = currentStep === "menu" ? null : STEP_INFO[currentStep];
 
   // Completion screen
   if (complete) {
@@ -269,7 +325,9 @@ function WizardStepController({
         <Box flexDirection="column" paddingLeft={2}>
           <Box marginBottom={1}>
             <Text color={colors.success} bold>
-              ✓ Configuration saved successfully!
+              {mode === "configure"
+                ? "✓ Configuration updated!"
+                : "✓ Configuration saved successfully!"}
             </Text>
           </Box>
 
@@ -288,20 +346,32 @@ function WizardStepController({
           <Box flexDirection="column" marginTop={1}>
             <Text bold>Next steps:</Text>
             <Box marginLeft={2} flexDirection="column">
-              <Text color={colors.muted}>
-                1. Run{" "}
-                <Text color={colors.accent}>
-                  rulebricks deploy {state.name}
-                </Text>{" "}
-                to deploy
-              </Text>
-              <Text color={colors.muted}>
-                2. Configure your DNS records when prompted
-              </Text>
-              <Text color={colors.muted}>
-                3. Access Rulebricks at{" "}
-                <Text color={colors.accent}>https://{state.domain}</Text>
-              </Text>
+              {mode === "configure" ? (
+                <Text color={colors.muted}>
+                  Run{" "}
+                  <Text color={colors.accent}>
+                    rulebricks deploy {state.name}
+                  </Text>{" "}
+                  to apply your changes
+                </Text>
+              ) : (
+                <>
+                  <Text color={colors.muted}>
+                    1. Run{" "}
+                    <Text color={colors.accent}>
+                      rulebricks deploy {state.name}
+                    </Text>{" "}
+                    to deploy
+                  </Text>
+                  <Text color={colors.muted}>
+                    2. Configure your DNS records when prompted
+                  </Text>
+                  <Text color={colors.muted}>
+                    3. Access Rulebricks at{" "}
+                    <Text color={colors.accent}>https://{state.domain}</Text>
+                  </Text>
+                </>
+              )}
             </Box>
           </Box>
 
@@ -341,35 +411,54 @@ function WizardStepController({
 
   // Render current step
   const renderStep = () => {
+    if (currentStep === "menu") {
+      return (
+        <SectionMenu
+          sections={getConfigureSections(state).map((id) => ({
+            id,
+            title: STEP_INFO[id].title,
+            description: STEP_INFO[id].description,
+            edited: editedSections.has(id),
+          }))}
+          onSelect={(id) => {
+            setNavDirection("forward");
+            setCurrentStep(id);
+          }}
+          onReview={() => {
+            setNavDirection("forward");
+            setCurrentStep("review");
+          }}
+          onExit={() => exit()}
+        />
+      );
+    }
+
+    const nav = { onComplete: goNext, onBack: goBack };
     switch (currentStep) {
       case "cloud":
-        return <CloudProviderStep onComplete={goNext} onBack={goBack} />;
+        return <CloudProviderStep {...nav} entryDirection={navDirection} />;
       case "domain":
-        return <DomainStep onComplete={goNext} onBack={goBack} />;
+        return <DomainStep {...nav} entryDirection={navDirection} />;
       case "smtp":
-        return <SMTPStep onComplete={goNext} onBack={goBack} />;
+        return <SMTPStep {...nav} entryDirection={navDirection} />;
       case "database":
-        return <DatabaseStep onComplete={goNext} onBack={goBack} />;
+        return <DatabaseStep {...nav} entryDirection={navDirection} />;
       case "database-creds":
-        return <SupabaseCredentialsStep onComplete={goNext} onBack={goBack} />;
-      case "external-services":
-        return <ExternalServicesStep onComplete={goNext} onBack={goBack} />;
-      case "features":
-        return <FeaturesStep onComplete={goNext} onBack={goBack} />;
-      case "storage":
-        return <StorageStep onComplete={goNext} onBack={goBack} />;
-      case "observability":
-        return <ObservabilityStep onComplete={goNext} onBack={goBack} />;
-      case "feature-config":
         return (
-          <FeatureConfigStep
-            onComplete={goNext}
-            onBack={goBack}
-            entryDirection={navDirection}
-          />
+          <SupabaseCredentialsStep {...nav} entryDirection={navDirection} />
         );
+      case "external-services":
+        return <ExternalServicesStep {...nav} entryDirection={navDirection} />;
+      case "features":
+        return <FeaturesStep {...nav} />;
+      case "storage":
+        return <StorageStep {...nav} entryDirection={navDirection} />;
+      case "observability":
+        return <ObservabilityStep {...nav} entryDirection={navDirection} />;
+      case "feature-config":
+        return <FeatureConfigStep {...nav} entryDirection={navDirection} />;
       case "version":
-        return <VersionStep onComplete={goNext} onBack={goBack} />;
+        return <VersionStep {...nav} entryDirection={navDirection} />;
       case "review":
         return (
           <ReviewStep
@@ -385,11 +474,23 @@ function WizardStepController({
 
   return (
     <AppShell title="Rulebricks Configuration">
-      <ProgressHeader
-        currentStep={stepNumber}
-        totalSteps={totalSteps}
-        stepTitle={stepInfo?.title || "Complete"}
-      />
+      {mode === "configure" ? (
+        // Step counts are meaningless when hopping between sections from the
+        // menu, so show just the section title while editing.
+        stepInfo && (
+          <Box marginBottom={1}>
+            <Text color={colors.muted}>
+              Updating: <Text color="white">{stepInfo.title}</Text>
+            </Text>
+          </Box>
+        )
+      ) : (
+        <ProgressHeader
+          currentStep={stepNumber}
+          totalSteps={totalSteps}
+          stepTitle={stepInfo?.title || "Complete"}
+        />
+      )}
 
       <Box marginTop={1}>{renderStep()}</Box>
     </AppShell>

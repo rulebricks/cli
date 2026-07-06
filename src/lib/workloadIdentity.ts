@@ -83,6 +83,46 @@ export function isAwsPodIdentityTrustPolicyInvalid(stderr: string): boolean {
   return /InvalidParameterException/i.test(stderr) && /Trust policy/i.test(stderr);
 }
 
+/**
+ * True when an IAM trust policy document (as returned by `aws iam get-role`)
+ * allows the EKS Pod Identity service principal to assume the role. This is
+ * what distinguishes a workload role from e.g. an EKS control-plane role
+ * (trusts eks.amazonaws.com) or a legacy IRSA role (Federated OIDC trust).
+ */
+export function awsTrustPolicyAllowsPodIdentity(document: unknown): boolean {
+  if (!document || typeof document !== "object") return false;
+  const statements = (document as { Statement?: unknown }).Statement;
+  const list = Array.isArray(statements)
+    ? statements
+    : statements
+      ? [statements]
+      : [];
+  return list.some((statement) => {
+    if (!statement || typeof statement !== "object") return false;
+    const s = statement as {
+      Effect?: unknown;
+      Principal?: { Service?: unknown };
+      Action?: unknown;
+    };
+    if (s.Effect !== "Allow") return false;
+    const service = s.Principal?.Service;
+    const services = Array.isArray(service) ? service : [service];
+    if (!services.includes("pods.eks.amazonaws.com")) return false;
+    const action = s.Action;
+    const actions = Array.isArray(action) ? action : [action];
+    return actions.some(
+      (a) => a === "sts:AssumeRole" || a === "sts:*" || a === "*",
+    );
+  });
+}
+
+/** Extracts the role name from an IAM role ARN (path segments dropped). */
+export function awsRoleNameFromArn(roleArn: string): string {
+  const afterRole = roleArn.split(":role/")[1] ?? roleArn;
+  const segments = afterRole.split("/");
+  return segments[segments.length - 1] || roleArn;
+}
+
 function awsPodIdentityUnsupportedMessage(stderr: string): string {
   const detail = stderr.trim().split("\n").slice(0, 4).join("\n");
   return [
@@ -112,6 +152,23 @@ function awsPodIdentityUnsupportedMessage(stderr: string): string {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function awsPodIdentityAgentMissingMessage(
+  cluster: string,
+  region: string,
+): string {
+  return [
+    `The EKS cluster ${cluster} does not have the eks-pod-identity-agent add-on installed.`,
+    "",
+    "Rulebricks binds workload IAM roles through EKS Pod Identity. Without the",
+    "agent, the associations are created but pods never receive credentials,",
+    "which surfaces later as authorization errors at runtime.",
+    "",
+    "Clusters provisioned by Rulebricks cluster-setup include the add-on. For a",
+    "bring-your-own cluster, install it and rerun the deploy:",
+    `  aws eks create-addon --cluster-name ${cluster} --addon-name eks-pod-identity-agent --region ${region}`,
+  ].join("\n");
 }
 
 function awsPodIdentityInvalidTrustMessage(input: {
@@ -218,7 +275,6 @@ export function plannedBindings(config: DeploymentConfig): SubjectBinding[] {
         ? rw.clientId
         : undefined;
   if (
-    config.features.monitoring?.enabled &&
     rw &&
     rw.destination !== "generic" &&
     rw.destination !== "grafana-cloud" &&
@@ -277,37 +333,89 @@ async function ensureAzure(
   }
 
   const intent = "Configure workload identity (Azure)";
-  const issuerRes = await run(
-    `az aks show --name ${shq(cluster)} --resource-group ${shq(rg)} --query oidcIssuerProfile.issuerUrl --output tsv`,
+  const profileRes = await run(
+    `az aks show --name ${shq(cluster)} --resource-group ${shq(rg)} ` +
+      `--query "{issuer: oidcIssuerProfile.issuerUrl, workloadIdentityEnabled: securityProfile.workloadIdentity.enabled}" --output json`,
     { intent, provider: "azure" },
   );
-  const issuer = issuerRes.stdout.trim();
+  let issuer = "";
+  let workloadIdentityEnabled: unknown;
+  try {
+    const profile = JSON.parse(profileRes.stdout) as {
+      issuer?: unknown;
+      workloadIdentityEnabled?: unknown;
+    };
+    issuer = typeof profile.issuer === "string" ? profile.issuer.trim() : "";
+    workloadIdentityEnabled = profile.workloadIdentityEnabled;
+  } catch {
+    // Fall through to the issuer error below with the CLI stderr.
+  }
   if (!issuer) {
     throw new Error(
-      `Could not read the AKS OIDC issuer for ${cluster}/${rg}. Ensure the cluster has the OIDC issuer enabled. (${issuerRes.stderr.trim()})`,
+      [
+        `Could not read the AKS OIDC issuer for ${cluster}/${rg}. Ensure the cluster has the OIDC issuer enabled:`,
+        `  az aks update --name ${cluster} --resource-group ${rg} --enable-oidc-issuer --enable-workload-identity`,
+        profileRes.stderr.trim() ? `Azure CLI output:\n${profileRes.stderr.trim()}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  }
+  // Azure has no trust-policy rejection: federated credentials create fine on
+  // a cluster without the workload-identity webhook, and pods simply never
+  // receive tokens (runtime 403s). Block early instead.
+  if (workloadIdentityEnabled !== true) {
+    throw new Error(
+      [
+        `Azure Workload Identity is not enabled on the AKS cluster ${cluster}/${rg}.`,
+        "",
+        "Without it, federated credentials are created but pods never receive",
+        "tokens, which surfaces later as authorization errors at runtime.",
+        "",
+        "Clusters provisioned by Rulebricks cluster-setup enable it. For a",
+        "bring-your-own cluster, enable it and rerun the deploy:",
+        `  az aks update --name ${cluster} --resource-group ${rg} --enable-workload-identity`,
+      ].join("\n"),
     );
   }
 
-  // Resolve identity name once per distinct clientId (principal).
-  const identityNameByClientId = new Map<string, string>();
+  // Resolve identity name + resource group once per distinct clientId. The
+  // lookup is subscription-wide: the wizard offers identities from any
+  // resource group, so a valid identity living outside the cluster's RG must
+  // still resolve here.
+  interface ResolvedIdentity {
+    name: string;
+    resourceGroup: string;
+  }
+  const identityByClientId = new Map<string, ResolvedIdentity>();
   const created: string[] = [];
   const existing: string[] = [];
 
   for (const binding of bindings) {
     const clientId = binding.principal;
-    let identityName = identityNameByClientId.get(clientId);
-    if (!identityName) {
-      const nameRes = await run(
-        `az identity list --resource-group ${shq(rg)} --query "[?clientId=='${clientId}'].name | [0]" --output tsv`,
+    let identity = identityByClientId.get(clientId);
+    if (!identity) {
+      const lookupRes = await run(
+        `az identity list --query "[?clientId=='${clientId}'].{name: name, resourceGroup: resourceGroup} | [0]" --output json`,
         { intent, provider: "azure" },
       );
-      identityName = nameRes.stdout.trim();
-      if (!identityName) {
+      try {
+        const parsed = JSON.parse(lookupRes.stdout) as {
+          name?: string;
+          resourceGroup?: string;
+        } | null;
+        if (parsed?.name && parsed.resourceGroup) {
+          identity = { name: parsed.name, resourceGroup: parsed.resourceGroup };
+        }
+      } catch {
+        // Treated as not found below.
+      }
+      if (!identity) {
         throw new Error(
-          `No user-assigned identity with client ID ${clientId} found in resource group ${rg}. Run cluster-setup first.`,
+          `No user-assigned identity with client ID ${clientId} found in the current subscription. Run cluster-setup first, or check the active subscription (az account show).`,
         );
       }
-      identityNameByClientId.set(clientId, identityName);
+      identityByClientId.set(clientId, identity);
     }
 
     const subject = `system:serviceaccount:${namespace}:${binding.serviceAccount}`;
@@ -315,7 +423,7 @@ async function ensureAzure(
     const ficName = `${namespace}-${binding.serviceAccount}`.slice(0, 120);
 
     const listRes = await run(
-      `az identity federated-credential list --identity-name ${shq(identityName)} --resource-group ${shq(rg)} --query "[?subject=='${subject}'] | length(@)" --output tsv`,
+      `az identity federated-credential list --identity-name ${shq(identity.name)} --resource-group ${shq(identity.resourceGroup)} --query "[?subject=='${subject}'] | length(@)" --output tsv`,
       { intent, provider: "azure" },
     );
     if (listRes.stdout.trim() !== "0" && listRes.stdout.trim() !== "") {
@@ -325,7 +433,7 @@ async function ensureAzure(
 
     const createRes = await run(
       `az identity federated-credential create --name ${shq(ficName)} ` +
-        `--identity-name ${shq(identityName)} --resource-group ${shq(rg)} ` +
+        `--identity-name ${shq(identity.name)} --resource-group ${shq(identity.resourceGroup)} ` +
         `--issuer ${shq(issuer)} --subject ${shq(subject)} ` +
         `--audiences api://AzureADTokenExchange`,
       { intent, provider: "azure", mutating: true },
@@ -360,6 +468,56 @@ async function ensureAws(
   const created: string[] = [];
   const existing: string[] = [];
   const intent = "Configure workload identity (AWS)";
+
+  // Preflight 1: the Pod Identity agent add-on. Without it every association
+  // below is created successfully but pods never receive credentials - a
+  // silent runtime failure. Only a positive "not found" blocks the deploy;
+  // permission errors fall through to the association calls.
+  const addonRes = await run(
+    `aws eks describe-addon --cluster-name ${shq(cluster)} ` +
+      `--addon-name eks-pod-identity-agent --region ${shq(region)} ` +
+      `--query addon.addonName --output text`,
+    { intent, provider: "aws" },
+  );
+  if (addonRes.code !== 0 && /ResourceNotFoundException/i.test(addonRes.stderr)) {
+    throw new Error(awsPodIdentityAgentMissingMessage(cluster, region));
+  }
+
+  // Preflight 2: every distinct role must trust pods.eks.amazonaws.com. This
+  // catches wrong picks (control-plane roles, legacy IRSA roles) before any
+  // association is created, instead of failing partway through the set. A
+  // failed get-role (e.g. no iam:GetRole permission) skips the check; the
+  // create call still reports invalid trust with the same guidance.
+  const checkedRoles = new Map<string, string[]>();
+  for (const binding of bindings) {
+    const subjects = checkedRoles.get(binding.principal) ?? [];
+    subjects.push(`${namespace}/${binding.serviceAccount}`);
+    checkedRoles.set(binding.principal, subjects);
+  }
+  for (const [roleArn, subjects] of checkedRoles) {
+    const roleRes = await run(
+      `aws iam get-role --role-name ${shq(awsRoleNameFromArn(roleArn))} ` +
+        `--query Role.AssumeRolePolicyDocument --output json`,
+      { intent, provider: "aws" },
+    );
+    if (roleRes.code !== 0) continue;
+    let document: unknown;
+    try {
+      document = JSON.parse(roleRes.stdout);
+    } catch {
+      continue;
+    }
+    if (!awsTrustPolicyAllowsPodIdentity(document)) {
+      throw new Error(
+        awsPodIdentityInvalidTrustMessage({
+          stderr: "",
+          subject: subjects.join(", "),
+          roleArn,
+          cluster,
+        }),
+      );
+    }
+  }
 
   for (const binding of bindings) {
     const roleArn = binding.principal;
@@ -431,6 +589,36 @@ async function ensureGcp(
 
   const created: string[] = [];
   const intent = "Configure workload identity (GCP)";
+
+  // Preflight: the GKE cluster must have a Workload Identity pool. Without it
+  // the IAM bindings below are created but pods can never exchange tokens - a
+  // silent runtime failure. Only a positive "pool unset" blocks; a failed
+  // describe (permissions, location mismatch) falls through.
+  const gkeCluster = config.infrastructure.clusterName;
+  const gkeLocation = config.infrastructure.region;
+  if (gkeCluster && gkeLocation) {
+    const poolRes = await run(
+      `gcloud container clusters describe ${shq(gkeCluster)} ` +
+        `--location ${shq(gkeLocation)} --project ${shq(project)} ` +
+        `--format "value(workloadIdentityConfig.workloadPool)"`,
+      { intent, provider: "gcp" },
+    );
+    if (poolRes.code === 0 && poolRes.stdout.trim() === "") {
+      throw new Error(
+        [
+          `GKE Workload Identity is not enabled on the cluster ${gkeCluster}.`,
+          "",
+          "Without it, the IAM bindings are created but pods never receive",
+          "Google credentials, which surfaces later as authorization errors at",
+          "runtime.",
+          "",
+          "Clusters provisioned by Rulebricks cluster-setup enable it. For a",
+          "bring-your-own cluster, enable it and rerun the deploy:",
+          `  gcloud container clusters update ${gkeCluster} --location ${gkeLocation} --project ${project} --workload-pool=${project}.svc.id.goog`,
+        ].join("\n"),
+      );
+    }
+  }
 
   for (const binding of bindings) {
     const gsa = binding.principal;

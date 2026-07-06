@@ -36,28 +36,38 @@ The bucket is encrypted and has public access blocked.
 ## Core cluster parameters
 
 `ClusterName` (`rulebricks-cluster`), `KubernetesVersion` (`1.34`),
-`NodeInstanceType` (`c7i.xlarge`), `NodeDesiredCapacity`/`NodeMinSize`/`NodeMaxSize`
-(`2`/`2`/`4`), `NodeVolumeSizeGiB` (`50`). The standard (core) nodegroup runs
-the always-on services on two to four 4-vCPU nodes; burst capacity lives in
-the dedicated burst nodegroup below.
+`NodeInstanceType` (`m7i.xlarge`), `NodeDesiredCapacity`/`NodeMinSize`/`NodeMaxSize`
+(`3`/`3`/`6`), `NodeVolumeSizeGiB` (`50`). The standard (core) nodegroup runs
+the always-on services on three to six 4-vCPU / 16-GiB nodes. The chart's
+steady-state request floor is ~10 vCPU / ~23 GiB (plus per-node DaemonSets and
+headroom for request-less pods), which is why the floor is 3 nodes and the
+node family is general-purpose `m7i` (4 GiB/vCPU) rather than compute-optimized
+`c7i` (2 GiB/vCPU) — memory runs out first on c-family nodes. The 6-node
+ceiling leaves room for HPS scaling 3 -> 8 (+5 vCPU of requests), which stays
+on the core pool; burst capacity for the worker fleet lives in the dedicated
+burst nodegroup below.
 
 ### Burst worker nodegroup (default on)
 
-`EnableBurstPool` (`"true"`), `BurstInstanceType` (`c7i.4xlarge`, 16 vCPU),
-`BurstNodeMaxSize` (`1`). One large on-demand node that scales 0 -> 1 on
-demand, labeled and tainted `rulebricks.com/pool=burst`: the Rulebricks chart
+`EnableBurstPool` (`"true"`), `BurstInstanceType` (`m7i.4xlarge`, 16 vCPU /
+64 GiB), `BurstNodeMaxSize` (`1`). One large on-demand node that scales 0 -> 1
+on demand, labeled and tainted `rulebricks.com/pool=burst`: the Rulebricks chart
 makes workers tolerate the taint and softly prefer the label out of the box,
 so the scaled-out worker fleet lands here while core services stay on the
-standard nodegroup. Sizing math: 2 x 4 vCPU core floor + 16 vCPU burst =
-24 vCPU running steady-state at full burst, and exactly 32 vCPU even with
-the core nodegroup at its 4-node max. Note: EKS has no parked-VM equivalent of AKS
+standard nodegroup. Sizing math: 3 x 4 vCPU core floor + 16 vCPU burst =
+28 vCPU running steady-state at full burst, and 40 vCPU with the core
+nodegroup at its 6-node max — check your regional on-demand vCPU quota covers
+this before enabling. Memory matters as much as cores here: workers request
+1 GiB each, so the default 64-worker KEDA ceiling needs ~64 GiB — the reason
+for `m7i.4xlarge` over `c7i.4xlarge` (32 GiB, caps out near 28 workers).
+Note: EKS has no parked-VM equivalent of AKS
 Deallocate, so each burst cold-provisions the node (~2-3 min); the warm
 worker floor on the core nodes carries traffic during provisioning, and a
 Karpenter NodePool carrying the same label/taint is the planned fast path.
 
-> `NodeInstanceType` and the node AMI are coupled: `c7i` is x86, so the template
+> `NodeInstanceType` and the node AMI are coupled: `m7i` is x86, so the template
 > uses `AL2023_x86_64_STANDARD`. If you switch to a Graviton/ARM type (e.g.
-> `c8g`), change `AmiType` to `AL2023_ARM_64_STANDARD` or the nodes won't boot.
+> `m8g`), change `AmiType` to `AL2023_ARM_64_STANDARD` or the nodes won't boot.
 
 ## Region
 
@@ -115,6 +125,59 @@ aws cloudformation wait stack-delete-complete \
 The stack is the teardown boundary (analogous to the Azure resource group):
 deleting it removes the cluster, node group, VPC, the IAM role, Pod Identity
 associations, AMP workspace, and the (emptied) bucket.
+
+## Bring your own cluster
+
+If the EKS cluster was **not** created by this stack (Terraform, eksctl, an
+older cluster-setup, ...), the Rulebricks CLI still works, but two things the
+stack normally provides must exist before `rulebricks deploy`:
+
+1. **The Pod Identity agent add-on.** Without it, Pod Identity associations
+   are created successfully but pods never receive credentials:
+
+```bash
+aws eks create-addon --cluster-name <cluster> \
+  --addon-name eks-pod-identity-agent --region <region>
+```
+
+2. **A workload IAM role trusted by EKS Pod Identity.** Do not reuse the
+   cluster or node roles — Pod Identity rejects their trust policies
+   (`InvalidParameterException: Trust policy of the role provided is
+   invalid`), and legacy IRSA roles (OIDC `Federated` trust) fail the same
+   way. Create a dedicated role named `<cluster>-rulebricks` — the CLI wizard
+   preselects it by that name:
+
+```bash
+aws iam create-role --role-name <cluster>-rulebricks \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": { "Service": "pods.eks.amazonaws.com" },
+      "Action": ["sts:AssumeRole", "sts:TagSession"]
+    }]
+  }'
+
+aws iam put-role-policy --role-name <cluster>-rulebricks \
+  --policy-name rulebricks-s3-data \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::<bucket>", "arn:aws:s3:::<bucket>/*"]
+    }]
+  }'
+```
+
+Add `aps:RemoteWrite` on your AMP workspace (metrics remote write) and the
+`kafka-cluster:*` statements from `rulebricks-cluster.cfn.yaml` (MSK IAM auth)
+if you use those paths.
+
+The CLI validates both prerequisites at deploy time and stops with guidance
+when either is missing. A BYO cluster also needs the `aws-ebs-csi-driver` and
+`metrics-server` add-ons (PVCs and CPU-based autoscaling), which this stack
+otherwise installs.
 
 ## Notes
 

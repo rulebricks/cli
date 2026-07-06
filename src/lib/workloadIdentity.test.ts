@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  awsRoleNameFromArn,
+  awsTrustPolicyAllowsPodIdentity,
   isAwsPodIdentityCliUnsupported,
   isAwsPodIdentityTrustPolicyInvalid,
   plannedBindings,
@@ -42,6 +44,95 @@ test("detects AWS Pod Identity invalid trust policy failures", () => {
       "An error occurred (AccessDeniedException) when calling the CreatePodIdentityAssociation operation",
     ),
     false,
+  );
+});
+
+test("accepts the cluster-setup Pod Identity trust policy", () => {
+  // Matches RulebricksRole in cluster-setup/aws/rulebricks-cluster.cfn.yaml.
+  const document = {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Principal: { Service: "pods.eks.amazonaws.com" },
+        Action: ["sts:AssumeRole", "sts:TagSession"],
+      },
+    ],
+  };
+  assert.equal(awsTrustPolicyAllowsPodIdentity(document), true);
+});
+
+test("accepts single-statement / single-action trust policy shapes", () => {
+  const document = {
+    Version: "2012-10-17",
+    Statement: {
+      Effect: "Allow",
+      Principal: { Service: ["pods.eks.amazonaws.com", "eks.amazonaws.com"] },
+      Action: "sts:AssumeRole",
+    },
+  };
+  assert.equal(awsTrustPolicyAllowsPodIdentity(document), true);
+});
+
+test("rejects EKS control-plane and node trust policies", () => {
+  // The failure mode from the field: an EKS cluster service role was selected.
+  const controlPlane = {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Principal: { Service: "eks.amazonaws.com" },
+        Action: "sts:AssumeRole",
+      },
+    ],
+  };
+  const node = {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Principal: { Service: "ec2.amazonaws.com" },
+        Action: "sts:AssumeRole",
+      },
+    ],
+  };
+  assert.equal(awsTrustPolicyAllowsPodIdentity(controlPlane), false);
+  assert.equal(awsTrustPolicyAllowsPodIdentity(node), false);
+});
+
+test("rejects legacy IRSA (OIDC federated) trust policies", () => {
+  const irsa = {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Principal: {
+          Federated:
+            "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
+        },
+        Action: "sts:AssumeRoleWithWebIdentity",
+      },
+    ],
+  };
+  assert.equal(awsTrustPolicyAllowsPodIdentity(irsa), false);
+});
+
+test("rejects malformed trust policy documents", () => {
+  assert.equal(awsTrustPolicyAllowsPodIdentity(null), false);
+  assert.equal(awsTrustPolicyAllowsPodIdentity("not-json-object"), false);
+  assert.equal(awsTrustPolicyAllowsPodIdentity({}), false);
+});
+
+test("extracts role names from ARNs, including paths", () => {
+  assert.equal(
+    awsRoleNameFromArn(
+      "arn:aws:iam::123456789012:role/rulebricks-cluster-rulebricks",
+    ),
+    "rulebricks-cluster-rulebricks",
+  );
+  assert.equal(
+    awsRoleNameFromArn("arn:aws:iam::123456789012:role/teams/data/my-role"),
+    "my-role",
   );
 });
 

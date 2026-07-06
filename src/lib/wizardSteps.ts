@@ -1,16 +1,19 @@
-export type WizardStepId =
-  | "cloud"
-  | "domain"
-  | "smtp"
-  | "database"
-  | "database-creds"
-  | "external-services"
-  | "storage"
-  | "observability"
-  | "features"
-  | "feature-config"
-  | "version"
-  | "review";
+export const WIZARD_STEP_ORDER = [
+  "cloud",
+  "domain",
+  "smtp",
+  "database",
+  "database-creds",
+  "external-services",
+  "storage",
+  "observability",
+  "features",
+  "feature-config",
+  "version",
+  "review",
+] as const;
+
+export type WizardStepId = (typeof WIZARD_STEP_ORDER)[number];
 
 export interface WizardStepState {
   databaseType: string | null;
@@ -27,9 +30,9 @@ export interface WizardStepState {
 
 export function getActiveWizardSteps(
   state: WizardStepState,
-  mode: "create" | "redeploy",
+  mode: "create" | "configure",
 ): WizardStepId[] {
-  const steps: WizardStepId[] = mode === "redeploy" ? [] : ["cloud"];
+  const steps: WizardStepId[] = mode === "configure" ? [] : ["cloud"];
 
   steps.push("domain", "smtp", "database");
 
@@ -58,4 +61,15 @@ export function getActiveWizardSteps(
   steps.push("version", "review");
 
   return steps;
+}
+
+/**
+ * Sections offered on the configure command's entry menu: every active
+ * wizard step except "review", which the menu exposes as its own
+ * "Review & save changes" action.
+ */
+export function getConfigureSections(state: WizardStepState): WizardStepId[] {
+  return getActiveWizardSteps(state, "configure").filter(
+    (step) => step !== "review",
+  );
 }

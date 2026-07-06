@@ -33,9 +33,14 @@ Finally, you will need to have the following tools installed and ready on your m
 Create or select a Kubernetes cluster before running the CLI wizard. If you need a starting point, use the resources in `cluster-setup/`; they provide minimum compatible AWS, Azure, and GCP setup guidance plus optional access checks. Monitoring destinations are configured later by the CLI wizard and Helm values, not by these cluster setup files.
 
 ```bash
-# AWS: optional access check, then create EKS with eksctl
-AWS_REGION=us-east-1 bash cluster-setup/aws/check-aws-access.sh
-cd cluster-setup/aws && eksctl create cluster -f cluster.yaml
+# AWS: optional access check, then create EKS with CloudFormation
+AWS_REGION=us-east-1 bash cluster-setup/aws/check-aws-prereqs.sh
+aws cloudformation create-stack \
+  --stack-name rulebricks-cluster \
+  --region us-east-1 \
+  --template-body file://cluster-setup/aws/rulebricks-cluster.cfn.yaml \
+  --parameters file://cluster-setup/aws/parameters.json \
+  --capabilities CAPABILITY_NAMED_IAM
 
 # Azure: optional access check, then deploy AKS with Bicep
 az login
@@ -44,13 +49,18 @@ AZURE_LOCATION=eastus bash cluster-setup/azure/check-aks-prereqs.sh
 az group create --name rulebricks-rg --location eastus
 az deployment group create \
   --resource-group rulebricks-rg \
-  --template-file cluster-setup/azure/main.bicep \
-  --parameters @cluster-setup/azure/main.parameters.json
+  --template-file cluster-setup/azure/rulebricks-cluster.bicep \
+  --parameters @cluster-setup/azure/parameters.json
 
 # GCP: optional access check, then create GKE with gcloud
 GCP_REGION=us-central1 bash cluster-setup/gcp/check-gke-prereqs.sh
 # Follow cluster-setup/gcp/README.md for the gcloud create commands.
 ```
+
+For enterprise deployments (private networking, managed Kafka/Redis/Postgres
+toggles — all off by default — and hardened defaults), see
+`cluster-setup/aws/enterprise/`, `cluster-setup/azure/enterprise/`, and
+`cluster-setup/gcp/enterprise/`.
 
 After the cluster exists, update kubeconfig, then run `rulebricks init`. The wizard can also refresh kubeconfig for EKS, GKE, or AKS when provider details are available.
 

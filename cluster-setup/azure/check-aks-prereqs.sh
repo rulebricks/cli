@@ -20,7 +20,11 @@ export AZURE_CORE_COLLECT_TELEMETRY=no
 
 LOCATION="${AZURE_LOCATION:-eastus}"
 RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-}"
-REQUIRED_VCPU=8
+# Worst case with template defaults: core pool at its 5-node max
+# (5 x Standard_F4as_v6 = 20 vCPU) + burst node (F16as_v6 = 16 vCPU) = 36.
+# The launch floor is 12 (3 x F4as_v6); this checks the ceiling so a quota
+# surprise never shows up mid-burst.
+REQUIRED_VCPU=36
 VERBOSE="${VERBOSE:-0}"
 
 # Providers needed by the turnkey template. Storage covers decision-log/backup

@@ -189,7 +189,7 @@ function DestroyCommandInner({
           // CRDs (cert-manager/keda/strimzi/kube-prometheus-stack) ship in crds/
           // dirs and are never removed by helm. They are cluster-SHARED, so only
           // purge them when this is the last Rulebricks deployment on the cluster
-          // (or the operator forces --purge) — otherwise deleting a CRD would
+          // (or the operator forces --purge); otherwise deleting a CRD would
           // cascade-delete other deployments' custom resources.
           const purgeCRDs =
             purge === true || (await isLastRulebricksDeployment(releaseName));

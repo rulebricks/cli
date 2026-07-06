@@ -1,4 +1,8 @@
 import { CloudProvider } from "../types/index.js";
+import {
+  addApprovedCommandIntent,
+  loadApprovedCommandIntents,
+} from "./config.js";
 
 export type CommandApprovalDecision = "approve" | "deny";
 export type CommandApprovalScope = "once" | "all-like" | "all";
@@ -42,6 +46,25 @@ const queue: QueuedApproval[] = [];
 const inFlightByCommand = new Map<string, QueuedApproval>();
 const listeners = new Set<Listener>();
 let current: QueuedApproval | null = null;
+let hydration: Promise<void> | null = null;
+
+// Loads intents the user previously approved with "Approve all" from the
+// profile, once per process, before the first prompt decision. Session-only
+// scopes ("once", "all") are never persisted.
+function ensureHydrated(): Promise<void> {
+  if (!hydration) {
+    hydration = loadApprovedCommandIntents()
+      .then((intents) => {
+        for (const intent of intents) {
+          approvedIntents.add(intent);
+        }
+      })
+      .catch(() => {
+        // A missing or unreadable profile just means we prompt as usual.
+      });
+  }
+  return hydration;
+}
 
 function isTty(): boolean {
   return process.stdin.isTTY === true && process.stdout.isTTY === true;
@@ -117,6 +140,9 @@ export function respondToCommandApproval(
     } else if (scope === "all-like") {
       approvedIntents.add(approval.intent);
       completeQueuedByIntent(approval.intent);
+      // Remember the blanket approval across CLI runs. Best-effort: a failed
+      // write only means the user is asked again next run.
+      void addApprovedCommandIntent(approval.intent).catch(() => {});
     }
   }
 
@@ -128,6 +154,9 @@ export function respondToCommandApproval(
 export async function requestCommandApproval(
   req: CommandApprovalRequest,
 ): Promise<CommandApprovalDecision> {
+  if (interactive && isTty()) {
+    await ensureHydrated();
+  }
   if (!shouldPrompt(req)) {
     return "approve";
   }

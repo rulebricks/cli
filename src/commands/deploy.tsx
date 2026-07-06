@@ -35,10 +35,11 @@ import {
 } from "../lib/cloudCli.js";
 import { ensureWorkloadIdentityFederation } from "../lib/workloadIdentity.js";
 import {
-  generateHelmValues,
+  generateHelmValuesPreservingEdits,
   updateHelmValuesForTLS,
 } from "../lib/helmValues.js";
 import { ensureNamespace, applyDeploymentSecrets } from "../lib/secrets.js";
+import { runInstallSequence } from "../lib/deploySequence.js";
 import { CommandDeniedError } from "../lib/commandApproval.js";
 import {
   DeploymentConfig,
@@ -235,18 +236,36 @@ function DeployCommandInner({
       const namespace = getNamespace(cfg.name);
       const releaseName = getReleaseName(cfg.name);
 
-      if (externalDnsEnabled) {
-        if (regenerateValues) {
-          await generateHelmValues(cfg, { tlsEnabled: true, secretMode });
-        }
-        await ensureGeneratedValuesValid();
-        await installOrUpgradeChart(name, {
-          releaseName,
-          namespace,
-          version,
-          wait: true,
-        });
+      await runInstallSequence(
+        {
+          regenerateValues,
+          tlsEnabled: externalDnsEnabled,
+          secretMode,
+        },
+        {
+          // Merge-preserving generation: config-driven values are refreshed
+          // while manual values.yaml edits and configure-only changes survive.
+          generateValues: (tlsEnabled, mode) =>
+            generateHelmValuesPreservingEdits(cfg, {
+              tlsEnabled,
+              secretMode: mode,
+            }),
+          validateValues: ensureGeneratedValuesValid,
+          ensureNamespace: () => ensureNamespace(namespace),
+          applySecrets: async () => {
+            await applyDeploymentSecrets(cfg, namespace);
+          },
+          installChart: () =>
+            installOrUpgradeChart(name, {
+              releaseName,
+              namespace,
+              version,
+              wait: true,
+            }),
+        },
+      );
 
+      if (externalDnsEnabled) {
         setStatus((s) => ({
           ...s,
           helmInstall: "success",
@@ -263,22 +282,6 @@ function DeployCommandInner({
         return;
       }
 
-      if (regenerateValues) {
-        await generateHelmValues(cfg, { tlsEnabled: false, secretMode });
-      }
-      await ensureGeneratedValuesValid();
-      // k8s secret mode: create the namespace + Secrets (idempotent upsert) so
-      // they exist before Helm runs and the chart's secretRef seams resolve.
-      if (secretMode === "k8s") {
-        await ensureNamespace(namespace);
-        await applyDeploymentSecrets(cfg, namespace);
-      }
-      await installOrUpgradeChart(name, {
-        releaseName,
-        namespace,
-        version,
-        wait: true,
-      });
       markSuccess("helmInstall");
 
       if (assumeDnsConfigured) {

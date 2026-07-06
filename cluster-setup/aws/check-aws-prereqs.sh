@@ -19,7 +19,11 @@ fi
 export AWS_PAGER=""
 
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
-REQUIRED_VCPU=8
+# Worst case with template defaults: core nodegroup at its 6-node max
+# (6 x m7i.xlarge = 24 vCPU) + burst node (m7i.4xlarge = 16 vCPU) = 40.
+# The launch floor is 12 (3 x m7i.xlarge); this checks the ceiling so a
+# quota surprise never shows up mid-burst.
+REQUIRED_VCPU=40
 VERBOSE="${VERBOSE:-0}"
 
 ACTIONS=()

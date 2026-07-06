@@ -8,5 +8,16 @@ export {
   useCommandApproval,
   useGatedInput,
 } from "./CommandApproval.js";
+export {
+  MANUAL,
+  WizardSelect,
+  TextField,
+  DiscoveredSelect,
+  CheckboxList,
+  CheckRows,
+  FieldError,
+  StepFooter,
+} from "./fields.js";
+export type { SelectOption, CheckboxItem, CheckRow } from "./fields.js";
 export { ThemeProvider, useTheme, THEMES } from "../../lib/theme.js";
 export type { CommandTheme, ThemeColors } from "../../lib/theme.js";

@@ -1,22 +1,29 @@
 import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
-import TextInput from "ink-text-input";
+import { Box, Text } from "ink";
 import { useWizard } from "../WizardContext.js";
-import { BorderBox } from "../../common/index.js";
+import { useFieldFlow, FlowField } from "../fieldFlow.js";
+import {
+  BorderBox,
+  CheckRows,
+  FieldError,
+  StepFooter,
+  TextField,
+} from "../../common/index.js";
 import { generateSecureSecret } from "../../../lib/validation.js";
 
 interface SupabaseCredentialsStepProps {
   onComplete: () => void;
   onBack: () => void;
+  entryDirection?: "forward" | "back";
 }
-
-type SubStep = "db-password" | "dashboard-user" | "dashboard-pass";
 
 export function SupabaseCredentialsStep({
   onComplete,
   onBack,
+  entryDirection,
 }: SupabaseCredentialsStepProps) {
   const { state, dispatch } = useWizard();
+  const [error, setError] = useState<string | null>(null);
 
   // Secure fallbacks used only when the user leaves a field empty. Generated
   // once so they stay stable across renders. The inputs themselves start empty
@@ -28,7 +35,6 @@ export function SupabaseCredentialsStep({
     () => state.supabaseJwtSecret || generateSecureSecret(64),
   );
 
-  const [subStep, setSubStep] = useState<SubStep>("db-password");
   const [dbPassword, setDbPassword] = useState(state.supabaseDbPassword || "");
   const [dashboardUser, setDashboardUser] = useState(
     state.supabaseDashboardUser || "supabase",
@@ -36,62 +42,109 @@ export function SupabaseCredentialsStep({
   const [dashboardPass, setDashboardPass] = useState(
     state.supabaseDashboardPass || "",
   );
-  const [error, setError] = useState<string | null>(null);
 
-  useInput((input, key) => {
-    if (key.escape) {
-      setError(null);
-      if (subStep === "db-password") {
-        onBack();
-      } else if (subStep === "dashboard-user") {
-        setSubStep("db-password");
-      } else if (subStep === "dashboard-pass") {
-        setSubStep("dashboard-user");
-      }
-    }
+  const fields: FlowField[] = [
+    {
+      id: "db-password",
+      render: (flow) => (
+        <TextField
+          label="Database Password"
+          hint="PostgreSQL database password. Leave empty to generate a secure value."
+          value={dbPassword}
+          onChange={setDbPassword}
+          placeholder="Leave empty to generate a secure value"
+          mask
+          onSubmit={() => {
+            const effective = dbPassword.trim() || defaultDbPass;
+            if (effective.length < 8) {
+              setError("Database password must be at least 8 characters");
+              return;
+            }
+            setDbPassword(effective);
+            setError(null);
+            dispatch({
+              type: "SET_SUPABASE_SELF_HOSTED",
+              config: { supabaseDbPassword: effective },
+            });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "dashboard-user",
+      render: (flow) => (
+        <TextField
+          label="Supabase Studio Username"
+          hint="Username for accessing the Supabase dashboard"
+          value={dashboardUser}
+          onChange={setDashboardUser}
+          placeholder="supabase"
+          onSubmit={() => {
+            if (!dashboardUser) {
+              setError("Dashboard username is required");
+              return;
+            }
+            setError(null);
+            dispatch({
+              type: "SET_SUPABASE_SELF_HOSTED",
+              config: { supabaseDashboardUser: dashboardUser },
+            });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "dashboard-pass",
+      render: (flow) => (
+        <TextField
+          label="Supabase Studio Password"
+          hint="Password for accessing the Supabase dashboard. Leave empty to generate a secure value."
+          value={dashboardPass}
+          onChange={setDashboardPass}
+          placeholder="Leave empty to generate a secure value"
+          mask
+          onSubmit={() => {
+            const effectivePass = dashboardPass.trim() || defaultDashboardPass;
+            if (effectivePass.length < 8) {
+              setError("Dashboard password must be at least 8 characters");
+              return;
+            }
+            setError(null);
+            dispatch({
+              type: "SET_SUPABASE_SELF_HOSTED",
+              config: {
+                supabaseJwtSecret: defaultJwtSecret,
+                supabaseDbPassword: dbPassword.trim() || defaultDbPass,
+                supabaseDashboardUser: dashboardUser,
+                supabaseDashboardPass: effectivePass,
+              },
+            });
+            flow.next();
+          }}
+        />
+      ),
+    },
+  ];
+
+  const flow = useFieldFlow({
+    fields,
+    onDone: onComplete,
+    onExit: onBack,
+    entry: entryDirection === "back" ? "end" : "start",
+    onNavigate: () => setError(null),
   });
 
-  const handleDbPasswordSubmit = () => {
-    // Empty means "use a generated secure value".
-    const effective = dbPassword.trim() || defaultDbPass;
-    if (effective.length < 8) {
-      setError("Database password must be at least 8 characters");
-      return;
+  const progress = () => {
+    const rows: { label: string; value?: string }[] = [];
+    if (flow.current !== "db-password" && dbPassword) {
+      rows.push({ label: "Database password configured" });
     }
-    setDbPassword(effective);
-    setError(null);
-    setSubStep("dashboard-user");
-  };
-
-  const handleDashboardUserSubmit = () => {
-    if (!dashboardUser) {
-      setError("Dashboard username is required");
-      return;
+    if (flow.current === "dashboard-pass") {
+      rows.push({ label: "Dashboard user", value: dashboardUser });
     }
-    setError(null);
-    setSubStep("dashboard-pass");
-  };
-
-  const handleDashboardPassSubmit = () => {
-    // Empty means "use a generated secure value".
-    const effectivePass = dashboardPass.trim() || defaultDashboardPass;
-    if (effectivePass.length < 8) {
-      setError("Dashboard password must be at least 8 characters");
-      return;
-    }
-    setError(null);
-
-    dispatch({
-      type: "SET_SUPABASE_SELF_HOSTED",
-      config: {
-        supabaseJwtSecret: defaultJwtSecret,
-        supabaseDbPassword: dbPassword.trim() || defaultDbPass,
-        supabaseDashboardUser: dashboardUser,
-        supabaseDashboardPass: effectivePass,
-      },
-    });
-
-    onComplete();
+    return rows;
   };
 
   return (
@@ -101,93 +154,15 @@ export function SupabaseCredentialsStep({
           Configure credentials for your self-hosted Supabase instance
         </Text>
         <Text color="yellow" dimColor>
-          ⚠ Save these credentials securely - you'll need them to access
-          Supabase
+          Save these credentials securely - you'll need them to access Supabase
         </Text>
       </Box>
 
-      {subStep === "db-password" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text>Database Password:</Text>
-          <Text color="gray" dimColor>
-            PostgreSQL database password. Leave empty to generate a secure
-            value.
-          </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={dbPassword}
-              onChange={setDbPassword}
-              onSubmit={handleDbPasswordSubmit}
-              placeholder="Leave empty to generate a secure value"
-              mask="*"
-            />
-          </Box>
-        </Box>
-      )}
+      {flow.render()}
 
-      {subStep === "dashboard-user" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text>Supabase Studio Username:</Text>
-          <Text color="gray" dimColor>
-            Username for accessing the Supabase dashboard
-          </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={dashboardUser}
-              onChange={setDashboardUser}
-              onSubmit={handleDashboardUserSubmit}
-              placeholder="supabase"
-            />
-          </Box>
-          <Box marginTop={1} flexDirection="column">
-            <Box>
-              <Text color="green">✓</Text>
-              <Text color="gray"> Database password configured</Text>
-            </Box>
-          </Box>
-        </Box>
-      )}
-
-      {subStep === "dashboard-pass" && (
-        <Box flexDirection="column" marginY={1}>
-          <Text>Supabase Studio Password:</Text>
-          <Text color="gray" dimColor>
-            Password for accessing the Supabase dashboard. Leave empty to
-            generate a secure value.
-          </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={dashboardPass}
-              onChange={setDashboardPass}
-              onSubmit={handleDashboardPassSubmit}
-              placeholder="Leave empty to generate a secure value"
-              mask="*"
-            />
-          </Box>
-          <Box marginTop={1} flexDirection="column">
-            <Box>
-              <Text color="green">✓</Text>
-              <Text color="gray"> Database password configured</Text>
-            </Box>
-            <Box>
-              <Text color="green">✓</Text>
-              <Text color="gray"> Dashboard user: {dashboardUser}</Text>
-            </Box>
-          </Box>
-        </Box>
-      )}
-
-      {error && (
-        <Box marginTop={1}>
-          <Text color="red">✗ {error}</Text>
-        </Box>
-      )}
-
-      <Box marginTop={1}>
-        <Text color="gray" dimColor>
-          Esc to go back • Enter to continue
-        </Text>
-      </Box>
+      <CheckRows rows={progress()} />
+      <FieldError error={error} />
+      <StepFooter />
     </BorderBox>
   );
 }

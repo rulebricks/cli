@@ -8,29 +8,28 @@ import {
   useTheme,
 } from "../components/common/index.js";
 import { InitWizard } from "./init.js";
-import { DeployCommand } from "./deploy.js";
 import {
   configToWizardState,
   type WizardState,
 } from "../components/Wizard/WizardContext.js";
 import {
+  deploymentExists,
+  loadDeploymentConfig,
   loadHelmValues,
   loadProfile,
 } from "../lib/config.js";
-import { loadDeploymentHealth } from "../lib/deploymentHealth.js";
-import { getInstalledChartVersion } from "../lib/helm.js";
+import { formatConfigError } from "../lib/deploymentHealth.js";
 import {
   DeploymentConfig,
   ProfileConfig,
   SecretKeyRef,
 } from "../types/index.js";
 
-interface RedeployCommandProps {
+interface ConfigureCommandProps {
   name: string;
-  chartVersion?: string;
 }
 
-type RedeployStep = "loading" | "wizard" | "deploy" | "error";
+type ConfigureStep = "loading" | "wizard" | "error";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -192,8 +191,9 @@ function applyHelmValuesToConfig(
   }
 
   // External services (managed Redis/Kafka). The saved config is authoritative;
-  // here we reconcile mode + connection details from the live chart values so a
-  // redeploy reflects any drift. Preset/identity fall back to the saved config.
+  // here we reconcile mode + connection details from the saved chart values so
+  // configure reflects manual values.yaml edits. Preset/identity fall back to
+  // the saved config.
   const rb = isRecord(values.rulebricks) ? values.rulebricks : null;
 
   const redisLive = rb && isRecord(rb.redis) ? rb.redis : null;
@@ -311,79 +311,49 @@ function applyHelmValuesToConfig(
   return next;
 }
 
-function RedeployCommandInner({ name, chartVersion }: RedeployCommandProps) {
+function ConfigureCommandInner({ name }: ConfigureCommandProps) {
   const { colors } = useTheme();
-  const [step, setStep] = useState<RedeployStep>("loading");
+  const [step, setStep] = useState<ConfigureStep>("loading");
   const [error, setError] = useState<string | null>(null);
   const [wizardState, setWizardState] = useState<WizardState | null>(null);
   const [profile, setProfile] = useState<ProfileConfig | null>(null);
-  const [resolvedChartVersion, setResolvedChartVersion] = useState<
-    string | undefined
-  >(chartVersion);
 
+  // Configure only edits the local config and values files, so no cluster
+  // access or health check is needed; `rulebricks deploy` applies the result.
   useEffect(() => {
     (async () => {
       try {
-        const health = await loadDeploymentHealth(name, {
-          refreshKubeconfig: true,
-        });
-
-        if (!health.config) {
-          setError(health.configError || `Deployment "${name}" is invalid.`);
-          setStep("error");
-          return;
-        }
-
-        if (health.kind !== "online") {
+        if (!(await deploymentExists(name))) {
           setError(
-            `Deployment "${name}" must be installed and reachable before redeploy. Current status: ${health.kind}.`,
+            `Deployment "${name}" not found. Run "rulebricks init" to create it.`,
           );
           setStep("error");
           return;
         }
 
+        const config = await loadDeploymentConfig(name);
         const [loadedProfile, values] = await Promise.all([
           loadProfile(),
           loadHelmValues(name),
         ]);
-        const hydratedConfig = applyHelmValuesToConfig(health.config, values);
-        const installedChartVersion =
-          chartVersion ||
-          (health.state?.application?.chartVersion !== "latest"
-            ? health.state?.application?.chartVersion
-            : undefined) ||
-          (await getInstalledChartVersion(health.releaseName, health.namespace)) ||
-          undefined;
+        const hydratedConfig = applyHelmValuesToConfig(config, values);
 
         setProfile(loadedProfile);
-        setResolvedChartVersion(installedChartVersion);
         setWizardState(configToWizardState(hydratedConfig, loadedProfile));
         setStep("wizard");
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load redeploy");
+        setError(formatConfigError(err));
         setStep("error");
       }
     })();
-  }, [name, chartVersion]);
-
-  if (step === "deploy") {
-    return (
-      <DeployCommand
-        name={name}
-        version={resolvedChartVersion}
-        regenerateValues={false}
-        assumeDnsConfigured
-      />
-    );
-  }
+  }, [name]);
 
   if (step === "wizard" && wizardState) {
     return (
       <InitWizard
         initialState={wizardState}
-        mode="redeploy"
+        mode="configure"
         profile={profile}
-        onSaveComplete={() => setStep("deploy")}
       />
     );
   }
@@ -392,7 +362,7 @@ function RedeployCommandInner({ name, chartVersion }: RedeployCommandProps) {
     return (
       <ThemeProvider theme="deploy">
         <Logo />
-        <BorderBox title="Redeploy Failed">
+        <BorderBox title="Configure Failed">
           <Box flexDirection="column" marginY={1}>
             <Text color={colors.error} bold>
               ✗ Error
@@ -407,15 +377,15 @@ function RedeployCommandInner({ name, chartVersion }: RedeployCommandProps) {
   return (
     <ThemeProvider theme="deploy">
       <Logo />
-      <BorderBox title="Redeploy">
+      <BorderBox title="Configure">
         <Box marginY={1}>
-          <Spinner label="Checking deployment health..." />
+          <Spinner label="Loading configuration..." />
         </Box>
       </BorderBox>
     </ThemeProvider>
   );
 }
 
-export function RedeployCommand(props: RedeployCommandProps) {
-  return <RedeployCommandInner {...props} />;
+export function ConfigureCommand(props: ConfigureCommandProps) {
+  return <ConfigureCommandInner {...props} />;
 }
