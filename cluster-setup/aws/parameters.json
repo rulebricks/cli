@@ -1,13 +1,43 @@
 [
   { "ParameterKey": "ClusterName", "ParameterValue": "rulebricks-cluster" },
   { "ParameterKey": "KubernetesVersion", "ParameterValue": "1.34" },
+  { "ParameterKey": "ClusterEndpointAccess", "ParameterValue": "PublicAndPrivate" },
+  { "ParameterKey": "AdminPrincipalArn", "ParameterValue": "" },
+  { "ParameterKey": "KmsKeyArn", "ParameterValue": "" },
+
+  { "ParameterKey": "VpcCidr", "ParameterValue": "10.0.0.0/16" },
+  { "ParameterKey": "SingleNatGateway", "ParameterValue": "true" },
+  { "ParameterKey": "EnableVpcInterfaceEndpoints", "ParameterValue": "false" },
+
   { "ParameterKey": "NodeInstanceType", "ParameterValue": "m7i.xlarge" },
   { "ParameterKey": "NodeDesiredCapacity", "ParameterValue": "3" },
   { "ParameterKey": "NodeMinSize", "ParameterValue": "3" },
   { "ParameterKey": "NodeMaxSize", "ParameterValue": "6" },
+  { "ParameterKey": "NodeVolumeSizeGiB", "ParameterValue": "50" },
   { "ParameterKey": "EnableBurstPool", "ParameterValue": "true" },
   { "ParameterKey": "BurstInstanceType", "ParameterValue": "m7i.4xlarge" },
   { "ParameterKey": "BurstNodeMaxSize", "ParameterValue": "1" },
-  { "ParameterKey": "NodeVolumeSizeGiB", "ParameterValue": "50" },
-  { "ParameterKey": "VpcCidr", "ParameterValue": "10.0.0.0/16" }
+
+  { "ParameterKey": "EnableManagedKafka", "ParameterValue": "false" },
+  { "ParameterKey": "KafkaVersion", "ParameterValue": "3.9.x" },
+  { "ParameterKey": "KafkaInstanceType", "ParameterValue": "kafka.m7g.large" },
+  { "ParameterKey": "KafkaBrokerNodes", "ParameterValue": "3" },
+  { "ParameterKey": "KafkaVolumeSizeGiB", "ParameterValue": "100" },
+
+  { "ParameterKey": "EnableManagedRedis", "ParameterValue": "false" },
+  { "ParameterKey": "RedisNodeType", "ParameterValue": "cache.m7g.large" },
+  { "ParameterKey": "RedisEngineVersion", "ParameterValue": "8.2" },
+  { "ParameterKey": "RedisMultiAz", "ParameterValue": "true" },
+
+  { "ParameterKey": "EnableManagedDatabase", "ParameterValue": "false" },
+  { "ParameterKey": "DbInstanceClass", "ParameterValue": "db.m7g.large" },
+  { "ParameterKey": "DbEngineVersion", "ParameterValue": "17" },
+  { "ParameterKey": "DbMasterUsername", "ParameterValue": "postgres" },
+  { "ParameterKey": "DbAllocatedStorageGiB", "ParameterValue": "100" },
+  { "ParameterKey": "DbMaxAllocatedStorageGiB", "ParameterValue": "500" },
+  { "ParameterKey": "DbMultiAz", "ParameterValue": "true" },
+  { "ParameterKey": "DbBackupRetentionDays", "ParameterValue": "7" },
+  { "ParameterKey": "DbDeletionProtection", "ParameterValue": "true" },
+
+  { "ParameterKey": "EnableManagedPrometheus", "ParameterValue": "true" }
 ]
