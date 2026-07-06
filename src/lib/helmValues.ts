@@ -25,12 +25,14 @@ import {
 } from "./chartDefaults.js";
 import {
   SUPABASE_POSTGRES_IMAGE_REPOSITORY,
-  SUPABASE_POSTGRES_IMAGE_TAG,
   DEFAULT_IMAGE_REGISTRY,
   IMAGE_REPOSITORIES,
-  IMAGE_DIGESTS,
-  KAFKA_PROXY_IMAGE,
 } from "./versions.js";
+import {
+  ImageCatalog,
+  bundledImageCatalog,
+  resolveImageCatalog,
+} from "./imageCatalog.js";
 import { createHmac } from "crypto";
 import fs from "fs/promises";
 import YAML from "yaml";
@@ -41,6 +43,14 @@ interface GenerateOptions {
   // Secrets by the CLI and the generated values carry only *.secretRef; no
   // plaintext. "inline": secrets are written into the values (dev / direct-chart).
   secretMode?: "k8s" | "inline";
+  // Infrastructure image tags, resolved from the chart's images/manifest.yaml
+  // (see src/lib/imageCatalog.ts). When omitted, buildHelmValues falls back to
+  // the snapshot bundled with this CLI release; the async generate* entry
+  // points resolve the live catalog (for options.chartVersion) instead.
+  images?: ImageCatalog;
+  // Chart version the values are generated for; used to resolve the matching
+  // image manifest when options.images is not supplied.
+  chartVersion?: string;
 }
 
 // Names of the Kubernetes Secrets the CLI creates in k8s secret mode. Shared by
@@ -335,9 +345,11 @@ function generateVectorSinks(
  * SSL_CERT_FILE (set alongside, see generateVectorEnv) covers both the OpenSSL
  * and rustls code paths inside Vector.
  */
-function generateVectorCaBundle(config: DeploymentConfig): Record<string, unknown> {
-  const reg = config.imageRegistry || DEFAULT_IMAGE_REGISTRY;
-  const curlImage = `${reg}/${IMAGE_REPOSITORIES.curl.repository}:${IMAGE_REPOSITORIES.curl.tag}`;
+function generateVectorCaBundle(
+  config: DeploymentConfig,
+  images: ImageCatalog,
+): Record<string, unknown> {
+  const curlImage = images.image("curl", config.imageRegistry).ref;
   return {
     initContainers: [
       {
@@ -589,6 +601,7 @@ function generateClickStackValues(
   storageClass: string,
   infrastructurePodLabels: Record<string, string>,
   operationalDaemonSetTolerations: Array<Record<string, string>>,
+  images: ImageCatalog,
 ): Record<string, unknown> {
   const clickstack = config.features.observability?.clickstack;
   const telemetryRetentionDays =
@@ -613,8 +626,8 @@ function generateClickStackValues(
       enabled,
       image: {
         registry: reg,
-        repository: IMAGE_REPOSITORIES.hyperdx.repository,
-        tag: IMAGE_REPOSITORIES.hyperdx.tag,
+        repository: IMAGE_REPOSITORIES.hyperdx,
+        tag: images.image("hyperdx").tag,
         pullPolicy: "IfNotPresent",
       },
       resources: {
@@ -632,8 +645,8 @@ function generateClickStackValues(
     collector: {
       image: {
         registry: reg,
-        repository: IMAGE_REPOSITORIES.clickstackOtelCollector.repository,
-        tag: IMAGE_REPOSITORIES.clickstackOtelCollector.tag,
+        repository: IMAGE_REPOSITORIES.clickstackOtelCollector,
+        tag: images.image("clickstack-otel-collector").tag,
         pullPolicy: "IfNotPresent",
       },
       memoryLimitMiB: 800,
@@ -663,14 +676,14 @@ function generateClickStackValues(
       enabled,
       image: {
         registry: reg,
-        repository: IMAGE_REPOSITORIES.ferretdb.repository,
-        tag: IMAGE_REPOSITORIES.ferretdb.tag,
+        repository: IMAGE_REPOSITORIES.ferretdb,
+        tag: images.image("ferretdb").tag,
         pullPolicy: "IfNotPresent",
       },
       postgresImage: {
         registry: reg,
-        repository: IMAGE_REPOSITORIES.postgresDocumentdb.repository,
-        tag: IMAGE_REPOSITORIES.postgresDocumentdb.tag,
+        repository: IMAGE_REPOSITORIES.postgresDocumentdb,
+        tag: images.image("postgres-documentdb").tag,
         pullPolicy: "IfNotPresent",
       },
       auth: {
@@ -1233,7 +1246,10 @@ function generateHpsServiceAccount(
  * Top-level kafkaBridge block consumed by the Vector env ConfigMap. Only enabled
  * for AWS MSK IAM, where a kafka-proxy sidecar fronts the brokers for Vector.
  */
-function generateKafkaBridge(config: DeploymentConfig): Record<string, unknown> {
+function generateKafkaBridge(
+  config: DeploymentConfig,
+  images: ImageCatalog,
+): Record<string, unknown> {
   if (!kafkaUsesBridge(config)) {
     return { enabled: false };
   }
@@ -1244,7 +1260,7 @@ function generateKafkaBridge(config: DeploymentConfig): Record<string, unknown> 
     region: ext.sasl?.region ?? "",
     brokers: ext.brokers ?? "",
     localPort: 19092,
-    image: KAFKA_PROXY_IMAGE,
+    image: images.image("kafka-proxy", config.imageRegistry).ref,
     awsRoleArn: ext.identity?.awsRoleArn ?? "",
   };
 }
@@ -1255,6 +1271,7 @@ function generateKafkaBridge(config: DeploymentConfig): Record<string, unknown> 
  */
 function generateVectorExtraContainers(
   config: DeploymentConfig,
+  images: ImageCatalog,
 ): Array<Record<string, unknown>> | undefined {
   if (!kafkaUsesBridge(config)) return undefined;
   const ext = config.externalServices?.kafka?.external ?? {};
@@ -1272,7 +1289,7 @@ function generateVectorExtraContainers(
   return [
     {
       name: "kafka-proxy",
-      image: KAFKA_PROXY_IMAGE,
+      image: images.image("kafka-proxy", config.imageRegistry).ref,
       args: [
         "server",
         ...mappings,
@@ -1310,6 +1327,7 @@ const VECTOR_APP_LOGS_VRL = [
  */
 function generateTracingGlobal(
   config: DeploymentConfig,
+  images: ImageCatalog,
 ): Record<string, unknown> | undefined {
   const tracing = config.features.tracing;
   if (!tracing?.enabled) return undefined;
@@ -1326,8 +1344,8 @@ function generateTracingGlobal(
     collector: {
       image: {
         registry: reg,
-        repository: IMAGE_REPOSITORIES.opentelemetryCollector.repository,
-        tag: IMAGE_REPOSITORIES.opentelemetryCollector.tag,
+        repository: IMAGE_REPOSITORIES.opentelemetryCollector,
+        tag: images.image("opentelemetry-collector").tag,
       },
     },
   };
@@ -1406,6 +1424,7 @@ function generateVectorAgent(
   config: DeploymentConfig,
   podLabels: Record<string, string>,
   tolerations: Array<Record<string, string>>,
+  images: ImageCatalog,
 ): Record<string, unknown> {
   const appLogs = config.features.logging.appLogs;
   if (!appLogs?.enabled) {
@@ -1476,7 +1495,7 @@ function generateVectorAgent(
     // The agent ships logs to customer backends over TLS and needs the same
     // CA-bundle seeding as the decision-log aggregator (hardened image has no
     // system CA store).
-    ...generateVectorCaBundle(config),
+    ...generateVectorCaBundle(config, images),
     customConfig: {
       data_dir: "/vector-data-dir",
       sources: {
@@ -1523,6 +1542,10 @@ export function buildHelmValues(
   }
 
   const { tlsEnabled = true, secretMode = "inline" } = options;
+  // Infrastructure image tags from the chart's images/manifest.yaml. The async
+  // generate* entry points resolve the live catalog for the target chart
+  // version; direct (sync) callers fall back to the bundled snapshot.
+  const images = options.images ?? bundledImageCatalog();
   const useLocalGrafana =
     config.features.monitoring.destination === "local-grafana";
 
@@ -1609,7 +1632,9 @@ export function buildHelmValues(
   // Distributed tracing (self-hosted only). Lives under global so the
   // rulebricks subchart deployments can read it; the collector + traefik are
   // wired below from the same source.
-  const tracingGlobal = clickStackEnabled ? undefined : generateTracingGlobal(config);
+  const tracingGlobal = clickStackEnabled
+    ? undefined
+    : generateTracingGlobal(config, images);
   // Never let the cluster-autoscaler evict single-replica stateful pods
   // during node scale-down; an evicted broker/db stalls the whole pipeline.
   const safeToEvictAnnotations = {
@@ -1686,10 +1711,10 @@ export function buildHelmValues(
       // kube-prometheus-stack and our subcharts; the CLI also rewrites the host into
       // the other Tier-2 charts' native image keys below.
       ...(config.imageRegistry ? { imageRegistry: config.imageRegistry } : {}),
-      // Generated name->sha256 digest map (empty until the helm repo's mirror
-      // pipeline populates IMAGE_DIGESTS). When a name is present the chart image
-      // helper pins @sha256 instead of :tag.
-      imageDigests: IMAGE_DIGESTS,
+      // Generated name->sha256 digest map from the chart image manifest (empty
+      // until the helm repo's mirror pipeline writes digests back). When a name
+      // is present the chart image helper pins @sha256 instead of :tag.
+      imageDigests: images.digests(),
       ...(productVersion && SEMVER_PATTERN.test(productVersion)
         ? { version: productVersion }
         : {}),
@@ -1781,6 +1806,7 @@ export function buildHelmValues(
       storageClass,
       infrastructurePodLabels,
       operationalDaemonSetTolerations,
+      images,
     ),
 
     backup: generateBackupValues(config),
@@ -1936,9 +1962,9 @@ export function buildHelmValues(
     // =============================================================================
     kafka: {
       enabled: !isExternalKafka(config),
-      // Apache Kafka version (must be one the bundled DHI Strimzi operator
-      // supports; DHI strimzi 1.0.1 ships Kafka 4.2.0).
-      version: "4.2.0",
+      // Apache Kafka version, derived from the strimzi-kafka image tag in the
+      // chart manifest so it always matches the broker image the operator ships.
+      version: images.kafkaVersion(),
       // Single combined controller+broker node (KRaft, no ZooKeeper).
       replicas: TOPIC_REPLICATION_FACTOR,
       storage: {
@@ -1982,7 +2008,7 @@ export function buildHelmValues(
     // =============================================================================
     // VECTOR KAFKA BRIDGE (AWS MSK IAM token auth)
     // =============================================================================
-    kafkaBridge: generateKafkaBridge(config),
+    kafkaBridge: generateKafkaBridge(config, images),
 
     clickhouse: {
       enabled: true,
@@ -2207,12 +2233,12 @@ export function buildHelmValues(
       ...coreScheduling,
       serviceAccount: generateVectorServiceAccount(config),
       podLabels: generateVectorPodLabels(config),
-      ...(generateVectorExtraContainers(config)
-        ? { extraContainers: generateVectorExtraContainers(config) }
+      ...(generateVectorExtraContainers(config, images)
+        ? { extraContainers: generateVectorExtraContainers(config, images) }
         : {}),
       // Seed the CA trust bundle the hardened image lacks; without it the
       // decision-log object-storage sink cannot complete a TLS handshake.
-      ...generateVectorCaBundle(config),
+      ...generateVectorCaBundle(config, images),
       service: {
         enabled: true,
         ports: [{ name: "api", port: 8686, protocol: "TCP", targetPort: 8686 }],
@@ -2270,6 +2296,7 @@ export function buildHelmValues(
             config,
             infrastructurePodLabels,
             operationalDaemonSetTolerations,
+            images,
           ),
           // Full-path repository (see vector above) + pull secret.
           image: {
@@ -2347,7 +2374,7 @@ export function buildHelmValues(
                         // global.imageRegistry to the host. Host never in repository.
                         registry: reg,
                         repository: SUPABASE_POSTGRES_IMAGE_REPOSITORY,
-                        tag: SUPABASE_POSTGRES_IMAGE_TAG,
+                        tag: images.image("supabase-postgres").tag,
                         pullPolicy: "IfNotPresent",
                       },
                       podLabels: infrastructurePodLabels,
@@ -2726,13 +2753,28 @@ export function redactSecretsToRefs(
 }
 
 /**
+ * Resolves the image catalog for a generate call: an explicitly provided
+ * catalog wins, otherwise the live manifest for options.chartVersion (or the
+ * latest chart) is fetched — falling back to the bundled snapshot only when
+ * fully offline.
+ */
+async function resolveGenerateImages(
+  config: DeploymentConfig,
+  options: GenerateOptions,
+): Promise<ImageCatalog> {
+  if (options.images) return options.images;
+  return resolveImageCatalog(options.chartVersion ?? config.chartVersion);
+}
+
+/**
  * Generates Helm values from the deployment configuration
  */
 export async function generateHelmValues(
   config: DeploymentConfig,
   options: GenerateOptions = {},
 ): Promise<void> {
-  const values = buildHelmValues(config, options);
+  const images = await resolveGenerateImages(config, options);
+  const values = buildHelmValues(config, { ...options, images });
   // Last-line guardrail: never write/deploy values the chart would reject.
   assertValidHelmValues(values);
   await saveHelmValues(config.name, values);
@@ -2767,8 +2809,9 @@ export function buildDeployValues(
 export function buildConfigureValues(
   existing: Record<string, unknown>,
   config: DeploymentConfig,
+  options: Omit<GenerateOptions, "secretMode"> = {},
 ): Record<string, unknown> {
-  return buildDeployValues(existing, config, { secretMode: "k8s" });
+  return buildDeployValues(existing, config, { ...options, secretMode: "k8s" });
 }
 
 /**
@@ -2780,11 +2823,31 @@ export async function generateHelmValuesPreservingEdits(
   config: DeploymentConfig,
   options: GenerateOptions = {},
 ): Promise<void> {
+  const images = await resolveGenerateImages(config, options);
   const existing = await loadHelmValues(config.name);
-  const values = buildDeployValues(existing, config, options);
+  const values = buildDeployValues(existing, config, { ...options, images });
   // Last-line guardrail: never write/deploy values the chart would reject.
   assertValidHelmValues(values);
   await saveHelmValues(config.name, values);
+}
+
+/**
+ * Reads a deployment's current TLS state from its values so regeneration
+ * preserves it exactly (both full generation and the TLS-toggle path write
+ * global.tlsEnabled; cert-manager.enabled is the pre-existing fallback).
+ * Defaults to true: fully deployed systems run TLS.
+ */
+export function deriveTlsEnabled(
+  values: Record<string, unknown> | null,
+): boolean {
+  const globalTls = (values?.global as Record<string, unknown> | undefined)
+    ?.tlsEnabled;
+  if (typeof globalTls === "boolean") return globalTls;
+  const certManagerEnabled = (
+    values?.["cert-manager"] as Record<string, unknown> | undefined
+  )?.enabled;
+  if (typeof certManagerEnabled === "boolean") return certManagerEnabled;
+  return true;
 }
 
 /**

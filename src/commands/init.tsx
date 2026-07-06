@@ -41,6 +41,7 @@ import {
   buildConfigureValues,
   generateHelmValues,
 } from "../lib/helmValues.js";
+import { resolveImageCatalog } from "../lib/imageCatalog.js";
 import { assertValidHelmValues } from "../lib/validateValues.js";
 import { ProfileConfig } from "../types/index.js";
 import {
@@ -297,7 +298,10 @@ function WizardStepController({
   async function saveConfigureValues(config: ReturnType<typeof toConfig>) {
     if (!config) return;
     const existingValues = (await loadHelmValues(config.name)) ?? {};
-    const mergedValues = buildConfigureValues(existingValues, config);
+    // Live image tags from the chart manifest (falls back to the bundled
+    // snapshot offline; the next deploy re-resolves against the chart).
+    const images = await resolveImageCatalog(config.chartVersion);
+    const mergedValues = buildConfigureValues(existingValues, config, { images });
     // Guardrail: a merge with stale manual edits must still satisfy the chart.
     assertValidHelmValues(mergedValues);
     await saveHelmValues(config.name, mergedValues);

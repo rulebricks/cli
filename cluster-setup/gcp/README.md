@@ -1,195 +1,159 @@
-# GCP Cluster Setup
+# GCP Cluster Setup (GKE)
 
-Use these commands to create a compact GKE cluster that can run Rulebricks before installing with the Rulebricks CLI. GCP does not have an `eksctl`-style cluster YAML or a concise Bicep equivalent; the most familiar native interface is `gcloud`.
+One Terraform module (`*.tf` in this directory). Managed Kafka, Memorystore
+Redis, Cloud SQL Postgres, and the metrics-writer grant are independent
+toggles that **default to off** — the Rulebricks chart runs those services
+in-cluster until you enable them.
 
-For a production/enterprise deployment — private nodes, Dataplane V2, a
-least-privilege node identity, and true/false toggles for Managed Kafka /
-Memorystore / Cloud SQL — use the Terraform stack in `enterprise/` instead of
-the commands below.
+> This IaC is a reference implementation. Treat it as a starting point and
+> customize it to accommodate pre-existing services (VPCs, buckets, databases)
+> or unique performance requirements.
 
-## Files
+## 1. Parameters (variables)
 
-- `check-gke-prereqs.sh` verifies `gcloud` auth, Application Default Credentials, required APIs, selected-region quota, GKE access, `kubectl`, and Helm.
-- `enterprise/` — Terraform stack: everything below plus hardening and the managed data-service toggles (see `enterprise/README.md`).
+Cluster:
 
-## Core Cluster Parameters
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `project_id` | — (required) | Target GCP project |
+| `region` | `us-central1` | Region for all resources |
+| `cluster_name` | `rulebricks-cluster` | Prefixes every resource name; the CLI preselects `<cluster>-rulebricks` / `<cluster>-data-*` by convention |
+| `kubernetes_version` | `1.34` | GKE version prefix |
+| `cluster_deletion_protection` | `true` | Blocks `terraform destroy`; set `false` before teardown |
 
-- Cluster name: `rulebricks-cluster` (`Core cluster parameters` block -> `CLUSTER_NAME`)
-- Region / zone: `us-central1` / `us-central1-a` (`Core cluster parameters` block -> `REGION` / `ZONE`)
-- Kubernetes version: `1.34` (`Core cluster parameters` block -> `KUBERNETES_VERSION`)
-- Initial node count: `2` (`Core cluster parameters` block -> `NODE_COUNT`)
-- Autoscaling range: `2-4` nodes (`Core cluster parameters` block -> `NODE_COUNT` / `MAX_NODE_COUNT`)
-- Machine type: `n2-standard-4` (`Core cluster parameters` block -> `MACHINE_TYPE`)
-- Disk size (GB): `20` (`Core cluster parameters` block -> `DISK_SIZE`)
-- Disk type: `pd-balanced` (`Core cluster parameters` block -> `DISK_TYPE`)
+Networking:
 
-## Check Access
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `subnet_cidr` / `pods_cidr` / `services_cidr` | `10.0.0.0/16` / `10.1.0.0/16` / `10.2.0.0/16` | Node subnet + secondary ranges |
+| `master_cidr` | `172.16.0.0/28` | Control-plane peering range |
+| `master_authorized_cidrs` | `["0.0.0.0/0"]` | Restrict who can reach the Kubernetes API |
+| `enable_private_endpoint` | `false` | Private-only API endpoint (needs VPN/bastion) |
+
+Node pools:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `node_machine_type` | `n4-standard-4` | Core nodes (4 vCPU / 16 GiB) |
+| `node_min_count` / `node_max_count` | `3` / `6` | Core pool autoscaling |
+| `node_disk_type` / `node_disk_size_gb` | `hyperdisk-balanced` / `64` | Node disks |
+| `enable_burst_pool` | `true` | Worker pool, taint `rulebricks.com/pool=burst`, scales 0-N |
+| `burst_machine_type` / `burst_max_count` | `n4-standard-16` / `1` | 16 vCPU / 64 GiB burst nodes |
+
+Metrics:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `enable_metrics_writer` | `false` | Grant `roles/monitoring.metricWriter` for Prometheus remote write to Managed Service for Prometheus |
+
+Managed services (all off by default; the sizing variables below each toggle
+are ignored unless that toggle is `true`, so they cannot create a bad state):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `enable_managed_kafka` | `false` | Managed Service for Apache Kafka instead of in-cluster Kafka |
+| `kafka_vcpus` / `kafka_memory_gb` | `4` / `16` | Kafka cluster capacity |
+| `kafka_topic_prefix` / `kafka_solution_partitions` / `kafka_logs_partitions` | `com.rulebricks.` / `128` / `24` | Topics created here (match the chart config) |
+| `enable_managed_redis` | `false` | Memorystore for Redis (STANDARD_HA) instead of in-cluster Valkey |
+| `redis_memory_size_gb` / `redis_transit_encryption` | `4` / `false` | Capacity / TLS |
+| `enable_managed_database` | `false` | Cloud SQL for PostgreSQL 17 instead of in-cluster Postgres |
+| `db_tier` / `db_disk_size_gb` / `db_high_availability` | `db-custom-2-8192` / `100` / `true` | Instance sizing / HA |
+| `db_master_password` | `""` | **Required** when the DB toggle is on; pass via `TF_VAR_db_master_password` |
+| `db_deletion_protection` | `true` | Blocks destroy of the instance; set `false` before teardown |
+
+## 2. Deployed resources
+
+Always created:
+
+| Resource | Type | Name / notes |
+| --- | --- | --- |
+| Project APIs | `google_project_service` | container, compute, etc. (stay enabled after destroy) |
+| VPC + subnet | `google_compute_network`, `google_compute_subnetwork` | `<cluster>-vpc`, `<cluster>-subnet` (pods/services secondary ranges) |
+| Cloud Router + NAT | `google_compute_router`, `google_compute_router_nat` | `<cluster>-router`, `<cluster>-nat` (private nodes egress) |
+| Firewalls | `google_compute_firewall` x2 | `<cluster>-allow-internal`, `<cluster>-allow-web` (80/443) |
+| Node service account | `google_service_account` | `<cluster>-nodes` + 5 least-privilege project roles (logging, monitoring, artifact registry) |
+| GKE cluster | `google_container_cluster` | `<cluster>`; private nodes, Dataplane V2, Workload Identity pool `<project>.svc.id.goog` |
+| Node pools | `google_container_node_pool` x2 | `core` (3-6 nodes), `burst` (0-N, taint `rulebricks.com/pool=burst`, when `enable_burst_pool`) |
+| Rulebricks service account | `google_service_account` | `<cluster>-rulebricks`; the single workload identity the CLI binds at deploy time |
+| Data bucket | `google_storage_bucket` | `<cluster>-data-<project>`; uniform access, public access prevented; `roles/storage.objectAdmin` for the Rulebricks SA |
+
+Conditionally created:
+
+| Resource | Type | Condition |
+| --- | --- | --- |
+| `roles/monitoring.metricWriter` grant | `google_project_iam_member` | `enable_metrics_writer` |
+| Managed Kafka cluster + 3 topics + client SA | `google_managed_kafka_cluster` (`<cluster>-kafka`), `google_managed_kafka_topic` x3, `google_service_account` (`<cluster>-kafka`) | `enable_managed_kafka` |
+| Memorystore Redis | `google_redis_instance` (`<cluster>-redis`, STANDARD_HA) | `enable_managed_redis` |
+| Cloud SQL PostgreSQL 17 + PSA peering | `google_sql_database_instance` (`<cluster>-db`, `cloudsql.logical_decoding=on`), `google_compute_global_address` + `google_service_networking_connection` (`<cluster>-psa`) | `enable_managed_database` |
+
+## 3. Manual provisioning still required
+
+- **Variables file**: `cp terraform.tfvars.example terraform.tfvars` and set `project_id` (never commit `terraform.tfvars`; it may hold the DB password).
+- **DB password** (only when `enable_managed_database=true`): `export TF_VAR_db_master_password='<strong-password>'`.
+- **Kubeconfig** (after apply): run the `kubeconfig_command` output; requires the `gke-gcloud-auth-plugin` component.
+- **DNS**: point your app domain at the load balancer the chart creates during `rulebricks deploy`.
+- **External Cloud SQL caveat**: the CLI wizard does not prompt for GCP Postgres — set the `postgres_*` outputs in the deployment config file by hand.
+- Workload Identity bindings are **not** manual — the Rulebricks CLI creates them at `rulebricks deploy` time.
+
+### Bring your own cluster
+
+If your GKE cluster was not created by this module, `rulebricks deploy` needs (validated at preflight):
+
+1. A Workload Identity pool on the cluster:
 
 ```bash
-gcloud auth login
-gcloud config set project <project-id>
-gcloud auth application-default login
-GCP_REGION=us-central1 bash check-gke-prereqs.sh
+gcloud container clusters update <cluster> --location <region> \
+  --workload-pool=<project>.svc.id.goog
 ```
 
-If API warnings appear, run the suggested `gcloud services enable` commands and wait for enablement to complete.
-
-## Create The Cluster
-
-Set the core cluster parameters.
+2. A dedicated Google service account with object access on your bucket — never the default compute SA:
 
 ```bash
-PROJECT_ID="$(gcloud config get-value project)"
-CLUSTER_NAME=rulebricks-cluster
-REGION=us-central1
-ZONE=us-central1-a
-KUBERNETES_VERSION="1.34"
-NODE_COUNT=2
-MAX_NODE_COUNT=4
-MACHINE_TYPE=n2-standard-4
-DISK_SIZE=20
-DISK_TYPE=pd-balanced
-```
-
-Enable required APIs:
-
-```bash
-gcloud services enable \
-  compute.googleapis.com \
-  container.googleapis.com \
-  iam.googleapis.com \
-  cloudresourcemanager.googleapis.com \
-  --project "$PROJECT_ID"
-```
-
-Create the VPC, subnet, NAT, and firewall rules:
-
-```bash
-gcloud compute networks create "${CLUSTER_NAME}-vpc" \
-  --project "$PROJECT_ID" \
-  --subnet-mode custom
-
-gcloud compute networks subnets create "${CLUSTER_NAME}-subnet" \
-  --project "$PROJECT_ID" \
-  --region "$REGION" \
-  --network "${CLUSTER_NAME}-vpc" \
-  --range 10.0.0.0/16 \
-  --secondary-range pods=10.1.0.0/16,services=10.2.0.0/16 \
-  --enable-private-ip-google-access
-
-gcloud compute routers create "${CLUSTER_NAME}-router" \
-  --project "$PROJECT_ID" \
-  --region "$REGION" \
-  --network "${CLUSTER_NAME}-vpc"
-
-gcloud compute routers nats create "${CLUSTER_NAME}-nat" \
-  --project "$PROJECT_ID" \
-  --region "$REGION" \
-  --router "${CLUSTER_NAME}-router" \
-  --auto-allocate-nat-external-ips \
-  --nat-all-subnet-ip-ranges
-
-gcloud compute firewall-rules create "${CLUSTER_NAME}-allow-internal" \
-  --project "$PROJECT_ID" \
-  --network "${CLUSTER_NAME}-vpc" \
-  --allow tcp:0-65535,udp:0-65535,icmp \
-  --source-ranges 10.0.0.0/16,10.1.0.0/16,10.2.0.0/16 \
-  --target-tags "gke-${CLUSTER_NAME}"
-
-gcloud compute firewall-rules create "${CLUSTER_NAME}-allow-web" \
-  --project "$PROJECT_ID" \
-  --network "${CLUSTER_NAME}-vpc" \
-  --allow tcp:80,tcp:443 \
-  --source-ranges 0.0.0.0/0 \
-  --target-tags "gke-${CLUSTER_NAME}"
-```
-
-Create the GKE cluster:
-
-```bash
-gcloud container clusters create "$CLUSTER_NAME" \
-  --project "$PROJECT_ID" \
-  --region "$REGION" \
-  --node-locations "$ZONE" \
-  --cluster-version "$KUBERNETES_VERSION" \
-  --release-channel regular \
-  --network "${CLUSTER_NAME}-vpc" \
-  --subnetwork "${CLUSTER_NAME}-subnet" \
-  --enable-ip-alias \
-  --cluster-secondary-range-name pods \
-  --services-secondary-range-name services \
-  --enable-private-nodes \
-  --master-ipv4-cidr 172.16.0.0/28 \
-  --enable-master-authorized-networks \
-  --master-authorized-networks 0.0.0.0/0 \
-  --workload-pool "${PROJECT_ID}.svc.id.goog" \
-  --enable-network-policy \
-  --addons HttpLoadBalancing,HorizontalPodAutoscaling,GcePersistentDiskCsiDriver \
-  --node-pool rulebricks-nodes \
-  --machine-type "$MACHINE_TYPE" \
-  --num-nodes "$NODE_COUNT" \
-  --enable-autoscaling \
-  --min-nodes "$NODE_COUNT" \
-  --max-nodes "$MAX_NODE_COUNT" \
-  --disk-type "$DISK_TYPE" \
-  --disk-size "$DISK_SIZE" \
-  --scopes cloud-platform \
-  --workload-metadata GKE_METADATA \
-  --enable-autorepair \
-  --enable-autoupgrade \
-  --tags "gke-${CLUSTER_NAME}"
-```
-
-Configure kubeconfig:
-
-```bash
-gcloud container clusters get-credentials "$CLUSTER_NAME" \
-  --region "$REGION" \
-  --project "$PROJECT_ID"
-```
-
-Use `rulebricks init` after kubeconfig works, then select this cluster from the GCP cluster list.
-
-## Multi-Node Scheduling
-
-The default configuration starts with two 4-vCPU nodes for a simple standalone deployment and can scale out to four nodes. Splitting the baseline across two nodes provides more Kubernetes pod slots than a single large node while keeping the initial 8-vCPU footprint. Rulebricks worker pods use soft scheduling preferences so Kubernetes can place them away from the rest of the deployment when extra nodes are available. No node labels or taints are required.
-
-## Identity Setup (one service account, one bucket)
-
-All Rulebricks data lives in a single GCS bucket; decision logs and database
-backups are key prefixes (`decision-logs/`, `db-backups/`) within it. Create one
-Google service account and the bucket — this is deployment-independent:
-
-```bash
-PROJECT_ID="$(gcloud config get-value project)"
-CLUSTER_NAME=rulebricks-cluster
-GSA=rulebricks@"$PROJECT_ID".iam.gserviceaccount.com
-BUCKET="$CLUSTER_NAME-data"
-
-gcloud iam service-accounts create rulebricks --project "$PROJECT_ID"
-
-# Create the single data bucket and grant read/write/delete (delete is needed so
-# the backup job can prune backups older than the retention window).
-gcloud storage buckets create "gs://$BUCKET" --project "$PROJECT_ID" --location "$REGION"
-gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
-  --member "serviceAccount:$GSA" \
+gcloud iam service-accounts create <cluster>-rulebricks --project <project>
+gcloud storage buckets add-iam-policy-binding gs://<bucket> \
+  --member "serviceAccount:<cluster>-rulebricks@<project>.iam.gserviceaccount.com" \
   --role roles/storage.objectAdmin
-
-# Prometheus remote write to Google Managed Prometheus (skip if unused).
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:$GSA" \
-  --role roles/monitoring.metricWriter
 ```
 
-The per-namespace `roles/iam.workloadIdentityUser` bindings (for `vector`,
-`<release>-backup`, and `prometheus`) are **created by the Rulebricks CLI at
-`rulebricks deploy` time**, since they're namespace-scoped — so this setup stays
-generic and one cluster can host many deployments. Enter the Google service
-account email (`$GSA`) and the `$BUCKET` name when prompted by the CLI.
+## 4. Deploy
 
-## Notes
+```bash
+bash check-gke-prereqs.sh   # verifies gcloud auth, APIs, quota
 
-- The example creates two `n2-standard-4` nodes initially and enables autoscaling up to four nodes. The initial nodes provide 8 vCPU total for the compact Rulebricks cluster shape while avoiding single-node pod density limits.
-- If you change `REGION`, choose a `ZONE` where the selected machine type is available.
-- Regional GKE clusters can multiply node counts across node locations. This example pins one node location to keep the minimum cluster shape predictable.
-- The public web firewall rule allows HTTP and HTTPS to the node pool so Kubernetes LoadBalancer services and cert-manager HTTP-01 validation can receive internet traffic.
+terraform init
+terraform plan    # review
+terraform apply
+
+# kubeconfig (also printed as the kubeconfig_command output)
+gcloud container clusters get-credentials rulebricks-cluster \
+  --region us-central1 --project <project>
+```
+
+- Timing: ~15-20 min base; Managed Kafka adds ~20 min, Cloud SQL HA ~10-15 min (parallel).
+- Then run `rulebricks init`; Terraform outputs map 1:1 to wizard fields (`terraform output`).
+
+## 5. Take down
+
+```bash
+# 1. Remove Kubernetes-created resources first (load balancers, PVC-backed disks)
+rulebricks destroy <deployment-name>
+
+# 2. Empty the data bucket (destroy fails on non-empty buckets). NOTE: the
+#    bucket holds your decision-log archives (decision-logs/) and database
+#    backups (db-backups/) - emptying it destroys them permanently, so copy
+#    out anything you need first.
+gcloud storage rm -r "gs://rulebricks-cluster-data-<project>/**"
+
+# 3. Lift deletion protection, then destroy
+terraform apply -var cluster_deletion_protection=false -var db_deletion_protection=false
+terraform destroy -var cluster_deletion_protection=false -var db_deletion_protection=false
+```
+
+Resources that linger after `terraform destroy` — check and remove manually:
+
+| Leftover | Why | Cleanup |
+| --- | --- | --- |
+| Kubernetes load balancers / persistent disks | Provisioned by the cluster, not Terraform | `rulebricks destroy` before `terraform destroy`; otherwise delete via the console |
+| Enabled project APIs | `google_project_service` is created with destroy disabled to avoid breaking shared projects | Disable via `gcloud services disable` if truly unused |
+| Private service access peering | The PSA connection (`<cluster>-psa`) can survive if Cloud SQL deletion races the VPC | `gcloud services vpc-peerings delete` |
+| Terraform state | Local `terraform.tfstate` (and `terraform.tfvars` with secrets) | Delete locally once done |

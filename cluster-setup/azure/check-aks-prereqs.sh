@@ -27,7 +27,7 @@ RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-}"
 REQUIRED_VCPU=36
 VERBOSE="${VERBOSE:-0}"
 
-# Providers needed by the turnkey template. Storage covers decision-log/backup
+# Providers needed by the template. Storage covers decision-log/backup
 # blob; Monitor/Insights/AlertsManagement cover the managed-Prometheus path
 # (Azure Monitor workspace + data collection endpoint/rule).
 REQUIRED_PROVIDERS=(
@@ -192,7 +192,7 @@ fi
 # storage account, Monitoring Metrics Publisher on the DCR, Network Contributor
 # on the VNet). Writing role assignments requires Owner or User Access
 # Administrator, NOT just Contributor. This is the single most common reason a
-# turnkey deploy gets partway and then fails on the role-assignment resources.
+# deploy gets partway and then fails on the role-assignment resources.
 if az_run role assignment list --assignee "$SUB_ID" --scope "/subscriptions/$SUB_ID" --query "[0].id" -o tsv; then
   # We can at least read assignments. Probe for write capability via whoami roles.
   if az_run role assignment list --assignee "$(az account show --query user.name -o tsv 2>/dev/null)" \

@@ -1,6 +1,6 @@
 {
   "name": "@rulebricks/cli",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "CLI for deploying and managing private Rulebricks instances",
   "type": "module",
   "bin": {
@@ -13,7 +13,8 @@
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
     "sync-schema": "node scripts/sync-schema.mjs",
-    "test": "npm run build && node --test dist/lib/versions.test.js dist/lib/helmValues.test.js dist/lib/dns.test.js dist/lib/workloadIdentity.test.js dist/lib/clusterSetupDefaults.test.js dist/lib/wizardFlow.test.js dist/lib/deploySequence.test.js",
+    "sync-images": "node scripts/sync-image-manifest.mjs",
+    "test": "npm run build && node --test dist/lib/versions.test.js dist/lib/helm.test.js dist/lib/helmValues.test.js dist/lib/imageCatalog.test.js dist/lib/dns.test.js dist/lib/workloadIdentity.test.js dist/lib/clusterSetupDefaults.test.js dist/lib/wizardFlow.test.js dist/lib/deploySequence.test.js",
     "verify-chart": "npm run build && node scripts/verify-against-chart.mjs"
   },
   "keywords": [

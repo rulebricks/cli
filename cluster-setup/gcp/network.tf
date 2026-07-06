@@ -62,7 +62,7 @@ resource "google_compute_router_nat" "main" {
 
 # --- Firewall -----------------------------------------------------------------
 # GKE manages LB health-check/data rules for LoadBalancer services itself;
-# these two mirror the turnkey guide for reviewability.
+# these two are stated explicitly for reviewability.
 resource "google_compute_firewall" "allow_internal" {
   name    = "${var.cluster_name}-allow-internal"
   network = google_compute_network.main.name

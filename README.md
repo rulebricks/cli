@@ -30,7 +30,7 @@ Finally, you will need to have the following tools installed and ready on your m
 
 ## Cluster Setup
 
-Create or select a Kubernetes cluster before running the CLI wizard. If you need a starting point, use the resources in `cluster-setup/`; they provide minimum compatible AWS, Azure, and GCP setup guidance plus optional access checks. Monitoring destinations are configured later by the CLI wizard and Helm values, not by these cluster setup files.
+Create or select a Kubernetes cluster before running the CLI wizard. If you need a starting point, use the templates in `cluster-setup/` — one per cloud (CloudFormation / Bicep / Terraform), each with independent toggles for managed Kafka/Redis/Postgres that default to off (those services run in-cluster until enabled). Monitoring destinations are configured later by the CLI wizard and Helm values, not by these cluster setup files.
 
 ```bash
 # AWS: optional access check, then create EKS with CloudFormation
@@ -49,18 +49,16 @@ AZURE_LOCATION=eastus bash cluster-setup/azure/check-aks-prereqs.sh
 az group create --name rulebricks-rg --location eastus
 az deployment group create \
   --resource-group rulebricks-rg \
-  --template-file cluster-setup/azure/rulebricks-cluster.bicep \
+  --template-file cluster-setup/azure/main.bicep \
   --parameters @cluster-setup/azure/parameters.json
 
-# GCP: optional access check, then create GKE with gcloud
+# GCP: optional access check, then create GKE with Terraform
 GCP_REGION=us-central1 bash cluster-setup/gcp/check-gke-prereqs.sh
-# Follow cluster-setup/gcp/README.md for the gcloud create commands.
+# Follow cluster-setup/gcp/README.md for the terraform commands.
 ```
 
-For enterprise deployments (private networking, managed Kafka/Redis/Postgres
-toggles — all off by default — and hardened defaults), see
-`cluster-setup/aws/enterprise/`, `cluster-setup/azure/enterprise/`, and
-`cluster-setup/gcp/enterprise/`.
+Each cloud's README documents parameters, every resource deployed, remaining
+manual steps, and thorough take-down commands.
 
 After the cluster exists, update kubeconfig, then run `rulebricks init`. The wizard can also refresh kubeconfig for EKS, GKE, or AKS when provider details are available.
 
@@ -121,6 +119,10 @@ sum(rate(rulebricks_app_frontend_errors_total[5m])) by (source)
 The wizard now collects a shared object storage backend for every deployment. Rulebricks uses separate prefixes in that bucket for decision logs (`decision-logs/`) and self-hosted Supabase database backups (`db-backups/`).
 
 Database backups are optional for self-hosted Supabase deployments. When enabled, the Helm chart schedules Barman base backups according to the configured cron schedule and retention window. You can also run `rulebricks backup <name>` to trigger an on-demand backup, or `rulebricks restore <name>` to list backups in object storage and interactively restore one after confirmation.
+
+## Infrastructure Image Versions
+
+The CLI does not pin infrastructure image tags (Kafka, Supabase, ClickStack, Vector, etc.) in its source. The [Helm chart](https://github.com/rulebricks/helm)'s `images/manifest.yaml` is the single source of truth, and it ships inside every published chart tarball. At values-generation time the CLI resolves the manifest for the exact chart version being installed (with a local cache under `~/.rulebricks/cache/image-manifests/`), so CVE-driven tag bumps in the chart never require a CLI release. A snapshot bundled at build time (`npm run sync-images`) is used only as an offline fallback; the next online deploy re-resolves live data. The app, HPS, and HPS worker images are governed by `global.version` (a user setting) and are unaffected.
 
 ## Notes
 

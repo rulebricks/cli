@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { buildConfigMatrix } from "../dist/lib/configFixtures.js";
 import { buildHelmValues } from "../dist/lib/helmValues.js";
+import { ImageCatalog, parseImageManifest } from "../dist/lib/imageCatalog.js";
 
 const cliRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -194,6 +195,20 @@ if (!fs.existsSync(path.join(chartDir, "Chart.yaml"))) {
   process.exit(1);
 }
 
+// Resolve image tags from the chart checkout's own images/manifest.yaml (the
+// SSOT the deploy path reads out of the published tarball), so values are
+// verified against the exact tags this chart revision expects.
+const manifestPath = path.join(chartDir, "images", "manifest.yaml");
+if (!fs.existsSync(manifestPath)) {
+  console.error(`No images/manifest.yaml found in ${chartDir}.`);
+  console.error("The chart checkout is missing its image manifest (SSOT).");
+  process.exit(1);
+}
+const imageCatalog = new ImageCatalog(
+  parseImageManifest(fs.readFileSync(manifestPath, "utf8"), manifestPath),
+  { source: "chart" },
+);
+
 if (buildDeps) {
   console.log(`Building chart dependencies in ${chartDir} ...`);
   try {
@@ -216,7 +231,7 @@ console.log(
 );
 
 for (const { name, config } of matrix) {
-  const values = buildHelmValues(config);
+  const values = buildHelmValues(config, { images: imageCatalog });
   const valuesPath = path.join(tmpDir, `${name}.yaml`);
   fs.writeFileSync(valuesPath, YAML.stringify(values));
 

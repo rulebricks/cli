@@ -38,6 +38,7 @@ import {
   generateHelmValuesPreservingEdits,
   updateHelmValuesForTLS,
 } from "../lib/helmValues.js";
+import { resolveImageCatalog } from "../lib/imageCatalog.js";
 import { ensureNamespace, applyDeploymentSecrets } from "../lib/secrets.js";
 import { runInstallSequence } from "../lib/deploySequence.js";
 import { CommandDeniedError } from "../lib/commandApproval.js";
@@ -236,6 +237,12 @@ function DeployCommandInner({
       const namespace = getNamespace(cfg.name);
       const releaseName = getReleaseName(cfg.name);
 
+      // Resolve the infrastructure image tags from the chart's own
+      // images/manifest.yaml for the exact chart version being installed
+      // (--chart-version, or whatever the registry currently serves). Resolved
+      // once so both TLS generation phases use the same catalog.
+      const imageCatalog = await resolveImageCatalog(version);
+
       await runInstallSequence(
         {
           regenerateValues,
@@ -249,6 +256,7 @@ function DeployCommandInner({
             generateHelmValuesPreservingEdits(cfg, {
               tlsEnabled,
               secretMode: mode,
+              images: imageCatalog,
             }),
           validateValues: ensureGeneratedValuesValid,
           ensureNamespace: () => ensureNamespace(namespace),

@@ -69,6 +69,46 @@ export async function fetchChartVersions(): Promise<ChartVersion[]> {
 }
 
 /**
+ * Compares two semver-ish strings (local copy: versions.ts imports this
+ * module, so helm.ts cannot import compareVersions from there).
+ */
+function compareChartVersions(a: string, b: string): number {
+  const parse = (v: string) =>
+    v.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
+  const aParts = parse(a);
+  const bParts = parse(b);
+  for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
+    const diff = (aParts[i] ?? 0) - (bParts[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+/**
+ * Parses the GitHub releases API payload for the helm repo into chart
+ * versions: prereleases dropped, v-prefix stripped, newest first.
+ */
+export function parseGitHubReleases(payload: unknown): ChartVersion[] {
+  if (!Array.isArray(payload)) return [];
+  return payload
+    .filter(
+      (r): r is { tag_name: string; published_at: string; prerelease?: boolean } =>
+        !!r &&
+        typeof r === "object" &&
+        typeof (r as { tag_name?: unknown }).tag_name === "string" &&
+        typeof (r as { published_at?: unknown }).published_at === "string",
+    )
+    .filter((r) => !r.prerelease)
+    .map((r) => ({
+      version: r.tag_name.replace(/^v/, ""),
+      appVersion: r.tag_name.replace(/^v/, ""),
+      created: r.published_at,
+      digest: "",
+    }))
+    .sort((a, b) => compareChartVersions(b.version, a.version));
+}
+
+/**
  * Fetches versions from GitHub releases API
  */
 async function fetchVersionsFromGitHub(): Promise<ChartVersion[]> {
@@ -80,22 +120,43 @@ async function fetchVersionsFromGitHub(): Promise<ChartVersion[]> {
       throw new Error(`GitHub API returned ${response.status}`);
     }
 
-    const releases = (await response.json()) as Array<{
-      tag_name: string;
-      published_at: string;
-      prerelease: boolean;
-    }>;
-
-    return releases
-      .filter((r) => !r.prerelease)
-      .map((r) => ({
-        version: r.tag_name.replace(/^v/, ""),
-        appVersion: r.tag_name.replace(/^v/, ""),
-        created: r.published_at,
-        digest: "",
-      }));
+    return parseGitHubReleases(await response.json());
   } catch {
     return [];
+  }
+}
+
+/**
+ * Fetches the full list of chart versions with release dates for the chart
+ * upgrade selector. GitHub releases is the primary source (it carries dates
+ * and the whole history); the OCI registry's `helm show chart` is the
+ * fallback, which can only report the single latest version.
+ */
+export async function fetchAvailableChartVersions(): Promise<ChartVersion[]> {
+  const fromGitHub = await fetchVersionsFromGitHub();
+  if (fromGitHub.length > 0) {
+    return fromGitHub;
+  }
+  return fetchChartVersions();
+}
+
+/**
+ * Gets a release's COMPUTED values (chart defaults + user overrides) as JSON.
+ * Returns null when the release does not exist or helm fails.
+ */
+export async function getReleaseComputedValues(
+  releaseName: string,
+  namespace: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const { stdout } = await execa(
+      "helm",
+      ["get", "values", releaseName, "-n", namespace, "--all", "-o", "json"],
+      { timeout: 30000 },
+    );
+    return JSON.parse(stdout) as Record<string, unknown>;
+  } catch {
+    return null;
   }
 }
 
@@ -282,6 +343,8 @@ export async function upgradeChart(
     version?: string;
     wait?: boolean;
     timeout?: string;
+    /** Roll the release back automatically when the upgrade fails. */
+    atomic?: boolean;
   },
 ): Promise<void> {
   const {
@@ -290,6 +353,7 @@ export async function upgradeChart(
     version,
     wait = true,
     timeout = "15m",
+    atomic = false,
   } = options;
 
   const valuesPath = getHelmValuesPath(deploymentName);
@@ -308,7 +372,12 @@ export async function upgradeChart(
     args.push("--version", version);
   }
 
-  if (wait) {
+  if (atomic) {
+    // --atomic implies --wait; a failed upgrade rolls back to the previous
+    // release instead of leaving it stranded mid-upgrade.
+    args.push("--atomic");
+    args.push("--timeout", timeout);
+  } else if (wait) {
     args.push("--wait");
     args.push("--timeout", timeout);
   }

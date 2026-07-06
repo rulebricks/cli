@@ -23,10 +23,10 @@ import {
   waitForDeploymentReady,
 } from "../lib/kubernetes.js";
 import {
-  RCLONE_IMAGE,
-  SUPABASE_POSTGRES_IMAGE_REPOSITORY,
-  SUPABASE_POSTGRES_IMAGE_TAG,
-} from "../lib/versions.js";
+  getInstalledChartVersion,
+  getReleaseComputedValues,
+} from "../lib/helm.js";
+import { resolveImageCatalog } from "../lib/imageCatalog.js";
 import { DeploymentConfig, getNamespace, getReleaseName } from "../types/index.js";
 
 interface RestoreCommandProps {
@@ -54,7 +54,60 @@ interface DeploymentReplica {
   replicas: number;
 }
 
-const DB_IMAGE = `${SUPABASE_POSTGRES_IMAGE_REPOSITORY}:${SUPABASE_POSTGRES_IMAGE_TAG}`;
+interface RestoreImages {
+  dbImage: string;
+  rcloneImage: string;
+}
+
+// Walks an image dict ({ registry, repository, tag }) out of computed Helm
+// values and builds a full reference. Returns null when the path is absent or
+// malformed so the caller can fall back to the chart image manifest.
+function imageRefFromValues(
+  values: Record<string, unknown> | null,
+  keys: string[],
+): string | null {
+  let node: unknown = values;
+  for (const key of keys) {
+    if (!node || typeof node !== "object") return null;
+    node = (node as Record<string, unknown>)[key];
+  }
+  const image = node as Record<string, unknown> | undefined;
+  if (
+    !image ||
+    typeof image.repository !== "string" ||
+    typeof image.tag !== "string"
+  ) {
+    return null;
+  }
+  const registry = typeof image.registry === "string" && image.registry
+    ? image.registry
+    : "docker.io";
+  return `${registry}/${image.repository}:${image.tag}`;
+}
+
+// The restore jobs must run exactly the images the deployment runs. Primary
+// source: the release's computed values (chart defaults + overrides) via
+// `helm get values --all`. Fallback: the chart image manifest for the
+// installed chart version (see src/lib/imageCatalog.ts).
+async function resolveRestoreImages(
+  cfg: DeploymentConfig,
+): Promise<RestoreImages> {
+  const namespace = getNamespace(cfg.name);
+  const releaseName = getReleaseName(cfg.name);
+
+  const computed = await getReleaseComputedValues(releaseName, namespace);
+  let dbImage = imageRefFromValues(computed, ["supabase", "db", "image"]);
+  let rcloneImage = imageRefFromValues(computed, ["global", "images", "rclone"]);
+
+  if (!dbImage || !rcloneImage) {
+    const chartVersion = await getInstalledChartVersion(releaseName, namespace);
+    const catalog = await resolveImageCatalog(chartVersion ?? undefined);
+    dbImage = dbImage ?? catalog.image("supabase-postgres", cfg.imageRegistry).ref;
+    rcloneImage = rcloneImage ?? catalog.image("rclone", cfg.imageRegistry).ref;
+  }
+
+  return { dbImage, rcloneImage };
+}
 
 function k8sName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 63).replace(/-+$/, "");
@@ -172,6 +225,7 @@ function RestoreCommandInner({ name }: RestoreCommandProps) {
   const { colors } = useTheme();
   const [step, setStep] = useState<Step>("loading");
   const [config, setConfig] = useState<DeploymentConfig | null>(null);
+  const [restoreImages, setRestoreImages] = useState<RestoreImages | null>(null);
   const [backups, setBackups] = useState<BackupInfo[]>([]);
   const [selectedBackup, setSelectedBackup] = useState<BackupInfo | null>(null);
   const [confirmation, setConfirmation] = useState("");
@@ -198,11 +252,14 @@ function RestoreCommandInner({ name }: RestoreCommandProps) {
       setStep("preflight");
       setStatus((current) => ({ ...current, preflight: "running" }));
       await runPreflight(cfg);
+      // Needs cluster access (helm get values), so resolve after preflight.
+      const images = await resolveRestoreImages(cfg);
+      setRestoreImages(images);
       setStatus((current) => ({ ...current, preflight: "success" }));
 
       setStep("listing");
       setStatus((current) => ({ ...current, list: "running" }));
-      const available = await listBackups(cfg);
+      const available = await listBackups(cfg, images);
       setBackups(available);
       setStatus((current) => ({ ...current, list: "success" }));
       setStep("select");
@@ -259,7 +316,10 @@ function RestoreCommandInner({ name }: RestoreCommandProps) {
     }
   }
 
-  async function listBackups(cfg: DeploymentConfig): Promise<BackupInfo[]> {
+  async function listBackups(
+    cfg: DeploymentConfig,
+    images: RestoreImages,
+  ): Promise<BackupInfo[]> {
     const namespace = getNamespace(cfg.name);
     const releaseName = getReleaseName(cfg.name);
     const target = dbBackupsTarget(cfg);
@@ -267,7 +327,7 @@ function RestoreCommandInner({ name }: RestoreCommandProps) {
       name: k8sName(`${releaseName}-backup-list-${Date.now()}`),
       namespace,
       serviceAccountName: `${releaseName}-backup`,
-      image: RCLONE_IMAGE,
+      image: images.rcloneImage,
       command: [
         "/bin/sh",
         "-c",
@@ -286,7 +346,7 @@ function RestoreCommandInner({ name }: RestoreCommandProps) {
   }
 
   async function handleRestore() {
-    if (!config || !selectedBackup) return;
+    if (!config || !selectedBackup || !restoreImages) return;
     if (confirmation !== config.name) {
       setError(`Type "${config.name}" to confirm restore.`);
       return;
@@ -302,7 +362,7 @@ function RestoreCommandInner({ name }: RestoreCommandProps) {
       setStatus((current) => ({ ...current, scaleDown: "success" }));
 
       setStatus((current) => ({ ...current, restore: "running" }));
-      const result = await runRestoreJob(config, selectedBackup.id);
+      const result = await runRestoreJob(config, selectedBackup.id, restoreImages);
       setLogs(result.logs);
       setStatus((current) => ({ ...current, restore: "success" }));
 
@@ -350,7 +410,11 @@ function RestoreCommandInner({ name }: RestoreCommandProps) {
     }
   }
 
-  async function runRestoreJob(cfg: DeploymentConfig, backupId: string) {
+  async function runRestoreJob(
+    cfg: DeploymentConfig,
+    backupId: string,
+    images: RestoreImages,
+  ) {
     const namespace = getNamespace(cfg.name);
     const releaseName = getReleaseName(cfg.name);
     const target = dbBackupsTarget(cfg);
@@ -364,7 +428,7 @@ function RestoreCommandInner({ name }: RestoreCommandProps) {
       initContainers: [
         {
           name: "download",
-          image: RCLONE_IMAGE,
+          image: images.rcloneImage,
           imagePullPolicy: "IfNotPresent",
           command: [
             "/bin/sh",
@@ -375,7 +439,7 @@ function RestoreCommandInner({ name }: RestoreCommandProps) {
           volumeMounts: [{ name: "work", mountPath: "/work" }],
         },
       ],
-      image: DB_IMAGE,
+      image: images.dbImage,
       command: [
         "/bin/bash",
         "-c",

@@ -1,5 +1,5 @@
 # =============================================================================
-# Rulebricks GKE cluster, enterprise edition - variables.
+# Rulebricks GKE cluster - variables.
 #
 # The three managed data-service toggles (enable_managed_kafka /
 # enable_managed_redis / enable_managed_database) all default to FALSE:
@@ -41,9 +41,8 @@ variable "kubernetes_version" {
 }
 
 # ------------------------------------------------------------------------------
-# Network. Defaults match the turnkey gcloud guide in ../README.md; all three
-# ranges are parameterized for IPAM fit. Pods/services draw from the secondary
-# ranges (VPC-native GKE).
+# Network. All three ranges are parameterized for IPAM fit. Pods/services draw
+# from the secondary ranges (VPC-native GKE).
 # ------------------------------------------------------------------------------
 variable "subnet_cidr" {
   description = "Primary subnet range (nodes + internal load balancers)."
@@ -71,9 +70,9 @@ variable "master_cidr" {
 
 variable "master_authorized_cidrs" {
   description = <<-EOT
-    CIDRs allowed to reach the Kubernetes API. Default is open (like the
-    turnkey guide) so kubectl/helm/the Rulebricks CLI work from anywhere;
-    tighten to corporate ranges for locked-down environments.
+    CIDRs allowed to reach the Kubernetes API. Default is open so
+    kubectl/helm/the Rulebricks CLI work from anywhere; tighten to corporate
+    ranges for locked-down environments.
   EOT
   type        = list(string)
   default     = ["0.0.0.0/0"]
@@ -163,16 +162,17 @@ variable "cluster_deletion_protection" {
 }
 
 # ------------------------------------------------------------------------------
-# Storage + metrics (always on; the identity/bucket back every deployment)
+# Storage (always on; the identity/bucket back every deployment) + metrics
 # ------------------------------------------------------------------------------
 variable "enable_metrics_writer" {
   description = <<-EOT
     Grant roles/monitoring.metricWriter to the Rulebricks service account for
     Prometheus remote write into Google Cloud Managed Service for Prometheus.
-    Harmless if unused - metrics also stay queryable in-cluster.
+    Off by default; leave off to keep metrics in-cluster or send them to an
+    existing observability platform.
   EOT
   type        = bool
-  default     = true
+  default     = false
 }
 
 # ------------------------------------------------------------------------------

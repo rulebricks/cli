@@ -33,7 +33,7 @@
     "enableBackupExport": { "value": true },
     "createMonitorWorkspace": { "value": true },
     "existingDataCollectionRuleId": { "value": "" },
-    "enableMetricsRemoteWrite": { "value": true },
+    "enableMetricsRemoteWrite": { "value": false },
     "enableExternalDns": { "value": false },
     "dnsZoneResourceGroup": { "value": "" },
 
@@ -53,7 +53,7 @@
     "postgresSkuName": { "value": "Standard_D4ds_v5" },
     "postgresSkuTier": { "value": "GeneralPurpose" },
     "postgresStorageSizeGB": { "value": 128 },
-    "postgresHighAvailability": { "value": false },
+    "postgresHighAvailability": { "value": true },
     "postgresBackupRetentionDays": { "value": 7 }
   }
 }

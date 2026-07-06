@@ -64,8 +64,8 @@ function patternsFor(
       return [
         `${cluster}-data`,
         "-data",
-        // Azure storage account names forbid hyphens; the turnkey and
-        // enterprise templates generate rb<uniqueString> (13-char hash).
+        // Azure storage account names forbid hyphens; the cluster-setup
+        // template generates rb<uniqueString> (13-char hash).
         ...(provider === "azure" ? [/^rb[a-z0-9]{13}$/] : []),
         `${cluster}-decision-logs`,
         "-decision-logs",

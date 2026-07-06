@@ -1,40 +1,18 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Rulebricks EKS cluster, enterprise edition. One reviewable stack: 3-AZ VPC
-  (private nodes + data, public load balancers), hardened EKS (control-plane
-  logging, KMS secrets encryption, Pod Identity, EBS CSI with its own role,
-  metrics-server), core + burst nodegroups, one S3 data bucket, one IAM role
-  (<cluster>-rulebricks), and independent true/false toggles for managed data
-  services: EnableManagedKafka (Amazon MSK, IAM auth), EnableManagedRedis
-  (ElastiCache for Valkey, TLS + AUTH), EnableManagedDatabase (RDS for
-  PostgreSQL 17 with logical replication for Supabase Realtime), and
-  EnableManagedPrometheus (AMP workspace). Any combination is valid; the
-  Rulebricks chart runs Kafka, Valkey, and Postgres in-cluster for whichever
-  you leave disabled. Outputs map 1:1 to the Rulebricks CLI wizard fields.
+  Rulebricks EKS cluster: 3-AZ VPC (private nodes, public load balancers),
+  hardened EKS with Pod Identity, core + burst nodegroups, one S3 data bucket,
+  one IAM role (<cluster>-rulebricks), and independent off-by-default toggles
+  for managed MSK / ElastiCache / RDS / AMP - the chart runs Kafka, Valkey,
+  and Postgres in-cluster for whichever you leave disabled. Outputs map 1:1 to
+  the Rulebricks CLI wizard fields.
 
 # =============================================================================
-# WHAT THIS STACK CREATES
-#
-#   NETWORK   3-AZ VPC: public subnets (load balancers) + private subnets
-#             (nodes and data services), NAT egress, S3 gateway endpoint,
-#             optional interface endpoints for restricted-egress environments.
-#   CLUSTER   Private-node EKS with control-plane logging, KMS secrets
-#             encryption, EKS Pod Identity, EBS CSI (own scoped role),
-#             metrics-server, and an optional admin access entry.
-#   NODES     Core nodegroup (always-on services) + a tainted burst nodegroup
-#             the chart's worker fleet lands on when KEDA scales out.
-#   IDENTITY  One IAM role, <cluster>-rulebricks, trusted by EKS Pod Identity.
-#             The Rulebricks CLI creates the namespace-scoped associations
-#             (vector / backup / prometheus / hps / hps-worker) at deploy
-#             time, so one cluster can host many deployments.
-#   DATA      One S3 bucket for all Rulebricks data (decision-logs/ and
-#             db-backups/ prefixes), TLS-only bucket policy.
-#   OPTIONAL  EnableManagedKafka / EnableManagedRedis / EnableManagedDatabase /
-#             EnableManagedPrometheus - each an independent true/false.
-#
-# Every resource is deployment-independent: nothing here needs a Rulebricks
-# deployment name, so one cluster can host many deployments. Stack outputs map
-# 1:1 to the fields the Rulebricks CLI wizard asks for (README outputs table).
+# See README.md for the full resource inventory, parameters, deploy, and
+# take-down commands. Every resource here is deployment-independent: nothing
+# needs a Rulebricks deployment name, so one cluster hosts many deployments.
+# The Rulebricks CLI creates the namespace-scoped Pod Identity associations
+# (vector / backup / prometheus / hps / hps-worker) at deploy time.
 # =============================================================================
 
 Metadata:
@@ -327,10 +305,10 @@ Parameters:
   EnableManagedPrometheus:
     Type: String
     AllowedValues: ["true", "false"]
-    Default: "true"
+    Default: "false"
     Description: >-
-      Create an AMP workspace for Prometheus remote write. Disable if metrics
-      stay in-cluster or go to an existing observability platform.
+      Create an AMP workspace for Prometheus remote write. Leave off to keep
+      metrics in-cluster or send them to an existing observability platform.
 
 Conditions:
   BurstPoolEnabled: !Equals [!Ref EnableBurstPool, "true"]
@@ -960,15 +938,10 @@ Resources:
         - { Key: Environment, Value: rulebricks }
 
   # ===========================================================================
-  # RULEBRICKS ROLE (single role for all data paths)
-  # Trusts the EKS Pod Identity service principal. The Rulebricks CLI creates
-  # the namespace-scoped Pod Identity associations at deploy time:
-  #   vector / <release>-clickhouse / <release>-backup  -> S3 data paths
-  #   prometheus                                        -> AMP remote write
-  #   <release>-hps / <release>-hps-worker /
-  #   <release>-kafka-topic-provision                   -> MSK IAM auth
-  # This stack only provisions the deployment-independent role, so one cluster
-  # can host many deployments.
+  # RULEBRICKS ROLE (single role for all data paths). Trusts the EKS Pod
+  # Identity service principal; the CLI binds it to vector/clickhouse/backup
+  # (S3), prometheus (AMP), and hps/hps-worker/topic-provision (MSK) SAs via
+  # namespace-scoped Pod Identity associations at deploy time.
   # ===========================================================================
   RulebricksRole:
     Type: AWS::IAM::Role

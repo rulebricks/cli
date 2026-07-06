@@ -12,7 +12,7 @@
   { "ParameterKey": "NodeInstanceType", "ParameterValue": "m7i.xlarge" },
   { "ParameterKey": "NodeDesiredCapacity", "ParameterValue": "3" },
   { "ParameterKey": "NodeMinSize", "ParameterValue": "3" },
-  { "ParameterKey": "NodeMaxSize", "ParameterValue": "6" },
+  { "ParameterKey": "NodeMaxSize", "ParameterValue": "5" },
   { "ParameterKey": "NodeVolumeSizeGiB", "ParameterValue": "50" },
   { "ParameterKey": "EnableBurstPool", "ParameterValue": "true" },
   { "ParameterKey": "BurstInstanceType", "ParameterValue": "m7i.4xlarge" },
@@ -39,5 +39,5 @@
   { "ParameterKey": "DbBackupRetentionDays", "ParameterValue": "7" },
   { "ParameterKey": "DbDeletionProtection", "ParameterValue": "true" },
 
-  { "ParameterKey": "EnableManagedPrometheus", "ParameterValue": "true" }
+  { "ParameterKey": "EnableManagedPrometheus", "ParameterValue": "false" }
 ]

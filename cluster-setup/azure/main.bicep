@@ -1,5 +1,5 @@
 // =============================================================================
-// Rulebricks AKS cluster, enterprise edition.
+// Rulebricks AKS cluster.
 //
 // One `az deployment group create` run composes:
 //
@@ -67,9 +67,9 @@ param podCidr string = '192.168.0.0/16'
 param enableDataServicePrivateEndpoints bool = false
 
 // ----------------------------------------------------------------------------
-// Node pools (same sizing rationale as the turnkey template: the chart's
-// steady-state request floor is ~10 vCPU / ~23 GiB, so 3 x 4-vCPU/16-GiB
-// nodes minimum; the burst pool absorbs the KEDA-scaled worker fleet).
+// Node pools. The chart's steady-state request floor is ~10 vCPU / ~23 GiB,
+// so 3 x 4-vCPU/16-GiB nodes minimum; the burst pool absorbs the KEDA-scaled
+// worker fleet.
 // ----------------------------------------------------------------------------
 param nodeCount int = 3
 param maxNodeCount int = 5
@@ -91,9 +91,9 @@ param burstVmSize string = 'Standard_F16as_v6'
 param burstMaxCount int = 1
 
 // ----------------------------------------------------------------------------
-// Storage / metrics / external-dns (identical to the turnkey template)
+// Storage / metrics / external-dns
 // ----------------------------------------------------------------------------
-@description('Provision a storage account + the single data container (turnkey). Set false to bring your own.')
+@description('Provision a storage account + the single data container. Set false to bring your own.')
 param createStorage bool = true
 
 @description('BYO: existing storage account for all Rulebricks data. Required when createStorage is false and decision-log or backup export is enabled.')
@@ -108,14 +108,14 @@ param enableDecisionLogExport bool = true
 @description('Enable database backup export to Blob.')
 param enableBackupExport bool = true
 
-@description('Provision Azure Monitor workspace + DCE + DCR (turnkey). Set false to bring your own DCR.')
+@description('Provision Azure Monitor workspace + DCE + DCR. Set false to bring your own DCR.')
 param createMonitorWorkspace bool = true
 
 @description('BYO: resource ID of an existing DCR associated with an Azure Monitor workspace.')
 param existingDataCollectionRuleId string = ''
 
-@description('Enable identity + role for Prometheus remote write to Azure Monitor.')
-param enableMetricsRemoteWrite bool = true
+@description('Enable identity + role for Prometheus remote write to Azure Monitor. Off by default; leave off to keep metrics in-cluster or send them to an existing observability platform.')
+param enableMetricsRemoteWrite bool = false
 
 @description('Enable a user-assigned identity and federated credential for external-dns with Azure DNS.')
 param enableExternalDns bool = false
@@ -195,8 +195,8 @@ param postgresSkuTier string = 'GeneralPurpose'
 @description('Storage in GB (auto-grow enabled).')
 param postgresStorageSizeGB int = 128
 
-@description('Zone-redundant HA (standby in a second AZ; requires an AZ-enabled region).')
-param postgresHighAvailability bool = false
+@description('Zone-redundant HA (standby in a second AZ; requires an AZ-enabled region). Set false for single-instance dev/staging or non-AZ regions.')
+param postgresHighAvailability bool = true
 
 @minValue(7)
 @maxValue(35)
