@@ -26,9 +26,9 @@ export const DEFAULT_IMAGE_REGISTRY = "docker.io";
 // Self-hosted Supabase Postgres image (mirrored to rulebricks/*). The backup
 // path uses pg_dump/rclone (no barman), so there is no custom fork.
 export const SUPABASE_POSTGRES_IMAGE_REPOSITORY = "rulebricks/supabase-postgres";
-export const SUPABASE_POSTGRES_IMAGE_TAG = "17.6.1.141";
+export const SUPABASE_POSTGRES_IMAGE_TAG = "17.6.1.142";
 // Cross-cloud uploader used by the backup CronJob and `rulebricks restore`.
-export const RCLONE_IMAGE = "docker.io/rulebricks/rclone:1.71.1";
+export const RCLONE_IMAGE = "docker.io/rulebricks/rclone:1.74.3";
 // kafka-proxy sidecar fronting MSK IAM brokers for Vector (mirrored to rulebricks/*).
 export const KAFKA_PROXY_IMAGE = "docker.io/rulebricks/kafka-proxy:0.4.3";
 
@@ -44,10 +44,10 @@ export const IMAGE_REPOSITORIES = {
   app: "rulebricks/app",
   hps: "rulebricks/hps",
   // ClickStack
-  hyperdx: { repository: "rulebricks/hyperdx", tag: "2.19.0" },
+  hyperdx: { repository: "rulebricks/hyperdx", tag: "2.29.0" },
   clickstackOtelCollector: {
     repository: "rulebricks/clickstack-otel-collector",
-    tag: "2.19.0",
+    tag: "2.29.0",
   },
   ferretdb: { repository: "rulebricks/ferretdb", tag: "2.7.0" },
   postgresDocumentdb: {
