@@ -244,14 +244,23 @@ function UpgradeCommandInner({
         wait: true,
       });
 
-      // Force restart HPS statefulsets to ensure fresh images are pulled
-      // (pullPolicy: Always only pulls on pod restart, not on unchanged spec)
-      await rolloutRestart("statefulset", `${releaseName}-hps`, namespace);
-      await rolloutRestart(
-        "statefulset",
+      // Force restart HPS workloads to ensure fresh images are pulled
+      // (pullPolicy: Always only pulls on pod restart, not on unchanged spec).
+      // HPS runs as a Deployment in current charts; fall back to statefulset
+      // for releases that predate the stateless conversion.
+      for (const workload of [
+        `${releaseName}-hps`,
         `${releaseName}-hps-worker`,
-        namespace,
-      );
+      ]) {
+        const restarted = await rolloutRestart(
+          "deployment",
+          workload,
+          namespace,
+        );
+        if (!restarted) {
+          await rolloutRestart("statefulset", workload, namespace);
+        }
+      }
 
       // Update deployment state
       await updateDeploymentStatus(name, "running", {

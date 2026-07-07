@@ -1723,6 +1723,22 @@ async function getWorkloadImage(
   }
 }
 
+/**
+ * Looks up a workload image trying Deployment first, then StatefulSet.
+ * Current charts run HPS and its workers as Deployments, but releases prior
+ * to the conversion shipped StatefulSets; the fallback keeps version checks
+ * working against clusters that haven't upgraded yet.
+ */
+async function getWorkloadImageAnyKind(
+  name: string,
+  namespace: string,
+): Promise<string | null> {
+  return (
+    (await getWorkloadImage("deployment", name, namespace)) ??
+    (await getWorkloadImage("statefulset", name, namespace))
+  );
+}
+
 async function getPodImageDigests(
   releaseName: string,
   workloadName: string,
@@ -1767,7 +1783,8 @@ async function getPodImageDigests(
 
 /**
  * Gets actual deployed image tags and running image digests from Kubernetes.
- * HPS runs as StatefulSets, so digest checks inspect the pods behind those sets.
+ * HPS and its workers run as Deployments (StatefulSets before the stateless
+ * conversion); digest checks inspect the pods behind the workloads directly.
  *
  * @param releaseName - The Helm release name (e.g., "rulebricks")
  * @param namespace - The Kubernetes namespace
@@ -1792,8 +1809,8 @@ export async function getDeployedImageVersions(
 
   const [appImage, hpsImage, hpsWorkerImage] = await Promise.all([
     getWorkloadImage("deployment", appName, namespace),
-    getWorkloadImage("statefulset", hpsName, namespace),
-    getWorkloadImage("statefulset", hpsWorkerName, namespace),
+    getWorkloadImageAnyKind(hpsName, namespace),
+    getWorkloadImageAnyKind(hpsWorkerName, namespace),
   ]);
 
   result.appVersion = appImage ? extractImageTag(appImage) : null;
