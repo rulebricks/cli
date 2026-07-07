@@ -287,7 +287,7 @@ function ChartUpgradeCommandInner({
       <BorderBox title="Chart Upgrade">
         <Box marginY={1}>
           <Spinner
-            label={`Preparing chart ${selected?.version || ""}: regenerating values and running a dry run...`}
+            label={`Preparing chart ${selected?.version || ""}...`}
           />
         </Box>
       </BorderBox>
