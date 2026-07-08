@@ -613,7 +613,6 @@ function generateClickStackValues(
   const reg = config.imageRegistry || DEFAULT_IMAGE_REGISTRY;
 
   return {
-    enabled,
     clickhouse: {
       database: "otel",
       username: "rulebricks",

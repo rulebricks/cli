@@ -114,7 +114,9 @@ test("ClickStack is the default in-cluster observability backend", () => {
   assert.ok(values.global.supabase.serviceKey.length > 0);
   assert.equal(values.decisionLogs, undefined);
   assert.equal(values.global.clickstack.clickhouse, undefined);
-  assert.equal(values.clickstack.enabled, true);
+  // global.clickstack.enabled is the single switch; the subchart block carries
+  // no enabled mirror.
+  assert.equal(values.clickstack.enabled, undefined);
   assert.equal(values.clickhouse.persistence.enabled, true);
   assert.equal(values.clickhouse.persistence.size, "100Gi");
   assert.deepEqual(values.clickhouse.resources, {
@@ -390,7 +392,7 @@ test("BYO observability opt-out disables ClickStack and keeps export paths", () 
 
   assert.equal(values.global.clickstack.enabled, false);
   assert.equal(values.global.clickstack.clickhouse, undefined);
-  assert.equal(values.clickstack.enabled, false);
+  assert.equal(values.clickstack.enabled, undefined);
   assert.equal(values.clickhouse.persistence.enabled, false);
   assert.equal(values.vector.customConfig.sinks.decision_logs_clickhouse, undefined);
   assert.equal(values.global.tracing.destination, "elastic");
