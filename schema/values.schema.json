@@ -137,8 +137,36 @@
           "type": "object",
           "description": "Auth/Database Configuration",
           "properties": {
-            "anonKey": { "type": "string" },
-            "serviceKey": { "type": "string" },
+            "anonKey": {
+              "type": "string",
+              "description": "Public anon key the browser sends to the API gateway. Embedded into the app ConfigMap at template time; must be non-empty unless anonKeySecretRef supplies it at runtime.",
+              "not": {
+                "enum": [
+                  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE"
+                ],
+                "comment": "The well-known Supabase self-hosting demo anon key (iss: supabase-demo, signed with the public demo secret). Shipped as a chart default before 2026-06-30; the gateway rejects it against real consumer keys, so carrying it forward from an old values file breaks every browser request."
+              }
+            },
+            "serviceKey": {
+              "type": "string",
+              "not": {
+                "enum": [
+                  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJzZXJ2aWNlX3JvbGUiLAogICAgImlzcyI6ICJzdXBhYmFzZS1kZW1vIiwKICAgICJpYXQiOiAxNjQxNzY5MjAwLAogICAgImV4cCI6IDE3OTk1MzU2MDAKfQ.DaYlNEoUrrEn2Ig7tqibS-PHK5vgusbcbo7X36XVt4Q"
+                ],
+                "comment": "The well-known Supabase self-hosting demo service_role key; see anonKey."
+              }
+            },
+            "secretRef": {
+              "type": "string",
+              "description": "Runtime alternative to an inline anonKey: an existing Secret carrying the public anon key, injected as an explicit env var on the app deployment (overrides the ConfigMap's template-time value). Same pattern as the supabase subchart's secret.* blocks; sources ONLY the anon key (other Supabase secrets ride global.secrets.secretRef)."
+            },
+            "secretRefKey": {
+              "type": "object",
+              "description": "Override secret keys for the existing secret ref.",
+              "properties": {
+                "anonKey": { "type": "string" }
+              }
+            },
             "url": { "type": "string" },
             "projectRef": { "type": "string" },
             "accessToken": { "type": "string" },
@@ -1055,7 +1083,7 @@
         "enabled": { "type": "boolean", "default": true },
         "persistence": {
           "type": "object",
-          "description": "Local MergeTree storage. Required while clickstack.enabled; set enabled: false (with ClickStack disabled) to run ClickHouse stateless over the object-storage decision-log archive.",
+          "description": "Local MergeTree storage. Required while clickstack.enabled; set enabled: false (with ClickStack disabled) to run ClickHouse stateless over the object-storage decision-log archive - rendered as a Deployment instead of a StatefulSet, with no PVC.",
           "properties": {
             "enabled": { "type": "boolean", "default": true },
             "size": { "type": "string" },
@@ -1085,9 +1113,8 @@
     },
     "clickstack": {
       "type": "object",
-      "description": "Built-in ClickStack observability backend (HyperDX UI, OTel collectors, FerretDB). The dependency condition uses global.clickstack.enabled so sibling subcharts can share the same switch.",
+      "description": "Built-in ClickStack observability backend (HyperDX UI, OTel collectors, FerretDB). The on/off switch is global.clickstack.enabled (the subchart's dependency condition, shared with sibling subcharts); the keys here only configure ClickStack when enabled.",
       "properties": {
-        "enabled": { "type": "boolean", "default": true },
         "clickhouse": {
           "type": "object",
           "properties": {
@@ -1441,6 +1468,46 @@
       }
     },
     {
+      "title": "Supabase Anon Key Validation",
+      "description": "The browser client authenticates every API-gateway request with the public anon key, which the app ConfigMap embeds at TEMPLATE time - global.secrets.secretRef cannot supply it. Deliberately NOT excused by the app-level secretRef: either set global.supabase.anonKey inline (it is the public key, safe in values) or point global.supabase.secretRef at an existing Secret carrying it.",
+      "anyOf": [
+        {
+          "properties": {
+            "global": {
+              "type": "object",
+              "required": ["supabase"],
+              "properties": {
+                "supabase": {
+                  "type": "object",
+                  "required": ["anonKey"],
+                  "properties": {
+                    "anonKey": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "global": {
+              "type": "object",
+              "required": ["supabase"],
+              "properties": {
+                "supabase": {
+                  "type": "object",
+                  "required": ["secretRef"],
+                  "properties": {
+                    "secretRef": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
       "title": "External Kafka Validation",
       "description": "If Kafka subchart is disabled, external brokers must be specified in rulebricks.app.logging.kafkaBrokers and must not be empty.",
       "if": {
@@ -1522,6 +1589,279 @@
             }
           }
         }
+      }
+    },
+    {
+      "title": "External Database Validation",
+      "description": "If supabase.externalDatabase is enabled (self-hosted Supabase services against an external PostgreSQL), the config must be workable end to end: (1) supabase.db.enabled must be false so the bundled Postgres, the in-cluster db alias, and the migration job all agree on the external server; (2) the host must be resolvable, either inline (externalDatabase.host) or from a Secret (externalDatabase.secretRef + secretRefKey.host); (3) the shared service-role password must have a source (supabase.secret.db.password inline, supabase.secret.db.secretRef, or externalDatabase.secretRef); (4) while externalDatabase.bootstrap.enabled is true (the default), master credentials are required (bootstrap.masterPassword inline or bootstrap.secretRef with keys master-username/master-password/service-password) - disable bootstrap only if you run bootstrap.sql yourself; (5) the migration job needs migrations.externalDb.host (it does not read externalDatabase.host).",
+      "if": {
+        "properties": {
+          "supabase": {
+            "type": "object",
+            "properties": {
+              "enabled": { "const": true },
+              "externalDatabase": {
+                "type": "object",
+                "properties": {
+                  "enabled": { "const": true }
+                },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["enabled", "externalDatabase"]
+          }
+        },
+        "required": ["supabase"]
+      },
+      "then": {
+        "allOf": [
+          {
+            "description": "Bundled Postgres must be explicitly disabled (supabase.db.enabled=false).",
+            "properties": {
+              "supabase": {
+                "type": "object",
+                "required": ["db"],
+                "properties": {
+                  "db": {
+                    "type": "object",
+                    "required": ["enabled"],
+                    "properties": {
+                      "enabled": { "const": false }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "description": "External host: externalDatabase.host inline, or externalDatabase.secretRef + secretRefKey.host.",
+            "anyOf": [
+              {
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "properties": {
+                      "externalDatabase": {
+                        "type": "object",
+                        "required": ["host"],
+                        "properties": {
+                          "host": { "type": "string", "minLength": 1 }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "properties": {
+                      "externalDatabase": {
+                        "type": "object",
+                        "required": ["secretRef", "secretRefKey"],
+                        "properties": {
+                          "secretRef": { "type": "string", "minLength": 1 },
+                          "secretRefKey": {
+                            "type": "object",
+                            "required": ["host"],
+                            "properties": {
+                              "host": { "type": "string", "minLength": 1 }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "description": "Service-role credentials: supabase.secret.db.password inline, supabase.secret.db.secretRef, or externalDatabase.secretRef.",
+            "anyOf": [
+              {
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "properties": {
+                      "secret": {
+                        "type": "object",
+                        "properties": {
+                          "db": {
+                            "type": "object",
+                            "required": ["password"],
+                            "properties": {
+                              "password": { "type": "string", "minLength": 1 }
+                            }
+                          }
+                        },
+                        "required": ["db"]
+                      }
+                    },
+                    "required": ["secret"]
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "properties": {
+                      "secret": {
+                        "type": "object",
+                        "properties": {
+                          "db": {
+                            "type": "object",
+                            "required": ["secretRef"],
+                            "properties": {
+                              "secretRef": { "type": "string", "minLength": 1 }
+                            }
+                          }
+                        },
+                        "required": ["db"]
+                      }
+                    },
+                    "required": ["secret"]
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "properties": {
+                      "externalDatabase": {
+                        "type": "object",
+                        "required": ["secretRef"],
+                        "properties": {
+                          "secretRef": { "type": "string", "minLength": 1 }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "description": "Bootstrap master credentials: masterPassword or bootstrap.secretRef, unless bootstrap.enabled=false.",
+            "anyOf": [
+              {
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "properties": {
+                      "externalDatabase": {
+                        "type": "object",
+                        "properties": {
+                          "bootstrap": {
+                            "type": "object",
+                            "required": ["enabled"],
+                            "properties": {
+                              "enabled": { "const": false }
+                            }
+                          }
+                        },
+                        "required": ["bootstrap"]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "properties": {
+                      "externalDatabase": {
+                        "type": "object",
+                        "properties": {
+                          "bootstrap": {
+                            "type": "object",
+                            "required": ["masterPassword"],
+                            "properties": {
+                              "masterPassword": { "type": "string", "minLength": 1 }
+                            }
+                          }
+                        },
+                        "required": ["bootstrap"]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "properties": {
+                      "externalDatabase": {
+                        "type": "object",
+                        "properties": {
+                          "bootstrap": {
+                            "type": "object",
+                            "required": ["secretRef"],
+                            "properties": {
+                              "secretRef": { "type": "string", "minLength": 1 }
+                            }
+                          }
+                        },
+                        "required": ["bootstrap"]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "description": "Migration job host: migrations.externalDb.host (or the legacy supabase.auth.environment.DB_HOST seam).",
+            "anyOf": [
+              {
+                "properties": {
+                  "migrations": {
+                    "type": "object",
+                    "required": ["externalDb"],
+                    "properties": {
+                      "externalDb": {
+                        "type": "object",
+                        "required": ["host"],
+                        "properties": {
+                          "host": { "type": "string", "minLength": 1 }
+                        }
+                      }
+                    }
+                  }
+                },
+                "required": ["migrations"]
+              },
+              {
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "properties": {
+                      "auth": {
+                        "type": "object",
+                        "properties": {
+                          "environment": {
+                            "type": "object",
+                            "required": ["DB_HOST"],
+                            "properties": {
+                              "DB_HOST": { "type": "string", "minLength": 1 }
+                            }
+                          }
+                        },
+                        "required": ["environment"]
+                      }
+                    },
+                    "required": ["auth"]
+                  }
+                }
+              }
+            ]
+          }
+        ]
       }
     },
     {

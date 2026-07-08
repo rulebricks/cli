@@ -1299,6 +1299,13 @@ test("k8s secret mode: secretRefs set, app secrets kept out of values (license s
     values.global.supabase.anonKey,
     "public anonKey must remain inline in k8s mode for the app ConfigMap",
   );
+  // Runtime seam: the app deployment injects the browser anon key from the
+  // jwt Secret, keeping it in lockstep with Kong's consumer keys on rotation.
+  assert.equal(
+    values.global.supabase.secretRef,
+    `${getReleaseName(config.name)}-supabase-jwt`,
+  );
+  assert.deepEqual(values.global.supabase.secretRefKey, { anonKey: "anonKey" });
   // The genuinely-sensitive app secrets never appear in the generated values.
   const dump = JSON.stringify(values);
   for (const [label, secret] of [
@@ -1347,6 +1354,14 @@ test("k8s secret mode: managed Supabase config validates against the chart schem
   assert.equal(values.global.supabase.accessToken, undefined);
   assert.ok(values.global.supabase.url);
   assert.equal(values.global.secrets.secretRef, `${getReleaseName(config.name)}-app-secrets`);
+  // Managed mode's runtime anon-key seam points at the consolidated app secret.
+  assert.equal(
+    values.global.supabase.secretRef,
+    `${getReleaseName(config.name)}-app-secrets`,
+  );
+  assert.deepEqual(values.global.supabase.secretRefKey, {
+    anonKey: "SUPABASE_ANON_KEY",
+  });
 });
 
 test("inline secret mode keeps secrets in values (dev path)", () => {

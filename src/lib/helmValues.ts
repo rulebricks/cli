@@ -2700,12 +2700,32 @@ export function redactSecretsToRefs(
     // NOTE: anonKey is intentionally NOT stripped. It is the *public* Supabase
     // key that app-configmap.yaml embeds into the Next.js client bundle
     // (SUPABASE_PUBLIC_KEY / NEXT_PUBLIC_SUPABASE_PUBLIC_KEY). That ConfigMap
-    // reads global.supabase.anonKey at TEMPLATE time and there is no secretRef
-    // seam for it, so stripping it leaves the browser client with an empty key.
-    // It is a public token (safe in a ConfigMap by design) and never appears in
-    // the k8s-mode secret-leak checks.
+    // reads global.supabase.anonKey at TEMPLATE time, so stripping it leaves
+    // the browser client with an empty key on charts without the runtime seam
+    // below. It is a public token (safe in a ConfigMap by design) and never
+    // appears in the k8s-mode secret-leak checks.
     delete global.supabase.serviceKey;
     delete global.supabase.accessToken;
+    // Runtime seam (chart >= global.supabase.secretRef support, same
+    // secretRef/secretRefKey pattern as the supabase subchart's secret.*
+    // blocks): the app deployment injects the browser key from this Secret as
+    // an explicit env var, overriding the ConfigMap's template-time copy.
+    // Pointing it at the CLI-created Secrets keeps the browser key in lockstep
+    // with the served keys even if the Secret is rotated out-of-band (the
+    // inline anonKey above stays as the template-time fallback for older
+    // charts). Older charts ignore the extra keys (global.supabase allows
+    // additional properties).
+    if (config.database.type === "self-hosted") {
+      // Self-hosted: the jwt Secret carries the derived anon key that Kong
+      // also serves as its consumer key.
+      global.supabase.secretRef = names.jwt;
+      global.supabase.secretRefKey = { anonKey: "anonKey" };
+    } else {
+      // Managed (supabase-cloud): the consolidated app secret carries the
+      // project's anon key.
+      global.supabase.secretRef = names.app;
+      global.supabase.secretRefKey = { anonKey: "SUPABASE_ANON_KEY" };
+    }
   }
   if (global.ai) delete global.ai.openaiApiKey;
   if (global.sso) {
