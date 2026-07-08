@@ -1049,17 +1049,22 @@ function isExternalKafka(config: DeploymentConfig): boolean {
   return config.externalServices?.kafka?.mode === "external";
 }
 
+/** Whether external Kafka authenticates with AWS MSK IAM (token mechanism). */
+function kafkaUsesAwsIam(config: DeploymentConfig): boolean {
+  if (!isExternalKafka(config)) return false;
+  const ext = config.externalServices?.kafka?.external;
+  return (
+    ext?.preset === "aws-msk-iam" || ext?.sasl?.mechanism === "aws-iam"
+  );
+}
+
 /**
  * Whether the Vector kafka-proxy bridge sidecar is required. Only AWS MSK IAM
  * needs it: Vector's kafka source can't speak token mechanisms, while Azure
  * Event Hubs and GCP both use SASL PLAIN/SCRAM that Vector handles directly.
  */
 function kafkaUsesBridge(config: DeploymentConfig): boolean {
-  if (!isExternalKafka(config)) return false;
-  const ext = config.externalServices?.kafka?.external;
-  return (
-    ext?.preset === "aws-msk-iam" || ext?.sasl?.mechanism === "aws-iam"
-  );
+  return kafkaUsesAwsIam(config);
 }
 
 /**
@@ -1163,12 +1168,23 @@ function generateCacheObservabilityBlock(
   };
 }
 
+/**
+ * kafka-exporter block. Defaults ON where the chart can authenticate it with
+ * no manual identity work: in-cluster Kafka and static PLAIN/SCRAM external
+ * Kafka (the chart inherits kafkaSasl credentials). Opt-in otherwise -
+ * notably AWS MSK IAM, where the exporter only supports IRSA (not the Pod
+ * Identity associations this CLI creates; kafka_exporter#494).
+ */
 function generateKafkaExporterBlock(
   config: DeploymentConfig,
   infrastructurePodLabels: Record<string, string>,
 ): Record<string, unknown> {
   const requested = config.features.cache?.kafkaExporter?.enabled;
-  const canUseKafkaExporter = !isExternalKafka(config);
+  const sasl = config.externalServices?.kafka?.external?.sasl;
+  const canUseKafkaExporter =
+    !isExternalKafka(config) ||
+    (kafkaUsesDirectSasl(config) &&
+      Boolean(sasl?.username || sasl?.existingSecret));
   return {
     enabled: requested ?? canUseKafkaExporter,
     podLabels: infrastructurePodLabels,
@@ -2398,15 +2414,25 @@ export function buildHelmValues(
                 siteUrl: `https://${config.domain}`,
                 externalUrl: `https://supabase.${config.domain}`,
                 ...coreScheduling,
+                // Managed Postgres (AWS RDS PG15+, rds.force_ssl=1 by default)
+                // rejects non-SSL connections with "no pg_hba.conf entry ...
+                // no encryption", but the chart defaults DB_SSL to disable.
+                // The bootstrap job already hardcodes sslmode=require; these
+                // overrides bring the runtime services in line with it.
+                ...(pgExt ? { environment: { DB_SSL: "require" } } : {}),
               },
               rest: {
                 ...coreScheduling,
+                ...(pgExt ? { environment: { DB_SSL: "require" } } : {}),
               },
               realtime: {
                 ...coreScheduling,
+                // Realtime (v2.73.0+) takes a boolean-as-string, not sslmode.
+                ...(pgExt ? { environment: { DB_SSL: "true" } } : {}),
               },
               meta: {
                 ...coreScheduling,
+                ...(pgExt ? { environment: { DB_SSL: "require" } } : {}),
               },
               kong: {
                 ...coreScheduling,

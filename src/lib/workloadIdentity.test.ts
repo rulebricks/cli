@@ -6,6 +6,8 @@ import {
   isAwsPodIdentityCliUnsupported,
   isAwsPodIdentityTrustPolicyInvalid,
   plannedBindings,
+  removeWorkloadIdentityFederation,
+  verifyManualKafkaAssociations,
 } from "./workloadIdentity.js";
 import type { DeploymentConfig } from "../types/index.js";
 
@@ -136,7 +138,7 @@ test("extracts role names from ARNs, including paths", () => {
   );
 });
 
-test("external MSK IAM binds hps, worker, and topic-provision SAs (one association each)", () => {
+test("external MSK IAM binds hps, worker, topic-provision, and keda-operator SAs (one association each)", () => {
   const cfg = {
     name: "aws-p1",
     infrastructure: { provider: "aws", region: "us-east-1" },
@@ -164,10 +166,133 @@ test("external MSK IAM binds hps, worker, and topic-provision SAs (one associati
     sas.some((s) => s.endsWith("-kafka-topic-provision")),
     sas.join(","),
   );
+  // The KEDA operator needs the same role (lag triggers use its pod
+  // identity). kafka-exporter is IRSA-only, so it is never bound here.
+  assert.ok(sas.includes("keda-operator"), sas.join(","));
+  assert.ok(!sas.some((s) => s.endsWith("-kafka-exporter")), sas.join(","));
   // Each kafka SA gets exactly one association, to the configured MSK role.
-  for (const b of bindings.filter((x) => x.serviceAccount.includes("-hps"))) {
+  for (const b of bindings.filter(
+    (x) =>
+      x.serviceAccount.includes("-hps") || x.serviceAccount === "keda-operator",
+  )) {
     assert.match(b.principal, /:role\/rulebricks-cluster-rulebricks$/);
   }
+});
+
+test("GCP managed Kafka identity binds producers but not keda-operator", () => {
+  // The chart still gates the exporter and lag triggers off under GCP-flavored
+  // OAUTHBEARER, so there is no pod for these bindings to serve.
+  const cfg = {
+    name: "gcp-p1",
+    infrastructure: {
+      provider: "gcp",
+      region: "us-central1",
+      gcpProjectId: "proj",
+    },
+    database: { type: "self-hosted" },
+    features: { monitoring: {} },
+    externalServices: {
+      kafka: {
+        mode: "external",
+        external: {
+          preset: "gcp-managed",
+          sasl: { mechanism: "oauthbearer" },
+          identity: {
+            gcpServiceAccountEmail: "kafka@proj.iam.gserviceaccount.com",
+          },
+        },
+      },
+    },
+  } as unknown as DeploymentConfig;
+
+  const sas = plannedBindings(cfg).map((b) => b.serviceAccount);
+  assert.ok(sas.some((s) => s.endsWith("-hps")), sas.join(","));
+  assert.ok(!sas.some((s) => s.endsWith("-kafka-exporter")), sas.join(","));
+  assert.ok(!sas.includes("keda-operator"), sas.join(","));
+});
+
+test("manual-association preflight only applies to MSK IAM without an identity role", async () => {
+  // Embedded kafka: not applicable.
+  const embedded = {
+    name: "aws-p1",
+    infrastructure: { provider: "aws", region: "us-east-1" },
+    database: { type: "self-hosted" },
+    features: { monitoring: {} },
+    externalServices: { kafka: { mode: "embedded" } },
+  } as unknown as DeploymentConfig;
+  const embeddedOutcome = await verifyManualKafkaAssociations(embedded);
+  assert.equal(embeddedOutcome.ok, true);
+  assert.equal(embeddedOutcome.skipped, "kafka is not AWS MSK IAM");
+
+  // Identity role set: deploy creates the associations itself, nothing to verify.
+  const withRole = {
+    name: "aws-p1",
+    infrastructure: { provider: "aws", region: "us-east-1" },
+    database: { type: "self-hosted" },
+    features: { monitoring: {} },
+    externalServices: {
+      kafka: {
+        mode: "external",
+        external: {
+          preset: "aws-msk-iam",
+          identity: {
+            awsRoleArn:
+              "arn:aws:iam::123456789012:role/rulebricks-cluster-rulebricks",
+          },
+        },
+      },
+    },
+  } as unknown as DeploymentConfig;
+  const withRoleOutcome = await verifyManualKafkaAssociations(withRole);
+  assert.equal(withRoleOutcome.ok, true);
+  assert.match(withRoleOutcome.skipped ?? "", /identity role configured/);
+
+  // No role and no cluster/region: fail-open (cannot reach the AWS CLI).
+  const incomplete = {
+    name: "aws-p1",
+    infrastructure: { provider: "aws" },
+    database: { type: "self-hosted" },
+    features: { monitoring: {} },
+    externalServices: {
+      kafka: {
+        mode: "external",
+        external: { preset: "aws-msk-iam" },
+      },
+    },
+  } as unknown as DeploymentConfig;
+  const incompleteOutcome = await verifyManualKafkaAssociations(incomplete);
+  assert.equal(incompleteOutcome.ok, true);
+  assert.equal(
+    incompleteOutcome.skipped,
+    "missing EKS cluster name or region",
+  );
+});
+
+test("federation removal is a no-op for non-cloud providers", async () => {
+  const cfg = {
+    name: "local-p1",
+    infrastructure: { provider: "kind" },
+    database: { type: "self-hosted" },
+    features: { monitoring: {} },
+  } as unknown as DeploymentConfig;
+
+  const outcome = await removeWorkloadIdentityFederation(cfg);
+  assert.deepEqual(outcome.removed, []);
+  assert.equal(outcome.skipped, "non-cloud provider");
+});
+
+test("AWS federation removal skips without cluster name or region", async () => {
+  // Incomplete configs (e.g. corrupted state) must not reach the AWS CLI.
+  const cfg = {
+    name: "aws-p1",
+    infrastructure: { provider: "aws" },
+    database: { type: "self-hosted" },
+    features: { monitoring: {} },
+  } as unknown as DeploymentConfig;
+
+  const outcome = await removeWorkloadIdentityFederation(cfg);
+  assert.deepEqual(outcome.removed, []);
+  assert.equal(outcome.skipped, "missing EKS cluster name or region");
 });
 
 test("embedded kafka creates no HPS/worker kafka bindings", () => {
@@ -182,4 +307,6 @@ test("embedded kafka creates no HPS/worker kafka bindings", () => {
   const sas = plannedBindings(cfg).map((b) => b.serviceAccount);
   assert.ok(!sas.some((s) => s.endsWith("-hps")), sas.join(","));
   assert.ok(!sas.some((s) => s.endsWith("-hps-worker")), sas.join(","));
+  assert.ok(!sas.some((s) => s.endsWith("-kafka-exporter")), sas.join(","));
+  assert.ok(!sas.includes("keda-operator"), sas.join(","));
 });

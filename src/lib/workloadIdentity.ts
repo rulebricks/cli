@@ -33,6 +33,11 @@ export interface FederationOutcome {
   skipped?: string;
 }
 
+export interface FederationRemovalOutcome {
+  removed: string[];
+  skipped?: string;
+}
+
 interface ExecResult {
   stdout: string;
   stderr: string;
@@ -206,6 +211,20 @@ interface SubjectBinding {
 }
 
 /**
+ * The SAs that talk directly to a token-auth managed broker: HPS + the worker
+ * fleet produce/consume, the kafka-topic-provision pre-install hook creates
+ * topics. Shared between plannedBindings and the manual-association preflight
+ * so the two can never drift.
+ */
+export function kafkaWorkloadServiceAccounts(releaseName: string): string[] {
+  return [
+    `${releaseName}-hps`,
+    `${releaseName}-hps-worker`,
+    `${releaseName}-kafka-topic-provision`,
+  ];
+}
+
+/**
  * The SAs that need workload-identity trust, given the deployment config. Vector
  * and the backup job use the storage identity; Prometheus uses the metrics
  * identity (the consolidated setup makes these the same principal, but we read
@@ -258,13 +277,24 @@ export function plannedBindings(config: DeploymentConfig): SubjectBinding[] {
         kafka.external?.identity?.azureClientId)
       : undefined;
   if (kafkaPrincipal) {
-    for (const serviceAccount of [
-      `${releaseName}-hps`,
-      `${releaseName}-hps-worker`,
-      `${releaseName}-kafka-topic-provision`,
-    ]) {
+    for (const serviceAccount of kafkaWorkloadServiceAccounts(releaseName)) {
       bindings.push({ serviceAccount, principal: kafkaPrincipal });
     }
+  }
+
+  // Under AWS MSK IAM the KEDA operator also authenticates to the broker
+  // directly (the lag triggers use a podIdentity TriggerAuthentication), so
+  // it needs the same role. kafka-exporter is deliberately NOT bound here:
+  // it only supports IRSA, not Pod Identity (kafka_exporter#494), so an
+  // association would leave it crashlooping.
+  const kafkaUsesAwsIam =
+    kafka?.mode === "external" &&
+    (kafka.external?.preset === "aws-msk-iam" ||
+      kafka.external?.sasl?.mechanism === "aws-iam");
+  const kafkaAwsRole = kafka?.external?.identity?.awsRoleArn;
+  if (kafkaUsesAwsIam && kafkaAwsRole) {
+    // Fixed SA name from the bundled KEDA subchart (serviceAccount.operator.name).
+    bindings.push({ serviceAccount: "keda-operator", principal: kafkaAwsRole });
   }
 
   const rw = config.features.monitoring?.remoteWrite;
@@ -286,6 +316,50 @@ export function plannedBindings(config: DeploymentConfig): SubjectBinding[] {
   return bindings;
 }
 
+/** External Kafka under MSK IAM with no explicit identity role configured. */
+function kafkaUsesAwsIamWithoutRole(config: DeploymentConfig): boolean {
+  const kafka = config.externalServices?.kafka;
+  const usesAwsIam =
+    kafka?.mode === "external" &&
+    (kafka.external?.preset === "aws-msk-iam" ||
+      kafka.external?.sasl?.mechanism === "aws-iam");
+  return usesAwsIam && !kafka?.external?.identity?.awsRoleArn;
+}
+
+/**
+ * The cluster-setup CloudFormation stack provisions one workload role named
+ * `<cluster>-rulebricks` (RulebricksRole). When MSK IAM is configured without
+ * an explicit identity role, deploy binds the kafka service accounts to this
+ * conventional role automatically, so the wizard never has to ask for an ARN.
+ * Returns undefined (never throws) when the role is absent or its trust
+ * policy does not allow Pod Identity - e.g. on a bring-your-own cluster -
+ * in which case callers fall back to pre-existing associations.
+ */
+export async function deriveConventionalAwsKafkaRole(
+  config: DeploymentConfig,
+): Promise<string | undefined> {
+  const cluster = config.infrastructure.clusterName;
+  if (!cluster) return undefined;
+  const roleRes = await run(
+    `aws iam get-role --role-name ${shq(`${cluster}-rulebricks`)} ` +
+      `--query Role --output json`,
+    { intent: "Configure workload identity (AWS)", provider: "aws" },
+  );
+  if (roleRes.code !== 0) return undefined;
+  try {
+    const role = JSON.parse(roleRes.stdout) as {
+      Arn?: string;
+      AssumeRolePolicyDocument?: unknown;
+    };
+    if (!role.Arn) return undefined;
+    return awsTrustPolicyAllowsPodIdentity(role.AssumeRolePolicyDocument)
+      ? role.Arn
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Ensures the per-namespace workload-identity trust exists for this deployment.
  * No-op (with a `skipped` reason) for non-cloud providers or secret-based auth.
@@ -299,6 +373,24 @@ export async function ensureWorkloadIdentityFederation(
   }
 
   const bindings = plannedBindings(config);
+
+  // MSK IAM with no explicit identity role: bind the kafka SAs to the derived
+  // cluster-setup role. When the role can't be derived (BYO cluster), leave
+  // the bindings alone - preflight (verifyManualKafkaAssociations) has already
+  // confirmed manually-managed associations cover these SAs.
+  if (provider === "aws" && kafkaUsesAwsIamWithoutRole(config)) {
+    const derived = await deriveConventionalAwsKafkaRole(config);
+    if (derived) {
+      const releaseName = getReleaseName(config.name);
+      for (const serviceAccount of [
+        ...kafkaWorkloadServiceAccounts(releaseName),
+        "keda-operator",
+      ]) {
+        bindings.push({ serviceAccount, principal: derived });
+      }
+    }
+  }
+
   if (bindings.length === 0) {
     return { created: [], existing: [], skipped: "no workload-identity service accounts" };
   }
@@ -314,6 +406,273 @@ export async function ensureWorkloadIdentityFederation(
     default:
       return { created: [], existing: [], skipped: "non-cloud provider" };
   }
+}
+
+export interface KafkaIdentityVerification {
+  ok: boolean;
+  missing: string[];
+  skipped?: string;
+}
+
+/**
+ * Preflight for AWS MSK IAM deployments that configure NO kafka identity role.
+ * Deploy first tries to derive the cluster-setup role (<cluster>-rulebricks)
+ * and bind it; when that role doesn't exist either, credentials must already
+ * be present as manually-managed associations. When neither holds, the
+ * kafka-proxy sidecars fall back to EC2 IMDS ("no EC2 IMDS role found") and
+ * the topic-provision pre-install hook wedges until the helm timeout. This
+ * catches that in seconds. Fail-open: only a definitive "association missing"
+ * blocks the deploy; listing errors skip the check.
+ */
+export async function verifyManualKafkaAssociations(
+  config: DeploymentConfig,
+): Promise<KafkaIdentityVerification> {
+  const kafka = config.externalServices?.kafka;
+  const usesAwsIam =
+    kafka?.mode === "external" &&
+    (kafka.external?.preset === "aws-msk-iam" ||
+      kafka.external?.sasl?.mechanism === "aws-iam");
+  if (!usesAwsIam) {
+    return { ok: true, missing: [], skipped: "kafka is not AWS MSK IAM" };
+  }
+  if (kafka?.external?.identity?.awsRoleArn) {
+    return {
+      ok: true,
+      missing: [],
+      skipped: "identity role configured; deploy creates the associations",
+    };
+  }
+
+  const cluster = config.infrastructure.clusterName;
+  const region = config.infrastructure.region;
+  if (!cluster || !region) {
+    return { ok: true, missing: [], skipped: "missing EKS cluster name or region" };
+  }
+
+  const derived = await deriveConventionalAwsKafkaRole(config);
+  if (derived) {
+    return {
+      ok: true,
+      missing: [],
+      skipped: `cluster-setup role found (${derived}); deploy binds it`,
+    };
+  }
+
+  const namespace = getNamespace(config.name);
+  const releaseName = getReleaseName(config.name);
+  const listRes = await run(
+    `aws eks list-pod-identity-associations --cluster-name ${shq(cluster)} ` +
+      `--namespace ${shq(namespace)} --region ${shq(region)} --output json`,
+    { intent: "Configure workload identity (AWS)", provider: "aws" },
+  );
+  if (listRes.code !== 0) {
+    return { ok: true, missing: [], skipped: "could not list associations" };
+  }
+
+  let present = new Set<string>();
+  try {
+    const parsed = JSON.parse(listRes.stdout) as {
+      associations?: Array<{ serviceAccount?: string }>;
+    };
+    present = new Set(
+      (parsed.associations ?? [])
+        .map((a) => a.serviceAccount)
+        .filter((sa): sa is string => typeof sa === "string"),
+    );
+  } catch {
+    return { ok: true, missing: [], skipped: "could not parse association list" };
+  }
+
+  // Same set plannedBindings would create, incl. the KEDA operator (lag
+  // triggers authenticate to the broker under MSK IAM).
+  const expected = [...kafkaWorkloadServiceAccounts(releaseName), "keda-operator"];
+  const missing = expected.filter((sa) => !present.has(sa));
+  return { ok: missing.length === 0, missing };
+}
+
+/**
+ * Reverses ensureWorkloadIdentityFederation at `rulebricks destroy` time.
+ * The trust is namespace-scoped and useless once the deployment namespace is
+ * gone, so destroy removes it. Talks only to the cloud control plane; works
+ * even when the Kubernetes cluster itself is unreachable or already deleted.
+ * Best-effort by design: every deletion tolerates "not found" so it is safe
+ * to run on partially-cleaned deployments.
+ */
+export async function removeWorkloadIdentityFederation(
+  config: DeploymentConfig,
+): Promise<FederationRemovalOutcome> {
+  const provider = config.infrastructure.provider;
+  if (provider !== "azure" && provider !== "aws" && provider !== "gcp") {
+    return { removed: [], skipped: "non-cloud provider" };
+  }
+
+  const namespace = getNamespace(config.name);
+  switch (provider) {
+    case "aws":
+      return removeAws(config, namespace);
+    case "azure":
+      return removeAzure(config, namespace, plannedBindings(config));
+    case "gcp":
+      return removeGcp(config, namespace, plannedBindings(config));
+    default:
+      return { removed: [], skipped: "non-cloud provider" };
+  }
+}
+
+// AWS removal lists by namespace instead of replaying plannedBindings: the
+// namespace is exclusively this deployment's, and listing also catches
+// associations created by older CLI versions or manual fixes whose bindings
+// the current config would not plan.
+async function removeAws(
+  config: DeploymentConfig,
+  namespace: string,
+): Promise<FederationRemovalOutcome> {
+  const cluster = config.infrastructure.clusterName;
+  const region = config.infrastructure.region;
+  if (!cluster || !region) {
+    return { removed: [], skipped: "missing EKS cluster name or region" };
+  }
+
+  const intent = "Remove workload identity (AWS)";
+  const listRes = await run(
+    `aws eks list-pod-identity-associations --cluster-name ${shq(cluster)} ` +
+      `--namespace ${shq(namespace)} --region ${shq(region)} --output json`,
+    { intent, provider: "aws" },
+  );
+  if (listRes.code !== 0) {
+    if (isAwsPodIdentityCliUnsupported(listRes.stderr)) {
+      return { removed: [], skipped: "AWS CLI lacks Pod Identity support" };
+    }
+    if (/ResourceNotFoundException/i.test(listRes.stderr)) {
+      // Cluster already deleted; nothing to unbind.
+      return { removed: [], skipped: "EKS cluster not found" };
+    }
+    throw new Error(
+      `Failed to list Pod Identity associations for ${namespace}: ${listRes.stderr.trim()}`,
+    );
+  }
+
+  let associations: Array<{
+    associationId?: string;
+    serviceAccount?: string;
+    ownerArn?: string;
+  }> = [];
+  try {
+    const parsed = JSON.parse(listRes.stdout) as { associations?: typeof associations };
+    associations = parsed.associations ?? [];
+  } catch {
+    return { removed: [], skipped: "could not parse association list" };
+  }
+
+  const removed: string[] = [];
+  for (const association of associations) {
+    if (!association.associationId) continue;
+    // Owned associations (EKS add-ons) are managed by their owner; never ours.
+    if (association.ownerArn) continue;
+    const deleteRes = await run(
+      `aws eks delete-pod-identity-association --cluster-name ${shq(cluster)} ` +
+        `--association-id ${shq(association.associationId)} --region ${shq(region)}`,
+      { intent, provider: "aws", mutating: true },
+    );
+    if (deleteRes.code !== 0 && !/ResourceNotFoundException/i.test(deleteRes.stderr)) {
+      throw new Error(
+        `Failed to delete Pod Identity association ${namespace}/${association.serviceAccount ?? association.associationId}: ${deleteRes.stderr.trim()}`,
+      );
+    }
+    removed.push(`${namespace}/${association.serviceAccount ?? association.associationId}`);
+  }
+  return { removed };
+}
+
+async function removeAzure(
+  config: DeploymentConfig,
+  namespace: string,
+  bindings: SubjectBinding[],
+): Promise<FederationRemovalOutcome> {
+  if (bindings.length === 0) {
+    return { removed: [], skipped: "no workload-identity service accounts" };
+  }
+  const intent = "Remove workload identity (Azure)";
+  const removed: string[] = [];
+  const identityByClientId = new Map<
+    string,
+    { name: string; resourceGroup: string } | null
+  >();
+
+  for (const binding of bindings) {
+    const clientId = binding.principal;
+    let identity = identityByClientId.get(clientId);
+    if (identity === undefined) {
+      const lookupRes = await run(
+        `az identity list --query "[?clientId=='${clientId}'].{name: name, resourceGroup: resourceGroup} | [0]" --output json`,
+        { intent, provider: "azure" },
+      );
+      identity = null;
+      try {
+        const parsed = JSON.parse(lookupRes.stdout) as {
+          name?: string;
+          resourceGroup?: string;
+        } | null;
+        if (parsed?.name && parsed.resourceGroup) {
+          identity = { name: parsed.name, resourceGroup: parsed.resourceGroup };
+        }
+      } catch {
+        // Identity gone (e.g. cluster-setup already torn down): nothing to remove.
+      }
+      identityByClientId.set(clientId, identity);
+    }
+    if (!identity) continue;
+
+    // Deterministic name assigned at create time (see ensureAzure).
+    const ficName = `${namespace}-${binding.serviceAccount}`.slice(0, 120);
+    const deleteRes = await run(
+      `az identity federated-credential delete --name ${shq(ficName)} ` +
+        `--identity-name ${shq(identity.name)} --resource-group ${shq(identity.resourceGroup)}`,
+      { intent, provider: "azure", mutating: true },
+    );
+    if (deleteRes.code === 0) {
+      removed.push(`${namespace}/${binding.serviceAccount}`);
+    } else if (!/not found|does not exist|NotFound/i.test(deleteRes.stderr)) {
+      throw new Error(
+        `Failed to delete federated credential for ${namespace}/${binding.serviceAccount}: ${deleteRes.stderr.trim()}`,
+      );
+    }
+  }
+  return { removed };
+}
+
+async function removeGcp(
+  config: DeploymentConfig,
+  namespace: string,
+  bindings: SubjectBinding[],
+): Promise<FederationRemovalOutcome> {
+  const project = config.infrastructure.gcpProjectId;
+  if (!project) {
+    return { removed: [], skipped: "missing GCP project ID" };
+  }
+  if (bindings.length === 0) {
+    return { removed: [], skipped: "no workload-identity service accounts" };
+  }
+
+  const intent = "Remove workload identity (GCP)";
+  const removed: string[] = [];
+  for (const binding of bindings) {
+    const member = `serviceAccount:${project}.svc.id.goog[${namespace}/${binding.serviceAccount}]`;
+    const res = await run(
+      `gcloud iam service-accounts remove-iam-policy-binding ${shq(binding.principal)} ` +
+        `--project ${shq(project)} --role roles/iam.workloadIdentityUser ` +
+        `--member ${shq(member)} --quiet`,
+      { intent, provider: "gcp", mutating: true },
+    );
+    if (res.code === 0) {
+      removed.push(`${namespace}/${binding.serviceAccount}`);
+    } else if (!/not found|does not exist|NOT_FOUND/i.test(res.stderr)) {
+      throw new Error(
+        `Failed to remove Workload Identity binding for ${namespace}/${binding.serviceAccount}: ${res.stderr.trim()}`,
+      );
+    }
+  }
+  return { removed };
 }
 
 // ---------------------------------------------------------------------------

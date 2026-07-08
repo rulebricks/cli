@@ -807,12 +807,21 @@
                   "type": "object",
                   "properties": {
                     "enabled": { "type": "boolean", "default": false },
+                    "type": { "type": "string", "enum": ["ingress", "gateway-api"], "default": "ingress" },
                     "className": { "type": "string" },
                     "hostname": { "type": "string" },
                     "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
                     "path": { "type": "string" },
                     "pathType": { "type": "string" },
                     "allowedIPs": { "type": "array", "items": { "type": "string" } },
+                    "gatewayApi": {
+                      "type": "object",
+                      "properties": {
+                        "gatewayName": { "type": "string" },
+                        "gatewayNamespace": { "type": "string" },
+                        "sectionName": { "type": "string" }
+                      }
+                    },
                     "basicAuth": {
                       "type": "object",
                       "description": "Traefik BasicAuth credentials. users must be htpasswd-formatted entries; prefer CLI generation.",
@@ -895,6 +904,17 @@
             "brokers": { "type": "string" },
             "topicFilter": { "type": "string" },
             "groupFilter": { "type": "string" },
+            "tlsInsecureSkipVerify": { "type": "boolean", "default": false },
+            "extraArgs": { "type": "array", "items": { "type": "string" } },
+            "serviceAccount": {
+              "type": "object",
+              "description": "Dedicated ServiceAccount for the exporter; the IAM identity attachment point for MSK IAM (IRSA annotation or EKS Pod Identity association).",
+              "properties": {
+                "create": { "type": "boolean", "default": true },
+                "name": { "type": "string" },
+                "annotations": { "type": "object", "additionalProperties": { "type": "string" } }
+              }
+            },
             "resources": { "$ref": "#/definitions/resources" },
             "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
             "tolerations": { "type": "array", "items": { "$ref": "#/definitions/toleration" } },
@@ -1033,6 +1053,15 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean", "default": true },
+        "persistence": {
+          "type": "object",
+          "description": "Local MergeTree storage. Required while clickstack.enabled; set enabled: false (with ClickStack disabled) to run ClickHouse stateless over the object-storage decision-log archive.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "size": { "type": "string" },
+            "storageClass": { "type": "string" }
+          }
+        },
         "queryLimits": {
           "type": "object",
           "properties": {
@@ -1075,7 +1104,27 @@
           "properties": {
             "enabled": { "type": "boolean" },
             "resources": { "$ref": "#/definitions/resources" },
-            "ingress": { "type": "object" }
+            "ingress": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "type": { "type": "string", "enum": ["ingress", "gateway-api"], "default": "ingress" },
+                "className": { "type": "string" },
+                "hostname": { "type": "string" },
+                "path": { "type": "string" },
+                "pathType": { "type": "string" },
+                "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+                "allowedIPs": { "type": "array", "items": { "type": "string" } },
+                "gatewayApi": {
+                  "type": "object",
+                  "properties": {
+                    "gatewayName": { "type": "string" },
+                    "gatewayNamespace": { "type": "string" },
+                    "sectionName": { "type": "string" }
+                  }
+                }
+              }
+            }
           }
         },
         "collector": {
@@ -1115,6 +1164,17 @@
               "properties": {
                 "ferretdb": { "$ref": "#/definitions/resources" },
                 "postgres": { "$ref": "#/definitions/resources" }
+              }
+            },
+            "livenessProbe": { "type": "object" },
+            "readinessProbe": { "type": "object" },
+            "startupProbe": { "type": "object" },
+            "postgres": {
+              "type": "object",
+              "properties": {
+                "livenessProbe": { "type": "object" },
+                "readinessProbe": { "type": "object" },
+                "startupProbe": { "type": "object" }
               }
             }
           }
@@ -1825,9 +1885,10 @@
                       "ingress": {
                         "type": "object",
                         "properties": {
-                          "enabled": { "const": true }
+                          "enabled": { "const": true },
+                          "type": { "const": "ingress" }
                         },
-                        "required": ["enabled"]
+                        "required": ["enabled", "type"]
                       }
                     },
                     "required": ["enabled", "exposure", "ingress"]

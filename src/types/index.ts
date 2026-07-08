@@ -871,6 +871,22 @@ export const DeploymentConfigSchema = z.object({
             })
             .optional(),
         })
+        .superRefine((kafka, ctx) => {
+          // The chart hard-requires the region for aws-iam (KEDA lag triggers
+          // and kafka-exporter sign MSK auth tokens with it); fail at config
+          // time instead of at helm render.
+          const ext = kafka.external;
+          const usesAwsIam =
+            ext?.preset === "aws-msk-iam" || ext?.sasl?.mechanism === "aws-iam";
+          if (kafka.mode === "external" && usesAwsIam && !ext?.sasl?.region) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message:
+                "externalServices.kafka.external.sasl.region is required for AWS MSK IAM auth",
+              path: ["external", "sasl", "region"],
+            });
+          }
+        })
         .optional(),
       // Managed external PostgreSQL (AWS RDS/Aurora, Azure Flexible Server, or
       // GCP Cloud SQL). Self-hosted Supabase runs against this instead of the

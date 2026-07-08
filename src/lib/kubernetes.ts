@@ -1632,6 +1632,7 @@ const RULEBRICKS_CRD_GROUP_SUFFIXES = [
   "cert-manager.io", // cert-manager.io, acme.cert-manager.io
   ".keda.sh", // keda.sh, eventing.keda.sh
   "monitoring.coreos.com", // kube-prometheus-stack
+  ".traefik.io", // traefik.io, hub.traefik.io (traefik subchart)
 ];
 
 /**

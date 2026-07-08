@@ -298,6 +298,14 @@ export function ReviewStep({
             {state.kafkaMode === 'external' &&
               state.kafkaSaslMechanism === 'aws-iam' && (
                 <ConfigRow
+                  label="Lag autoscaling"
+                  value="native MSK IAM (KEDA operator pod identity)"
+                  valueColor={colors.muted}
+                />
+              )}
+            {state.kafkaMode === 'external' &&
+              state.kafkaSaslMechanism === 'aws-iam' && (
+                <ConfigRow
                   label="Topics"
                   value={
                     state.kafkaProvisionTopics

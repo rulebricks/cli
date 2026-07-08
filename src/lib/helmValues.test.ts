@@ -457,6 +457,59 @@ test("external MSK IAM topic-provisioning toggle maps to kafka.provisioning.enab
   assert.equal(off.kafka.topics?.length, 3);
 });
 
+test("kafka-exporter defaults on wherever the chart can authenticate it", () => {
+  // In-cluster: plaintext broker, exporter always works.
+  const inCluster = buildHelmValues(
+    cloneFixture("aws-self-hosted-minimal"),
+  ) as Record<string, any>;
+  assert.equal(inCluster.rulebricks.kafkaExporter.enabled, true);
+
+  // External MSK IAM: opt-in - the exporter only supports IRSA, not the Pod
+  // Identity associations the CLI creates (kafka_exporter#494).
+  const msk = buildHelmValues(
+    cloneFixture("aws-external-kafka-msk"),
+  ) as Record<string, any>;
+  assert.equal(msk.rulebricks.kafkaExporter.enabled, false);
+  assert.equal(
+    msk.rulebricks.kafkaExporter.brokers,
+    "b-1.msk.example:9098,b-2.msk.example:9098",
+  );
+
+  // Explicit opt-in (IRSA users) is honored.
+  const optIn = cloneFixture("aws-external-kafka-msk");
+  optIn.features.cache = { kafkaExporter: { enabled: true } };
+  const optInValues = buildHelmValues(optIn) as Record<string, any>;
+  assert.equal(optInValues.rulebricks.kafkaExporter.enabled, true);
+
+  // Static PLAIN/SCRAM with credentials: the chart inherits kafkaSasl into the
+  // exporter, so it works out of the box.
+  const staticSasl = buildHelmValues(
+    cloneFixture("gcp-external-kafka"),
+  ) as Record<string, any>;
+  assert.equal(staticSasl.rulebricks.kafkaExporter.enabled, true);
+
+  // Static mechanism without any credential to carry: stay opt-in.
+  const noCreds = cloneFixture("gcp-external-kafka");
+  (noCreds.externalServices!.kafka!.external!.sasl as any) = {
+    mechanism: "plain",
+  };
+  const noCredsValues = buildHelmValues(noCreds) as Record<string, any>;
+  assert.equal(noCredsValues.rulebricks.kafkaExporter.enabled, false);
+});
+
+test("MSK IAM config without a SASL region fails schema validation", () => {
+  const cfg = cloneFixture("aws-external-kafka-msk");
+  delete (cfg.externalServices!.kafka!.external!.sasl as any).region;
+  const result = DeploymentConfigSchema.safeParse(cfg);
+  assert.equal(result.success, false);
+  assert.ok(
+    result.error!.issues.some((issue) =>
+      issue.path.join(".").endsWith("external.sasl.region"),
+    ),
+    JSON.stringify(result.error!.issues),
+  );
+});
+
 test("in-cluster provisioning uses baseline partitions and the (empty) prefix", () => {
   // Tiers were removed: partition sizing is now a fixed baseline that mirrors
   // the chart defaults, identical across every in-cluster deployment.
@@ -1125,6 +1178,23 @@ test("external Postgres maps to supabase.externalDatabase with bootstrap creds",
   // The shared service-role password the chart hands every service.
   assert.ok(typeof sb.secret.db.password === "string");
   assert.equal(sb.secret.db.database, "postgres");
+  // Managed Postgres defaults to forced SSL (e.g. RDS rds.force_ssl=1), while
+  // the chart defaults DB_SSL to disable; external mode must override it for
+  // every service that dials the DB. Realtime takes a boolean-as-string.
+  assert.equal(sb.auth.environment.DB_SSL, "require");
+  assert.equal(sb.rest.environment.DB_SSL, "require");
+  assert.equal(sb.meta.environment.DB_SSL, "require");
+  assert.equal(sb.realtime.environment.DB_SSL, "true");
+});
+
+test("embedded Postgres does not override DB_SSL (in-cluster DB has no TLS)", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const values = buildHelmValues(config) as Record<string, any>;
+  const sb = values.supabase;
+  assert.equal(sb.auth.environment, undefined);
+  assert.equal(sb.rest.environment, undefined);
+  assert.equal(sb.realtime.environment, undefined);
+  assert.equal(sb.meta.environment, undefined);
 });
 
 test("external Postgres k8s secret mode keeps compatibility and uses secret refs", () => {

@@ -42,7 +42,10 @@ export function externalServicesFieldOrder(
     if (s.preset !== "custom" && s.provider) fields.push("kafka-pick");
     fields.push("kafka-brokers", "kafka-topic-prefix");
     if (s.preset === "aws-msk-iam") {
-      fields.push("kafka-aws-region", "kafka-aws-role", "kafka-provision-topics");
+      // No identity-role field: deploy derives the cluster-setup role
+      // (<cluster>-rulebricks) or reuses existing Pod Identity associations;
+      // config.yaml (externalServices.kafka.external.identity) overrides.
+      fields.push("kafka-aws-region", "kafka-provision-topics");
     } else if (s.preset === "azure-event-hubs") {
       fields.push("kafka-azure-connection");
     } else if (s.preset === "gcp-managed") {

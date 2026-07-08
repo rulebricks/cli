@@ -33,7 +33,10 @@ import {
   updateKubeconfig,
   checkAuroraLogicalReplication,
 } from "../lib/cloudCli.js";
-import { ensureWorkloadIdentityFederation } from "../lib/workloadIdentity.js";
+import {
+  ensureWorkloadIdentityFederation,
+  verifyManualKafkaAssociations,
+} from "../lib/workloadIdentity.js";
 import {
   generateHelmValuesPreservingEdits,
   updateHelmValuesForTLS,
@@ -446,6 +449,42 @@ function DeployCommandInner({
             "(If the cluster uses a default parameter group, create a custom one first and attach it.)",
         );
       }
+    }
+
+    // AWS MSK IAM without Pod Identity credentials wedges the topic-provision
+    // pre-install hook until the helm timeout ("no EC2 IMDS role found"), so
+    // fail in seconds here instead. Deploy covers the common case itself by
+    // deriving the cluster-setup role (<cluster>-rulebricks); this only fires
+    // when that role is absent AND no manually-managed associations exist.
+    const kafkaIdentity = await verifyManualKafkaAssociations(cfg);
+    if (!kafkaIdentity.ok) {
+      const namespace = getNamespace(cfg.name);
+      const cluster = cfg.infrastructure.clusterName;
+      const region = cfg.infrastructure.region;
+      throw new Error(
+        "External Kafka uses AWS MSK IAM, but no Pod Identity credentials are " +
+          "available for these service accounts:\n" +
+          kafkaIdentity.missing.map((sa) => `  - ${namespace}/${sa}`).join("\n") +
+          "\nWithout them, topic provisioning and HPS cannot reach the broker " +
+          "and the install hangs until the helm timeout.\n\n" +
+          `The cluster-setup role (${cluster}-rulebricks) was not found (or its ` +
+          "trust policy does not allow pods.eks.amazonaws.com), and no existing " +
+          "Pod Identity associations cover these service accounts.\n\n" +
+          "Fix one of:\n" +
+          "  - Run the Rulebricks AWS cluster-setup stack, which provisions the " +
+          `${cluster}-rulebricks role deploy binds automatically.\n` +
+          "  - Set externalServices.kafka.external.identity.awsRoleArn in " +
+          "config.yaml to a Pod Identity-capable role with MSK access.\n" +
+          "  - Create the associations yourself, e.g.:\n" +
+          kafkaIdentity.missing
+            .map(
+              (sa) =>
+                `      aws eks create-pod-identity-association --cluster-name ${cluster} \\\n` +
+                `        --namespace ${namespace} --service-account ${sa} \\\n` +
+                `        --role-arn <role-arn> --region ${region}`,
+            )
+            .join("\n"),
+      );
     }
   }
 

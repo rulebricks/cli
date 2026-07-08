@@ -825,8 +825,7 @@ Resources:
 
   # Resource Metrics API (metrics.k8s.io). EKS does NOT ship this by default,
   # and without it every CPU/memory-based autoscaler is inert: the chart's KEDA
-  # cpu triggers (the ONLY scaling signal under MSK IAM token auth, where Kafka
-  # lag triggers are skipped) and the Traefik HPA all fail with
+  # cpu fallback triggers and the Traefik HPA all fail with
   # FailedGetResourceMetric.
   MetricsServerAddon:
     Type: AWS::EKS::Addon
@@ -940,8 +939,11 @@ Resources:
   # ===========================================================================
   # RULEBRICKS ROLE (single role for all data paths). Trusts the EKS Pod
   # Identity service principal; the CLI binds it to vector/clickhouse/backup
-  # (S3), prometheus (AMP), and hps/hps-worker/topic-provision (MSK) SAs via
-  # namespace-scoped Pod Identity associations at deploy time.
+  # (S3), prometheus (AMP), and the MSK IAM clients (hps, hps-worker,
+  # topic-provision, keda-operator) via namespace-scoped Pod Identity
+  # associations at deploy time. kafka-exporter is IRSA-only
+  # (kafka_exporter#494) - annotate its ServiceAccount with this role if MSK
+  # Kafka metrics are needed.
   # ===========================================================================
   RulebricksRole:
     Type: AWS::IAM::Role

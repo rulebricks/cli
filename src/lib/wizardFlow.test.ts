@@ -172,7 +172,7 @@ test("kafka preset branches per provider", () => {
     {
       provider: "aws",
       preset: "aws-msk-iam",
-      tail: ["kafka-aws-region", "kafka-aws-role", "kafka-provision-topics"],
+      tail: ["kafka-aws-region", "kafka-provision-topics"],
     },
     {
       provider: "azure",

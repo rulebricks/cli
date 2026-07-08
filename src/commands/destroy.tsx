@@ -1,10 +1,12 @@
 import React, { useCallback, useState } from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp } from "ink";
 import {
   BorderBox,
+  CommandApprovalProvider,
   Spinner,
   StatusLine,
   ThemeProvider,
+  useGatedInput,
   useTheme,
   Logo,
 } from "../components/common/index.js";
@@ -27,7 +29,14 @@ import {
   namespaceExists,
   removeBlockingFinalizers,
 } from "../lib/kubernetes.js";
-import { DeploymentState, getNamespace, getReleaseName } from "../types/index.js";
+import { CommandDeniedError } from "../lib/commandApproval.js";
+import { removeWorkloadIdentityFederation } from "../lib/workloadIdentity.js";
+import {
+  DeploymentConfig,
+  DeploymentState,
+  getNamespace,
+  getReleaseName,
+} from "../types/index.js";
 
 interface DestroyCommandProps {
   name: string;
@@ -44,6 +53,7 @@ interface StepStatus {
   namespace: "pending" | "running" | "success" | "error" | "skipped";
   kubeSystem: "pending" | "running" | "success" | "error" | "skipped";
   crds: "pending" | "running" | "success" | "error" | "skipped";
+  workloadIdentity: "pending" | "running" | "success" | "error" | "skipped";
   cleanup: "pending" | "running" | "success" | "error" | "skipped";
 }
 
@@ -64,6 +74,8 @@ function DestroyCommandInner({
   const { colors } = useTheme();
   const [step, setStep] = useState<DestroyStep>("loading");
   const [state, setState] = useState<DeploymentState | null>(null);
+  const [deploymentConfig, setDeploymentConfig] =
+    useState<DeploymentConfig | null>(null);
   const [scope, setScope] = useState<DeploymentScope | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<StepStatus>({
@@ -72,6 +84,7 @@ function DestroyCommandInner({
     namespace: "pending",
     kubeSystem: "pending",
     crds: "pending",
+    workloadIdentity: "pending",
     cleanup: "pending",
   });
 
@@ -85,11 +98,15 @@ function DestroyCommandInner({
           return;
         }
 
+        // Config is optional for cluster cleanup (state/name suffice) but
+        // required for cloud-side workload-identity removal.
+        let cfg: DeploymentConfig | null = null;
         try {
-          await loadDeploymentConfig(name);
+          cfg = await loadDeploymentConfig(name);
         } catch {
           // Config might be corrupted or missing; cluster cleanup can still use state/name.
         }
+        setDeploymentConfig(cfg);
 
         const st = await loadDeploymentState(name);
         setState(st);
@@ -99,7 +116,7 @@ function DestroyCommandInner({
 
         if (force) {
           setStep("destroying");
-          runDestroy(st, deploymentScope);
+          runDestroy(st, deploymentScope, cfg);
         } else {
           setStep("confirm");
         }
@@ -112,11 +129,11 @@ function DestroyCommandInner({
     })();
   }, [name, force]);
 
-  useInput((input, key) => {
+  useGatedInput((input, key) => {
     if (step === "confirm") {
       if (key.return) {
         setStep("destroying");
-        runDestroy(state, scope!);
+        runDestroy(state, scope!, deploymentConfig);
       } else if (key.escape) {
         exit();
       }
@@ -126,7 +143,11 @@ function DestroyCommandInner({
   });
 
   const runDestroy = useCallback(
-    async (st: DeploymentState | null, deploymentScope: DeploymentScope) => {
+    async (
+      st: DeploymentState | null,
+      deploymentScope: DeploymentScope,
+      cfg: DeploymentConfig | null,
+    ) => {
       try {
         const namespace = st?.application?.namespace || getNamespace(name);
         const releaseName = getReleaseName(name);
@@ -215,6 +236,30 @@ function DestroyCommandInner({
           }));
         }
 
+        // Cloud-side counterpart of deploy's ensureWorkloadIdentityFederation:
+        // the per-namespace trust (EKS Pod Identity associations / Azure
+        // federated credentials / GCP workloadIdentityUser bindings) lives in
+        // the cloud control plane, so helm/namespace deletion never removes it.
+        // Runs outside the clusterAccessible gate for the same reason.
+        if (cfg) {
+          setStatus((s) => ({ ...s, workloadIdentity: "running" }));
+          try {
+            const outcome = await removeWorkloadIdentityFederation(cfg);
+            setStatus((s) => ({
+              ...s,
+              workloadIdentity: outcome.skipped ? "skipped" : "success",
+            }));
+          } catch (err) {
+            setStatus((s) => ({
+              ...s,
+              workloadIdentity:
+                err instanceof CommandDeniedError ? "skipped" : "error",
+            }));
+          }
+        } else {
+          setStatus((s) => ({ ...s, workloadIdentity: "skipped" }));
+        }
+
         if (config && deploymentScope.hasLocalFiles) {
           setStatus((s) => ({ ...s, cleanup: "running" }));
           try {
@@ -278,6 +323,8 @@ function DestroyCommandInner({
     if (status.kubeSystem === "success")
       cleanedItems.push("kube-system leftovers (kubelet service)");
     if (status.crds === "success") cleanedItems.push("Shared CRDs");
+    if (status.workloadIdentity === "success")
+      cleanedItems.push("Workload identity bindings");
     if (status.cleanup === "success")
       cleanedItems.push("Local configuration files");
 
@@ -355,6 +402,10 @@ function DestroyCommandInner({
               />
             </>
           )}
+          <StatusLine
+            status={status.workloadIdentity}
+            label="Removing workload identity bindings"
+          />
           {config && (
             <StatusLine
               status={status.cleanup}
@@ -468,7 +519,11 @@ export function DestroyCommand(props: DestroyCommandProps) {
   return (
     <ThemeProvider theme="destroy">
       <Logo />
-      <DestroyCommandInner {...props} />
+      {/* Approval prompts for the mutating cloud CLI calls issued by
+          workload-identity removal, matching deploy's federation setup. */}
+      <CommandApprovalProvider>
+        <DestroyCommandInner {...props} />
+      </CommandApprovalProvider>
     </ThemeProvider>
   );
 }

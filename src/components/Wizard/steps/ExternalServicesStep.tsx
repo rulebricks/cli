@@ -55,7 +55,7 @@ const PRESETS: { id: KafkaPreset; label: string; hint: string }[] = [
   {
     id: "aws-msk-iam",
     label: "AWS MSK (IAM auth)",
-    hint: "Pod identity (IRSA). Vector uses a kafka-proxy bridge sidecar.",
+    hint: "Pod identity: HPS + lag autoscaling connect natively. Vector uses a kafka-proxy bridge sidecar.",
   },
   {
     id: "azure-event-hubs",
@@ -166,7 +166,6 @@ export function ExternalServicesStep({
   const [awsRegion, setAwsRegion] = useState(
     state.kafkaSaslRegion || state.region,
   );
-  const [awsRole, setAwsRole] = useState(state.kafkaIdentityAwsRoleArn);
   const [provisionTopics, setProvisionTopics] = useState(
     state.kafkaProvisionTopics,
   );
@@ -228,7 +227,10 @@ export function ExternalServicesStep({
         kafkaSsl = true;
         mechanism = "aws-iam";
         region = awsRegion.trim();
-        awsRoleArn = awsRole.trim();
+        // Not collected by the wizard: deploy derives the cluster-setup role
+        // or reuses existing associations. Pass through any config.yaml value
+        // so a manual override survives configure re-runs.
+        awsRoleArn = state.kafkaIdentityAwsRoleArn;
       } else if (preset === "azure-event-hubs") {
         kafkaSsl = true;
         mechanism = "plain";
@@ -688,22 +690,6 @@ export function ExternalServicesStep({
             }
             setError(null);
             save({ kafkaSaslRegion: awsRegion.trim() });
-            flow.next();
-          }}
-        />
-      ),
-    },
-    {
-      id: "kafka-aws-role",
-      render: (flow) => (
-        <TextField
-          label="MSK IAM role ARN"
-          hint="Pod Identity role for HPS + the Vector bridge (the cluster-setup RulebricksRole). Blank to reuse the SAs' association."
-          value={awsRole}
-          onChange={setAwsRole}
-          placeholder="arn:aws:iam::123456789012:role/rulebricks-cluster-rulebricks"
-          onSubmit={() => {
-            save({ kafkaIdentityAwsRoleArn: awsRole.trim() });
             flow.next();
           }}
         />

@@ -360,7 +360,7 @@ function ConfigureCommandInner({ name }: ConfigureCommandProps) {
 
   if (step === "error") {
     return (
-      <ThemeProvider theme="deploy">
+      <ThemeProvider theme="init">
         <Logo />
         <BorderBox title="Configure Failed">
           <Box flexDirection="column" marginY={1}>
@@ -375,7 +375,7 @@ function ConfigureCommandInner({ name }: ConfigureCommandProps) {
   }
 
   return (
-    <ThemeProvider theme="deploy">
+    <ThemeProvider theme="init">
       <Logo />
       <BorderBox title="Configure">
         <Box marginY={1}>
