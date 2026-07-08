@@ -2112,8 +2112,30 @@ export async function listManagedPostgres(
 }
 
 /**
- * Read a Secrets Manager secret. When the value is the RDS-managed JSON
- * ({username, password}), the password field is returned.
+ * Unwrap a Secrets Manager SecretString to the bare credential. Known JSON
+ * envelopes: the RDS-managed {username, password} document, and the
+ * cluster-setup ElastiCache document {authToken} (GenerateStringKey:
+ * authToken in rulebricks-cluster.cfn.yaml). Passing the raw JSON through -
+ * as happened for ElastiCache before authToken was handled here - poisons
+ * REDIS_PASSWORD, and every Redis consumer fails with WRONGPASS at runtime.
+ */
+export function extractSecretCredential(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as {
+      password?: string;
+      authToken?: string;
+    };
+    if (typeof parsed.password === "string") return parsed.password;
+    if (typeof parsed.authToken === "string") return parsed.authToken;
+  } catch {
+    // Plain string secret.
+  }
+  return raw;
+}
+
+/**
+ * Read a Secrets Manager secret, unwrapping known JSON envelopes
+ * (see extractSecretCredential).
  */
 export async function getAwsSecretValue(
   secretId: string,
@@ -2126,13 +2148,7 @@ export async function getAwsSecretValue(
     );
     const raw = result.stdout.trim();
     if (!raw || raw === "None") return null;
-    try {
-      const parsed = JSON.parse(raw) as { password?: string };
-      if (typeof parsed.password === "string") return parsed.password;
-    } catch {
-      // Plain string secret.
-    }
-    return raw;
+    return extractSecretCredential(raw);
   } catch {
     return null;
   }
