@@ -162,9 +162,11 @@ Parameters:
   NodeMaxSize:
     Type: Number
     # Core services need only 3-6 nodes; burst capacity lives in the dedicated
-    # burst nodegroup. 6 leaves room for HPS scaling 3->8 (+5 vCPU of requests),
-    # which stays on the core pool.
-    Default: 6
+    # burst nodegroup. 8 leaves room for the gather plane scaling 3->16 HPS
+    # pods (+13 vCPU of requests) plus Traefik's HPA, which all stay on the
+    # core pool. Like the burst ceiling, this is scale-down-safe: the
+    # cluster-autoscaler removes core nodes once HPS sheds replicas.
+    Default: 8
   NodeVolumeSizeGiB:
     Type: Number
     Default: 50
@@ -191,7 +193,19 @@ Parameters:
       64-worker KEDA ceiling needs ~64 GiB.
   BurstNodeMaxSize:
     Type: Number
-    Default: 1
+    Default: 4
+    Description: >-
+      Ceiling for the burst pool - and in practice the cluster's payload
+      throughput ceiling. Load testing measured ~0.25-0.5ms of worker
+      core-time per payload, so each 16-vCPU burst node adds roughly 30-50k
+      payloads/sec of bulk capacity (4 nodes measured 110k+ payloads/s
+      sustained at 99.6% success). The ceiling is deliberately liberal: the
+      cluster-autoscaler only provisions nodes when scaled-out workers are
+      actually Pending and drains them within minutes of the fleet cooling
+      down (verified: burst desired returns to 0), so unused ceiling costs
+      nothing. 4 nodes exactly fits the chart's full 128-worker fleet
+      (128 x 500m CPU requests = 64 vCPU) - the point at which the solution
+      topic's partition count, not compute, becomes the limit.
 
   # ---------------------------------------------------------------------------
   # Managed Kafka (Amazon MSK)
@@ -755,6 +769,70 @@ Resources:
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
 
+  # Cluster-autoscaler role (Pod Identity). Without cluster-autoscaler the
+  # burst nodegroup NEVER activates: KEDA scales worker pods, they go Pending,
+  # and nothing moves the ASG's desired count off 0 (observed in load testing:
+  # 50 Pending workers stranded while the burst pool sat empty). The chart
+  # deploys the autoscaler (clusterAutoscaler.enabled, AWS deployments only)
+  # and the CLI's workload-identity step binds its ServiceAccount to this role.
+  # Managed nodegroups auto-tag their ASGs with the
+  # k8s.io/cluster-autoscaler/enabled + k8s.io/cluster-autoscaler/<cluster>
+  # discovery tags, which the write-action condition below is scoped to.
+  ClusterAutoscalerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-cluster-autoscaler"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: pods.eks.amazonaws.com }
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: cluster-autoscaler
+          # JSON-string form: the cluster-scoped condition key embeds
+          # ${ClusterName}, and YAML mapping keys can't hold intrinsics.
+          PolicyDocument: !Sub |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "WriteScopedToThisCluster",
+                  "Effect": "Allow",
+                  "Action": [
+                    "autoscaling:SetDesiredCapacity",
+                    "autoscaling:TerminateInstanceInAutoScalingGroup"
+                  ],
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:ResourceTag/k8s.io/cluster-autoscaler/enabled": "true",
+                      "aws:ResourceTag/k8s.io/cluster-autoscaler/${ClusterName}": "owned"
+                    }
+                  }
+                },
+                {
+                  "Sid": "ReadOnlyDiscovery",
+                  "Effect": "Allow",
+                  "Action": [
+                    "autoscaling:DescribeAutoScalingGroups",
+                    "autoscaling:DescribeAutoScalingInstances",
+                    "autoscaling:DescribeLaunchConfigurations",
+                    "autoscaling:DescribeScalingActivities",
+                    "autoscaling:DescribeTags",
+                    "ec2:DescribeImages",
+                    "ec2:DescribeInstanceTypes",
+                    "ec2:DescribeLaunchTemplateVersions",
+                    "ec2:GetInstanceTypesFromInstanceRequirements",
+                    "eks:DescribeNodegroup"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+
   # ===========================================================================
   # EKS CLUSTER
   # Control plane ENIs live in the private subnets; nodes reach the API
@@ -1272,6 +1350,11 @@ Outputs:
   RulebricksRoleArn:
     Description: CLI storage/metrics/kafka identity - the single Pod Identity role.
     Value: !GetAtt RulebricksRole.Arn
+  ClusterAutoscalerRoleArn:
+    Description: >-
+      Pod Identity role for the chart-managed cluster-autoscaler; the CLI's
+      workload-identity step binds the autoscaler ServiceAccount to it.
+    Value: !GetAtt ClusterAutoscalerRole.Arn
 
   # --- Metrics (CLI monitoring step) ------------------------------------------
   PrometheusWorkspaceId:

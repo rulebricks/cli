@@ -18,14 +18,14 @@
     "enableDataServicePrivateEndpoints": { "value": false },
 
     "nodeCount": { "value": 3 },
-    "maxNodeCount": { "value": 5 },
+    "maxNodeCount": { "value": 8 },
     "nodeVmSize": { "value": "Standard_F4as_v6" },
     "maxPods": { "value": 110 },
     "osDiskSizeGB": { "value": 64 },
     "osDiskType": { "value": "Managed" },
     "enableBurstPool": { "value": true },
     "burstVmSize": { "value": "Standard_F16as_v6" },
-    "burstMaxCount": { "value": 1 },
+    "burstMaxCount": { "value": 4 },
 
     "createStorage": { "value": true },
     "existingStorageAccountName": { "value": "" },

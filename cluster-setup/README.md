@@ -41,6 +41,11 @@ steps, deploy command, and take-down command.
   hosts many deployments without re-running the template.
 - **Burst pool contract**: label + taint `rulebricks.com/pool=burst`; the
   chart's worker fleet tolerates and prefers it out of the box.
+- **Node autoscaling**: AKS and GKE node pools autoscale natively. EKS does
+  not, so the chart deploys cluster-autoscaler on AWS and the CFN template
+  provisions its `<cluster>-cluster-autoscaler` Pod Identity role (the CLI
+  binds the two at deploy time). Without it, worker scale-outs strand Pending
+  pods and the burst pool never leaves 0 nodes.
 
 ## Outputs -> CLI wizard fields
 

@@ -338,10 +338,31 @@ function kafkaUsesAwsIamWithoutRole(config: DeploymentConfig): boolean {
 export async function deriveConventionalAwsKafkaRole(
   config: DeploymentConfig,
 ): Promise<string | undefined> {
+  return deriveConventionalAwsRole(config, "rulebricks");
+}
+
+/**
+ * Same convention for the cluster-setup autoscaler role
+ * (`<cluster>-cluster-autoscaler`, ClusterAutoscalerRole): deploy binds the
+ * chart's fixed "cluster-autoscaler" ServiceAccount to it so node autoscaling
+ * works out of the box on AWS. Undefined on BYO clusters without the role -
+ * the chart still installs the autoscaler, which then needs a manually-managed
+ * association or role.
+ */
+export async function deriveConventionalAwsClusterAutoscalerRole(
+  config: DeploymentConfig,
+): Promise<string | undefined> {
+  return deriveConventionalAwsRole(config, "cluster-autoscaler");
+}
+
+async function deriveConventionalAwsRole(
+  config: DeploymentConfig,
+  roleSuffix: string,
+): Promise<string | undefined> {
   const cluster = config.infrastructure.clusterName;
   if (!cluster) return undefined;
   const roleRes = await run(
-    `aws iam get-role --role-name ${shq(`${cluster}-rulebricks`)} ` +
+    `aws iam get-role --role-name ${shq(`${cluster}-${roleSuffix}`)} ` +
       `--query Role --output json`,
     { intent: "Configure workload identity (AWS)", provider: "aws" },
   );
@@ -388,6 +409,21 @@ export async function ensureWorkloadIdentityFederation(
       ]) {
         bindings.push({ serviceAccount, principal: derived });
       }
+    }
+  }
+
+  // AWS node autoscaling: the chart deploys cluster-autoscaler (EKS nodegroups
+  // have no built-in scaling), whose fixed "cluster-autoscaler" SA binds to the
+  // cluster-setup <cluster>-cluster-autoscaler role. Skipped silently when the
+  // role doesn't exist (BYO cluster / pre-autoscaler cluster-setup stacks).
+  if (provider === "aws") {
+    const autoscalerRole =
+      await deriveConventionalAwsClusterAutoscalerRole(config);
+    if (autoscalerRole) {
+      bindings.push({
+        serviceAccount: "cluster-autoscaler",
+        principal: autoscalerRole,
+      });
     }
   }
 

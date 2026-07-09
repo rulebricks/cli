@@ -50,6 +50,10 @@ const droppedRequests = new Counter("dropped_requests");
 const totalPayloads = new Counter("total_payloads");
 const failedPayloads = new Counter("failed_payloads");
 
+// Allow overriding the VU ceiling so the generator doesn't cap out before
+// the server does (default mirrors the original min(rps*3, 500) behavior).
+const maxVUs = parseInt(__ENV.MAX_VUS) || Math.min(config.targetRps * 3, 500);
+
 // k6 options with warm-up and measurement phases
 export const options = {
   scenarios: {
@@ -59,8 +63,8 @@ export const options = {
       rate: config.targetRps,
       timeUnit: "1s",
       duration: "1m",
-      preAllocatedVUs: Math.min(config.targetRps, 100),
-      maxVUs: Math.min(config.targetRps * 3, 500),
+      preAllocatedVUs: Math.min(config.targetRps, 200),
+      maxVUs: maxVUs,
       exec: "warmUp",
       tags: { phase: "warmup" },
     },
@@ -70,8 +74,8 @@ export const options = {
       rate: config.targetRps,
       timeUnit: "1s",
       duration: config.testDuration,
-      preAllocatedVUs: Math.min(config.targetRps, 100),
-      maxVUs: Math.min(config.targetRps * 3, 500),
+      preAllocatedVUs: Math.min(config.targetRps, 200),
+      maxVUs: maxVUs,
       startTime: "1m", // Start after warm-up
       exec: "measureTest",
       tags: { phase: "measurement" },
@@ -88,13 +92,29 @@ export const options = {
 const params = createRequestParams(config.apiKey, "30s");
 
 /**
+ * Pre-stringified body pool, built lazily per VU. Generating and stringifying
+ * 500-1000 payload objects per iteration saturates the load generator's CPU
+ * long before the server saturates; a small rotating pool keeps payload
+ * variety while making send cost O(1).
+ */
+const POOL_SIZE = 4;
+let bodyPool = null;
+function getBody(iter) {
+  if (!bodyPool) {
+    bodyPool = [];
+    for (let i = 0; i < POOL_SIZE; i++) {
+      bodyPool.push(JSON.stringify(generateBulkPayload(config.bulkSize, `pool${i}`)));
+    }
+  }
+  return bodyPool[iter % POOL_SIZE];
+}
+
+/**
  * Warm-up function - same as test but metrics tagged differently
  */
 export function warmUp() {
-  const bulkPayload = generateBulkPayload(config.bulkSize);
-
   try {
-    http.post(config.apiUrl, JSON.stringify(bulkPayload), params);
+    http.post(config.apiUrl, getBody(__ITER), params);
   } catch (error) {
     // Ignore errors during warm-up
   }
@@ -104,15 +124,10 @@ export function warmUp() {
  * Measurement test function - sends bulk requests
  */
 export function measureTest() {
-  const bulkPayload = generateBulkPayload(config.bulkSize);
   const start = Date.now();
 
   try {
-    const response = http.post(
-      config.apiUrl,
-      JSON.stringify(bulkPayload),
-      params
-    );
+    const response = http.post(config.apiUrl, getBody(__ITER), params);
 
     const duration = Date.now() - start;
     requestDuration.add(duration);
@@ -129,6 +144,15 @@ export function measureTest() {
         }
       },
     });
+
+    // Diagnostic: log failing responses so we can classify the failure mode.
+    if (!success) {
+      console.warn(
+        `FAIL status=${response.status} dur=${duration}ms body=${String(
+          response.body || ""
+        ).slice(0, 300)}`
+      );
+    }
 
     errorRate.add(!success);
     successRate.add(success);

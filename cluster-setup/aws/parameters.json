@@ -12,11 +12,11 @@
   { "ParameterKey": "NodeInstanceType", "ParameterValue": "m7i.xlarge" },
   { "ParameterKey": "NodeDesiredCapacity", "ParameterValue": "3" },
   { "ParameterKey": "NodeMinSize", "ParameterValue": "3" },
-  { "ParameterKey": "NodeMaxSize", "ParameterValue": "5" },
+  { "ParameterKey": "NodeMaxSize", "ParameterValue": "8" },
   { "ParameterKey": "NodeVolumeSizeGiB", "ParameterValue": "50" },
   { "ParameterKey": "EnableBurstPool", "ParameterValue": "true" },
   { "ParameterKey": "BurstInstanceType", "ParameterValue": "m7i.4xlarge" },
-  { "ParameterKey": "BurstNodeMaxSize", "ParameterValue": "1" },
+  { "ParameterKey": "BurstNodeMaxSize", "ParameterValue": "4" },
 
   { "ParameterKey": "EnableManagedKafka", "ParameterValue": "false" },
   { "ParameterKey": "KafkaVersion", "ParameterValue": "3.9.x" },

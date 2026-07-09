@@ -1671,6 +1671,28 @@ test("imageRegistry override rewrites every image host to the custom registry", 
   );
 });
 
+test("cluster-autoscaler enabled on AWS with cluster name + region, disabled elsewhere", () => {
+  const aws = cloneFixture("aws-self-hosted-minimal");
+  const awsValues = buildHelmValues(aws) as Record<string, any>;
+  assert.deepEqual(awsValues["cluster-autoscaler"], {
+    enabled: true,
+    cloudProvider: "aws",
+    autoDiscovery: { clusterName: aws.infrastructure.clusterName },
+    awsRegion: aws.infrastructure.region,
+  });
+
+  // GKE/AKS node pools autoscale natively - the subchart must stay off.
+  const gcp = cloneFixture("gcp-external-postgres");
+  const gcpValues = buildHelmValues(gcp) as Record<string, any>;
+  assert.deepEqual(gcpValues["cluster-autoscaler"], { enabled: false });
+
+  // Without a cluster name the autoscaler cannot auto-discover ASGs.
+  const noCluster = cloneFixture("aws-self-hosted-minimal");
+  noCluster.infrastructure.clusterName = "";
+  const noClusterValues = buildHelmValues(noCluster) as Record<string, any>;
+  assert.deepEqual(noClusterValues["cluster-autoscaler"], { enabled: false });
+});
+
 test("per-chart imagePullSecrets are still emitted for private rulebricks/*", () => {
   const config = cloneFixture("aws-self-hosted-minimal");
   const values = buildHelmValues(config) as Record<string, any>;

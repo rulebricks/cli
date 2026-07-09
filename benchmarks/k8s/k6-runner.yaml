@@ -1,0 +1,66 @@
+# Co-located k6 load-generator pod for benchmarking a deployment from inside
+# its own cluster (removes internet/NAT variance; exercises the full ingress
+# path when pointed at the public URL).
+#
+# Usage:
+#   kubectl create configmap rb-bench-scripts -n <namespace> \
+#     --from-file=qps-test.js --from-file=throughput-test.js
+#   kubectl create configmap rb-bench-lib -n <namespace> \
+#     --from-file=payload.js=lib/payload.js --from-file=report.js=lib/report.js
+#   kubectl apply -f k8s/k6-runner.yaml -n <namespace>
+#   kubectl exec -n <namespace> rb-benchmark-runner -- k6 run \
+#     -e API_URL=https://<domain>/api/v1/flows/<slug> -e API_KEY=<key> \
+#     -e TARGET_RPS=100 -e BULK_SIZE=500 -e TEST_DURATION=3m \
+#     /scripts/throughput-test.js
+#
+# Sizing notes from load testing: one runner pod (2-CPU limit) generates
+# ~25k payloads/sec of bulk traffic before the generator itself becomes the
+# bottleneck - run several pods in parallel (rename metadata.name) and sum
+# the results to measure beyond that. Raise MAX_VUS (see throughput-test.js)
+# when target latency exceeds ~1s so the arrival rate isn't VU-starved.
+#
+# Optionally add a hostAlias pinning the public hostname to the traefik
+# ClusterIP so in-cluster runs still traverse the ingress:
+#   spec.hostAliases:
+#     - ip: <traefik ClusterIP>
+#       hostnames: [<domain>]
+#
+# Delete the pod when finished: bare pods block cluster-autoscaler node
+# scale-down.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rb-benchmark-runner
+  labels:
+    app: rb-benchmark-runner
+    purpose: load-testing
+spec:
+  restartPolicy: Never
+  containers:
+    - name: k6
+      image: grafana/k6:latest
+      command: ["sh", "-c", "sleep infinity"]
+      workingDir: /home/k6
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: lib
+          mountPath: /scripts/lib
+        - name: results
+          mountPath: /home/k6
+  volumes:
+    - name: scripts
+      configMap:
+        name: rb-bench-scripts
+    - name: lib
+      configMap:
+        name: rb-bench-lib
+    - name: results
+      emptyDir: {}

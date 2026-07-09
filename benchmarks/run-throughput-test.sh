@@ -102,6 +102,7 @@ k6 run \
   -e TEST_DURATION="$DURATION" \
   -e TARGET_RPS="$RPS" \
   -e BULK_SIZE="$BULK_SIZE" \
+  -e MAX_VUS="${MAX_VUS:-}" \
   "$SCRIPT_DIR/throughput-test.js" || true
 
 # Open report in browser

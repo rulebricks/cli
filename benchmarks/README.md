@@ -58,6 +58,14 @@ All configuration is done via environment variables passed to k6:
 | `TEST_DURATION` | `4m`                             | Measurement duration (after 1m warm-up)          |
 | `TARGET_RPS`    | `500` (QPS) / `100` (Throughput) | Target requests per second                       |
 | `BULK_SIZE`     | `50`                             | Payloads per bulk request (throughput test only) |
+| `MAX_VUS`       | `min(TARGET_RPS * 3, 500)`       | VU ceiling (throughput test only). Raise when server latency exceeds ~1s at the target rate, otherwise the arrival rate silently VU-starves below `TARGET_RPS` |
+
+Bulk sizes of 500-1000+ exercise the engine's chunked dispatch most
+efficiently (HPS splits bulk requests into <=`FLOW_CHUNK_MAX_ITEMS`-payload
+Kafka messages, so large bulks amortize per-request gather overhead).
+Payload throughput = `TARGET_RPS x BULK_SIZE`; prefer raising `BULK_SIZE`
+over `TARGET_RPS` when probing engine capacity, and raise `TARGET_RPS` with
+small bulks when probing the API/ingress path.
 
 ### Test Structure
 
@@ -85,6 +93,24 @@ Sends bulk requests (arrays of payloads) at a constant rate. Each request contai
 ```
 Solutions/second = Successful Requests × Bulk Size / Test Duration
 ```
+
+---
+
+### Running In-Cluster (co-located load generator)
+
+For benchmarks that remove internet/NAT variance - or to push loads a laptop
+can't - run k6 from a pod inside the deployment's own cluster using
+`k8s/k6-runner.yaml` (usage instructions in the manifest header). One 2-CPU
+runner pod generates ~25k payloads/sec of bulk traffic; run several in
+parallel and sum the results to measure beyond that. Point `API_URL` at the
+public URL (with the manifest's optional hostAlias pinning it to the traefik
+ClusterIP) to exercise the full ingress path, or directly at the
+`<release>-hps` service to isolate the engine from the ingress.
+
+Size the runner pod's memory for `MAX_VUS x response size`: at bulk 1000 a
+response is ~1 MB, so 500 in-flight VUs need ~3 GiB during high-latency
+(scale-up) windows - an undersized pod gets OOM-killed mid-run (exit 137)
+exactly when results matter most.
 
 ---
 

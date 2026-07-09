@@ -481,6 +481,33 @@ function getExternalDnsProvider(dnsProvider: string): string {
   return mapping[dnsProvider] || "aws";
 }
 
+/**
+ * Cluster-autoscaler subchart values (AWS EKS only).
+ *
+ * EKS is the only supported provider whose node pools do NOT autoscale by
+ * themselves, so this is enabled exactly when the deployment targets AWS and
+ * the config carries the cluster name + region the autoscaler needs for ASG
+ * auto-discovery (EKS managed nodegroups tag their ASGs with
+ * k8s.io/cluster-autoscaler/<clusterName> automatically). Credentials come
+ * from the <cluster>-cluster-autoscaler Pod Identity role provisioned by
+ * cluster-setup and bound in the workload-identity step - no annotations here.
+ */
+function generateClusterAutoscaler(
+  config: DeploymentConfig,
+): Record<string, unknown> {
+  const cluster = config.infrastructure.clusterName;
+  const region = config.infrastructure.region;
+  if (config.infrastructure.provider !== "aws" || !cluster || !region) {
+    return { enabled: false };
+  }
+  return {
+    enabled: true,
+    cloudProvider: "aws",
+    autoDiscovery: { clusterName: cluster },
+    awsRegion: region,
+  };
+}
+
 function secretKeySelector(ref: SecretKeyRef): Record<string, string> {
   return {
     name: ref.name,
@@ -1894,24 +1921,13 @@ export function buildHelmValues(
           enabled: true,
           tolerations: operationalDaemonSetTolerations,
         },
-        extraEnv: [
-          // FLOW_CHUNK_MAX_ITEMS is the #1 throughput dial. Each chunk is one
-          // Kafka round-trip (gather -> solution -> worker -> solution-response
-          // -> gather), so throughput ~= (broker messages/sec) x (payloads per
-          // message). Bigger chunks = fewer messages per solution = less broker
-          // and coordination overhead. Benchmarks: 10 -> 50 gave +27%, and on
-          // small payloads 100 -> 1000 gave another ~1.6x (22k -> 35k sol/s),
-          // until the bottleneck moved off the broker onto worker CPU.
-          // 500 keeps typical bulk requests to 1-2 messages. The byte bound
-          // (CHUNK_MAX_BYTES, default 256 KiB in HPS) caps message size
-          // regardless, so large payloads stay under Kafka's 2 MiB
-          // max.message.bytes. High-throughput, small-payload deployments can
-          // raise this much higher (and CHUNK_MAX_BYTES with it); the only costs
-          // are per-request latency (one worker processes a whole chunk) and the
-          // 2 MiB cap on the larger response message (avg output x chunk size
-          // must stay < 2 MiB, so lower this for output-heavy flows).
-          { name: "FLOW_CHUNK_MAX_ITEMS", value: "500" },
-        ],
+        // No chunking env vars: HPS's self-tuning planner (kafka-queue.js
+        // planTargetChunkCount) sizes chunk fan-out per request from data
+        // volume, learned per-flow cost, and fleet width. The legacy
+        // FLOW_CHUNK_MAX_ITEMS knob is gone from HPS; the planner's optional
+        // bounds (CHUNK_TARGET_BYTES, CHUNK_TARGET_MS, CHUNK_COLD_ITEMS,
+        // CHUNK_FLEET_FACTOR, CHUNK_MAX_CHUNKS) all have safe derived
+        // defaults and are deliberately not surfaced as deployment dials.
 
         // Service account (annotated with the MSK IAM role for external Kafka)
         serviceAccount: generateHpsServiceAccount(config),
@@ -2627,6 +2643,19 @@ export function buildHelmValues(
       : {
           enabled: false,
         },
+
+    // =============================================================================
+    // CLUSTER AUTOSCALER (AWS EKS only)
+    // =============================================================================
+    // GKE and AKS node pools autoscale natively; EKS needs cluster-autoscaler
+    // to move nodegroup ASGs when pods go Pending. Without it the KEDA worker
+    // scaler strands Pending pods and the burst nodegroup (min 0) never
+    // activates - benchmarked as the primary throughput cliff. IAM comes from
+    // the cluster-setup stack's <cluster>-cluster-autoscaler Pod Identity role,
+    // bound to the fixed "cluster-autoscaler" SA by the workload-identity step;
+    // on BYO clusters without that role, create an equivalent role or disable
+    // this block via values edits.
+    "cluster-autoscaler": generateClusterAutoscaler(config),
   };
 
   // The managed-Postgres migration hook (templates/migration-job.yaml) reads the

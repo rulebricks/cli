@@ -70,9 +70,15 @@ param enableDataServicePrivateEndpoints bool = false
 // Node pools. The chart's steady-state request floor is ~10 vCPU / ~23 GiB,
 // so 3 x 4-vCPU/16-GiB nodes minimum; the burst pool absorbs the KEDA-scaled
 // worker fleet.
+//
+// Ceilings are deliberately liberal: AKS's built-in node autoscaler only adds
+// nodes when scaled-out pods are Pending and deallocates them (parked VMs,
+// scaleDownMode Deallocate) once the fleet cools, so unused ceiling costs
+// nothing at idle while removing hidden throughput walls.
 // ----------------------------------------------------------------------------
 param nodeCount int = 3
-param maxNodeCount int = 5
+@description('Core-pool ceiling. 8 leaves room for the chart gather plane scaling to 16 HPS pods (1 vCPU request each) plus Traefik HPA headroom on top of the ~10 vCPU core floor.')
+param maxNodeCount int = 8
 param nodeVmSize string = 'Standard_F4as_v6'
 
 @minValue(10)
@@ -88,7 +94,8 @@ param osDiskType string = 'Managed'
 
 param enableBurstPool bool = true
 param burstVmSize string = 'Standard_F16as_v6'
-param burstMaxCount int = 1
+@description('Burst-pool ceiling - in practice the payload-throughput ceiling. Load testing measured ~0.25-0.5ms of worker core-time per payload (~30-50k payloads/s per 16 vCPU; 4 nodes measured 110k+ payloads/s sustained). Memory binds first on F16as_v6 (32 GiB = ~28 workers x 1 GiB), so 4 nodes hosts a ~112-worker fleet; scale-down to 0 (Deallocate) makes the high ceiling free at idle.')
+param burstMaxCount int = 4
 
 // ----------------------------------------------------------------------------
 // Storage / metrics / external-dns

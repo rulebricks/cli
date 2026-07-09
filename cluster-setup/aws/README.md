@@ -69,6 +69,7 @@ Always created:
 | Cluster IAM role | `AWS::IAM::Role` | Control-plane role (trusts `eks.amazonaws.com`) + KMS grant policy |
 | Node IAM role | `AWS::IAM::Role` | Kubelet/CNI/ECR only (no CSI policy) |
 | EBS CSI IAM role | `AWS::IAM::Role` | `<cluster>-ebs-csi`; Pod Identity-trusted, scoped to the CSI driver |
+| Cluster-autoscaler IAM role | `AWS::IAM::Role` | `<cluster>-cluster-autoscaler`; Pod Identity-trusted; ASG writes conditioned on this cluster's autoscaler discovery tags. The chart deploys the autoscaler itself on AWS |
 | Rulebricks IAM role | `AWS::IAM::Role` | `<cluster>-rulebricks`; trusts `pods.eks.amazonaws.com`; S3 data policy + conditional AMP/MSK policies |
 | Add-ons | `AWS::EKS::Addon` x3 | `eks-pod-identity-agent`, `aws-ebs-csi-driver`, `metrics-server` |
 | Core nodegroup | `AWS::EKS::Nodegroup` | `standard-nodes` |
@@ -149,7 +150,7 @@ aws cloudformation wait stack-create-complete \
 aws eks update-kubeconfig --name rulebricks-cluster --region us-east-1
 ```
 
-- `CAPABILITY_NAMED_IAM` is required (named roles `<cluster>-rulebricks`, `<cluster>-ebs-csi`).
+- `CAPABILITY_NAMED_IAM` is required (named roles `<cluster>-rulebricks`, `<cluster>-ebs-csi`, `<cluster>-cluster-autoscaler`).
 - Timing: ~20-25 min base; `EnableManagedKafka` adds ~30 min, `EnableManagedDatabase` (Multi-AZ) ~15-20 min (parallel).
 - Then run `rulebricks init` and select the cluster; stack outputs map 1:1 to wizard fields.
 
