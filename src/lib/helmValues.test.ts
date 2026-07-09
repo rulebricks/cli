@@ -1523,6 +1523,14 @@ test("default image refs use the rulebricks/* split shape with no legacy hosts",
     values.clickstack.ferretdb.postgresImage.repository,
     "rulebricks/postgres-documentdb",
   );
+  assert.equal(
+    values["cluster-autoscaler"].image.repository,
+    "docker.io/rulebricks/cluster-autoscaler",
+  );
+  assert.equal(
+    values["cluster-autoscaler"].image.tag,
+    "1.34.3-debian13",
+  );
 
   // Whole-output guard: no dhi.io and no index.docker.io anywhere.
   const dump = JSON.stringify(values);
@@ -1654,11 +1662,15 @@ test("imageRegistry override rewrites every image host to the custom registry", 
     "rulebricks/keda-admission-webhooks",
   );
 
-  // vector + external-dns (full-path repository incl. host)
+  // vector + external-dns + cluster-autoscaler (full-path repository incl. host)
   assert.equal(values.vector.image.repository, `${reg}/rulebricks/vector`);
   assert.equal(
     values["external-dns"].image.repository,
     `${reg}/rulebricks/external-dns`,
+  );
+  assert.equal(
+    values["cluster-autoscaler"].image.repository,
+    `${reg}/rulebricks/cluster-autoscaler`,
   );
 
   // Every image host is the custom registry: no docker.io image refs remain.
@@ -1679,6 +1691,11 @@ test("cluster-autoscaler enabled on AWS with cluster name + region, disabled els
     cloudProvider: "aws",
     autoDiscovery: { clusterName: aws.infrastructure.clusterName },
     awsRegion: aws.infrastructure.region,
+    image: {
+      repository: "docker.io/rulebricks/cluster-autoscaler",
+      tag: "1.34.3-debian13",
+      pullSecrets: [`${getReleaseName(aws.name)}-regcred`],
+    },
   });
 
   // GKE/AKS node pools autoscale natively - the subchart must stay off.
@@ -1706,6 +1723,9 @@ test("per-chart imagePullSecrets are still emitted for private rulebricks/*", ()
   assert.deepEqual(values.traefik.deployment.imagePullSecrets, expected);
   assert.deepEqual(values.keda.imagePullSecrets, expected);
   assert.deepEqual(values.vector.image.pullSecrets, expected);
+  assert.deepEqual(values["cluster-autoscaler"].image.pullSecrets, [
+    `${getReleaseName(config.name)}-regcred`,
+  ]);
 
   // global has no legacy dhi.io reference.
   assert.ok(!JSON.stringify(values.global).includes("dhi.io"));

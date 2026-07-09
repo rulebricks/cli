@@ -117,6 +117,10 @@ export const BUNDLED_IMAGE_MANIFEST: {
       "tag": "0.21.0-debian13"
     },
     {
+      "name": "cluster-autoscaler",
+      "tag": "1.34.3-debian13"
+    },
+    {
       "name": "thanos",
       "tag": "0.41.0-debian13"
     },

@@ -21,6 +21,7 @@ images:
   - { name: supabase-postgres, kind: mirror, source: docker.io/supabase/postgres, tag: "17.6.1.141", auth: none, digest: "sha256:abc123" }
   - { name: rclone, kind: mirror, source: docker.io/rclone/rclone, tag: "1.71.1", auth: none, digest: "" }
   - { name: strimzi-kafka, kind: mirror, source: dhi.io/strimzi-kafka, tag: "1.0.1-debian13-kafka-4.2.0", auth: dhi, digest: "" }
+  - { name: cluster-autoscaler, kind: mirror, source: dhi.io/kubernetes-cluster-autoscaler, tag: "1.34.3-debian13", auth: dhi, digest: "" }
   - { name: postgres15, kind: mirror, source: dhi.io/postgres, tag: "15-debian13", auth: dhi, target: rulebricks/postgres, digest: "" }
 `;
 
@@ -104,6 +105,7 @@ test("bundled snapshot satisfies every image the CLI references", () => {
     "kafka-proxy",
     "supabase-postgres",
     "rclone",
+    "cluster-autoscaler",
   ]) {
     const resolved = catalog.image(name);
     assert.ok(resolved.tag.length > 0, `${name} has a tag`);

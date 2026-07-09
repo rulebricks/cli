@@ -94,7 +94,7 @@ param osDiskType string = 'Managed'
 
 param enableBurstPool bool = true
 param burstVmSize string = 'Standard_F16as_v6'
-@description('Burst-pool ceiling - in practice the payload-throughput ceiling. Load testing measured ~0.25-0.5ms of worker core-time per payload (~30-50k payloads/s per 16 vCPU; 4 nodes measured 110k+ payloads/s sustained). Memory binds first on F16as_v6 (32 GiB = ~28 workers x 1 GiB), so 4 nodes hosts a ~112-worker fleet; scale-down to 0 (Deallocate) makes the high ceiling free at idle.')
+@description('Burst-pool ceiling - in practice the payload-throughput ceiling (each 16-vCPU node adds roughly 30-50k payloads/sec of bulk capacity). Memory binds first on F16as_v6 (32 GiB = ~28 workers x 1 GiB), so 4 nodes hosts a ~112-worker fleet; scale-down to 0 (Deallocate) makes the high ceiling free at idle.')
 param burstMaxCount int = 4
 
 // ----------------------------------------------------------------------------

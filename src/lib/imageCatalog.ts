@@ -58,6 +58,7 @@ const REQUIRED_IMAGE_NAMES = [
   "supabase-postgres",
   "rclone",
   "strimzi-kafka",
+  "cluster-autoscaler",
 ] as const;
 
 const MANIFEST_CACHE_DIR = path.join(

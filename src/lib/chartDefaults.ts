@@ -40,10 +40,12 @@ export const DECISION_LOG_BATCH = {
 export const PROMETHEUS_RETENTION = "30d";
 export const PROMETHEUS_STORAGE_SIZE = "50Gi";
 
-// Traefik ingress autoscaling bounds. The ceiling gives headroom for colocated
-// clients pushing multi-hundred-RPS bulk traffic through the ingress.
+// Traefik ingress autoscaling bounds, matching the chart defaults. The
+// ceiling is liberal (proxy pods are cheap and shed at idle) so the ingress
+// never fronts-runs a scaled-out gather plane; scale-DOWN churn is tamed by
+// the chart's HPA behavior + entrypoint lifeCycle drain (see chart values).
 export const TRAEFIK_MIN_REPLICAS = 1;
-export const TRAEFIK_MAX_REPLICAS = 4;
+export const TRAEFIK_MAX_REPLICAS = 8;
 
 // Supabase auth emails used when custom templates are disabled. These are the
 // product's stock templates; enabling Custom Email Templates in the wizard

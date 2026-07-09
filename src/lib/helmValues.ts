@@ -494,17 +494,27 @@ function getExternalDnsProvider(dnsProvider: string): string {
  */
 function generateClusterAutoscaler(
   config: DeploymentConfig,
+  images: ImageCatalog,
+  registry: string,
+  pullSecretName: string,
 ): Record<string, unknown> {
   const cluster = config.infrastructure.clusterName;
   const region = config.infrastructure.region;
   if (config.infrastructure.provider !== "aws" || !cluster || !region) {
     return { enabled: false };
   }
+  const image = images.image("cluster-autoscaler", registry);
   return {
     enabled: true,
     cloudProvider: "aws",
     autoDiscovery: { clusterName: cluster },
     awsRegion: region,
+    image: {
+      repository: `${image.registry}/${IMAGE_REPOSITORIES.clusterAutoscaler}`,
+      tag: image.tag,
+      // The upstream chart expects a list of secret-name strings here.
+      pullSecrets: [pullSecretName],
+    },
   };
 }
 
@@ -1659,12 +1669,12 @@ export function buildHelmValues(
   const criticalPriorityClass = `${releaseName}-critical`;
   const burstPriorityClass = `${releaseName}-burst`;
   // Subcharts that don't honor global.imagePullSecrets (keda, strimzi, traefik,
-  // vector) need the pull secret on their own key so their pods can pull the
-  // private docker.io/rulebricks/* images from index.docker.io.
+  // vector, cluster-autoscaler) need the pull secret on their own key so their
+  // pods can pull the private docker.io/rulebricks/* images from index.docker.io.
   const rulebricksPullSecret = [{ name: `${releaseName}-regcred` }];
   // Registry host for every image. Empty config.imageRegistry => docker.io. When
   // set, the host is rewritten into global.imageRegistry (which kube-prometheus-stack
-  // and our subcharts honor) and into each of the six Tier-2 charts' own image
+  // and our subcharts honor) and into each Tier-2 chart's own image
   // keys below, always keeping the rulebricks/<name> path.
   const reg = config.imageRegistry || DEFAULT_IMAGE_REGISTRY;
   const clickStackEnabled = isClickStackEnabled(config);
@@ -2655,7 +2665,12 @@ export function buildHelmValues(
     // bound to the fixed "cluster-autoscaler" SA by the workload-identity step;
     // on BYO clusters without that role, create an equivalent role or disable
     // this block via values edits.
-    "cluster-autoscaler": generateClusterAutoscaler(config),
+    "cluster-autoscaler": generateClusterAutoscaler(
+      config,
+      images,
+      reg,
+      `${releaseName}-regcred`,
+    ),
   };
 
   // The managed-Postgres migration hook (templates/migration-job.yaml) reads the

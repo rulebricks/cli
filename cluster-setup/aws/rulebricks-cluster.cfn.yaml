@@ -161,11 +161,10 @@ Parameters:
     Default: 3
   NodeMaxSize:
     Type: Number
-    # Core services need only 3-6 nodes; burst capacity lives in the dedicated
-    # burst nodegroup. 8 leaves room for the gather plane scaling 3->16 HPS
-    # pods (+13 vCPU of requests) plus Traefik's HPA, which all stay on the
-    # core pool. Like the burst ceiling, this is scale-down-safe: the
-    # cluster-autoscaler removes core nodes once HPS sheds replicas.
+    # Burst capacity lives in the dedicated burst nodegroup; 8 core nodes
+    # leaves room for the gather plane scaling to 16 HPS pods plus Traefik's
+    # HPA. Scale-down-safe: the cluster-autoscaler removes core nodes as
+    # HPS sheds replicas.
     Default: 8
   NodeVolumeSizeGiB:
     Type: Number
@@ -195,17 +194,13 @@ Parameters:
     Type: Number
     Default: 4
     Description: >-
-      Ceiling for the burst pool - and in practice the cluster's payload
-      throughput ceiling. Load testing measured ~0.25-0.5ms of worker
-      core-time per payload, so each 16-vCPU burst node adds roughly 30-50k
-      payloads/sec of bulk capacity (4 nodes measured 110k+ payloads/s
-      sustained at 99.6% success). The ceiling is deliberately liberal: the
-      cluster-autoscaler only provisions nodes when scaled-out workers are
-      actually Pending and drains them within minutes of the fleet cooling
-      down (verified: burst desired returns to 0), so unused ceiling costs
-      nothing. 4 nodes exactly fits the chart's full 128-worker fleet
-      (128 x 500m CPU requests = 64 vCPU) - the point at which the solution
-      topic's partition count, not compute, becomes the limit.
+      Ceiling for the burst pool - in practice the cluster's payload
+      throughput ceiling (each 16-vCPU node adds roughly 30-50k payloads/sec
+      of bulk capacity). Deliberately liberal: the cluster-autoscaler only
+      provisions nodes for Pending workers and drains them minutes after the
+      fleet cools, so unused ceiling costs nothing. 4 nodes fits the chart's
+      full 128-worker fleet (128 x 500m CPU requests = 64 vCPU), the point
+      where the solution topic's partition count becomes the limit.
 
   # ---------------------------------------------------------------------------
   # Managed Kafka (Amazon MSK)
@@ -769,15 +764,12 @@ Resources:
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
 
-  # Cluster-autoscaler role (Pod Identity). Without cluster-autoscaler the
-  # burst nodegroup NEVER activates: KEDA scales worker pods, they go Pending,
-  # and nothing moves the ASG's desired count off 0 (observed in load testing:
-  # 50 Pending workers stranded while the burst pool sat empty). The chart
-  # deploys the autoscaler (clusterAutoscaler.enabled, AWS deployments only)
-  # and the CLI's workload-identity step binds its ServiceAccount to this role.
-  # Managed nodegroups auto-tag their ASGs with the
-  # k8s.io/cluster-autoscaler/enabled + k8s.io/cluster-autoscaler/<cluster>
-  # discovery tags, which the write-action condition below is scoped to.
+  # Cluster-autoscaler role (Pod Identity). EKS nodegroups have no built-in
+  # scaling, so the chart deploys cluster-autoscaler on AWS and the CLI's
+  # workload-identity step binds its ServiceAccount to this role; without it
+  # the burst nodegroup never leaves desired=0. Managed nodegroups auto-tag
+  # their ASGs with the k8s.io/cluster-autoscaler discovery tags, which the
+  # write-action condition below is scoped to.
   ClusterAutoscalerRole:
     Type: AWS::IAM::Role
     Properties:

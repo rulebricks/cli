@@ -80,6 +80,7 @@ const required = [
   "supabase-postgres",
   "rclone",
   "strimzi-kafka",
+  "cluster-autoscaler",
 ];
 const names = new Set(images.map((entry) => entry.name));
 const missing = required.filter((name) => !names.has(name));

@@ -33,7 +33,7 @@ export const SUPABASE_POSTGRES_IMAGE_REPOSITORY = "rulebricks/supabase-postgres"
 
 /**
  * Repository paths for the rulebricks/* images the CLI sets directly: the app
- * stack, clickstack, the kafka-proxy bridge, and the six Tier-2 upstream
+ * stack, clickstack, the kafka-proxy bridge, and the Tier-2 upstream
  * charts. The registry HOST is overridable via config.imageRegistry; the
  * repository path (rulebricks/<name>) is never changed. Tags come from the
  * chart's image manifest at runtime (src/lib/imageCatalog.ts).
@@ -70,13 +70,14 @@ export const IMAGE_REPOSITORIES = {
   certManagerCainjector: "rulebricks/cert-manager-cainjector",
   certManagerStartupapicheck: "rulebricks/cert-manager-startupapicheck",
   certManagerAcmesolver: "rulebricks/cert-manager-acmesolver",
-  // --- Tier-2: traefik / keda / vector / external-dns ---
+  // --- Tier-2: traefik / keda / vector / external-dns / cluster-autoscaler ---
   traefik: "rulebricks/traefik",
   keda: "rulebricks/keda",
   kedaMetricsApiServer: "rulebricks/keda-metrics-apiserver",
   kedaAdmissionWebhooks: "rulebricks/keda-admission-webhooks",
   vector: "rulebricks/vector",
   externalDns: "rulebricks/external-dns",
+  clusterAutoscaler: "rulebricks/cluster-autoscaler",
 } as const;
 
 /**
