@@ -30,7 +30,7 @@ Finally, you will need to have the following tools installed and ready on your m
 
 ## Cluster Setup
 
-Create or select a Kubernetes cluster before running the CLI wizard. If you need a starting point, use the templates in `cluster-setup/` — one per cloud (CloudFormation / Bicep / Terraform), each with independent toggles for managed Kafka/Redis/Postgres that default to off (those services run in-cluster until enabled). Monitoring destinations are configured later by the CLI wizard and Helm values, not by these cluster setup files.
+Create or select a Kubernetes cluster before running the CLI wizard. If you need a starting point, use the templates in `cluster-setup/`. Each cloud has its own CloudFormation, Bicep, or Terraform implementation and independent toggles for managed Kafka, Redis, and PostgreSQL. Those services run in-cluster until enabled. Monitoring destinations are configured later by the CLI wizard and Helm values.
 
 ```bash
 # AWS: optional access check, then create EKS with CloudFormation
@@ -45,12 +45,14 @@ aws cloudformation create-stack \
 # Azure: optional access check, then deploy AKS with Bicep
 az login
 az account set --subscription <subscription-id>
-AZURE_LOCATION=eastus bash cluster-setup/azure/check-aks-prereqs.sh
 az group create --name rulebricks-rg --location eastus
+bash cluster-setup/azure/check-aks-prereqs.sh \
+  --parameters cluster-setup/azure/parameters.test.json \
+  --resource-group rulebricks-rg
 az deployment group create \
   --resource-group rulebricks-rg \
   --template-file cluster-setup/azure/main.bicep \
-  --parameters @cluster-setup/azure/parameters.json
+  --parameters @cluster-setup/azure/parameters.test.json
 
 # GCP: optional access check, then create GKE with Terraform
 GCP_REGION=us-central1 bash cluster-setup/gcp/check-gke-prereqs.sh

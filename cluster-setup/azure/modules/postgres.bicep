@@ -1,62 +1,50 @@
-// Managed database: Azure Database for PostgreSQL Flexible Server.
-//
-// VNet-integrated (delegated subnet + private DNS zone): the server has no
-// public endpoint, and only workloads inside the VNet resolve/reach it.
-//
-// Supabase Realtime requires LOGICAL REPLICATION, so this module sets
-// wal_level=logical (plus slot/sender headroom). wal_level is static: the
-// server must restart once after deployment for it to take effect -
-//   az postgres flexible-server restart -g <rg> -n <server>
-// The Rulebricks CLI preflights wal_level and tells you if it is off.
-//
-// CLI mapping: database "self-hosted" + postgres mode "external";
-// host = fqdn output, port 5432, database "postgres", bootstrap master
-// username/password = administratorLogin / the @secure password you passed.
+// PostgreSQL is VNet-only. Supabase Realtime requires wal_level=logical, which
+// takes effect after the one-time restart returned by this module.
 
 param clusterName string
 param location string
+param tags object
 
-@description('Globally-unique server name (becomes <name>.postgres.database.azure.com).')
+@description('Globally unique PostgreSQL server name.')
 param serverName string
 
 @description('PostgreSQL major version.')
 param postgresVersion string = '17'
 
-@description('Admin login. Not "azure_superuser", "admin", "administrator", "root", "guest", "public", or pg_-prefixed; Rulebricks uses it once for bootstrap (roles + schemas), after which the app uses its own roles.')
+@description('Administrator login used for initial application bootstrap.')
 param administratorLogin string = 'rbadmin'
 
 @secure()
-@description('Admin password (8-128 chars, three of: lowercase/uppercase/digit/special). Store it in your secret manager; the Rulebricks CLI wizard asks for it as the bootstrap master password.')
+@description('Administrator password. Supply this securely at deployment time.')
 param administratorPassword string
 
-@description('Compute SKU. General Purpose D4ds_v5 (4 vCPU / 16 GiB) is a sane production floor; scale up for heavy rule-authoring teams.')
+@description('PostgreSQL compute SKU.')
 param skuName string = 'Standard_D4ds_v5'
 
 @description('SKU tier matching skuName.')
 @allowed(['Burstable', 'GeneralPurpose', 'MemoryOptimized'])
 param skuTier string = 'GeneralPurpose'
 
-@description('Storage in GB (auto-grow is enabled).')
+@description('Storage capacity in GB. Auto-grow is enabled.')
 param storageSizeGB int = 128
 
-@description('Zone-redundant high availability (standby in a second AZ; requires an AZ-enabled region).')
+@description('Enable zone-redundant high availability.')
 param enableHighAvailability bool = false
 
-@description('Backup retention in days (7-35).')
+@description('Backup retention in days.')
 @minValue(7)
 @maxValue(35)
 param backupRetentionDays int = 7
 
-@description('Delegated subnet for the server (Microsoft.DBforPostgreSQL/flexibleServers delegation).')
+@description('Delegated subnet for PostgreSQL Flexible Server.')
 param postgresSubnetId string
 
 param vnetId string
 
-// VNet-integrated flexible servers need a private DNS zone ending in
-// .postgres.database.azure.com, linked to the VNet, before server creation.
 resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = {
   name: '${serverName}.private.postgres.database.azure.com'
   location: 'global'
+  tags: tags
 }
 
 resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
@@ -74,9 +62,7 @@ resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLin
 resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
   name: serverName
   location: location
-  tags: {
-    Environment: 'rulebricks'
-  }
+  tags: tags
   sku: {
     name: skuName
     tier: skuTier
@@ -106,8 +92,6 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
   ]
 }
 
-// --- Server parameters for Supabase Realtime (logical replication) ----------
-// Chained dependsOn: Flexible Server rejects concurrent configuration writes.
 resource walLevel 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2024-08-01' = {
   parent: server
   name: 'wal_level'

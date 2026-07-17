@@ -1,70 +1,43 @@
-// Container registry: an Azure Container Registry mirror of the private
-// docker.io/rulebricks/* namespace, for clusters with no (or restricted)
-// egress to Docker Hub.
-//
-// The chart pulls every image from docker.io/rulebricks/<name> by default and
-// exposes a single registry-HOST override (global.imageRegistry; the CLI
-// config's imageRegistry field) that repoints all of them while keeping the
-// rulebricks/<name> path. This module provides the Azure side of that story:
-//
-//   1. Deploy with enableContainerRegistry=true.
-//   2. Seed the registry:  bash mirror-to-acr.sh --registry <acrName>
-//      (az acr import copies every entry in the chart's images/manifest.yaml,
-//      plus the app/HPS/worker product images for your product version,
-//      preserving the rulebricks/<name>:<tag> path).
-//   3. Set the deployment's imageRegistry to the loginServer output. Because
-//      only the registry host changes, no per-image values edits are needed.
-//
-// The AKS kubelet identity gets AcrPull on the registry (the role-assignment
-// equivalent of `az aks update --attach-acr`), so nodes pull without an
-// imagePullSecret.
-
 param clusterName string
 param location string
+param tags object
 
-@description('Registry name; globally unique, 5-50 alphanumeric characters (becomes <name>.azurecr.io).')
+@description('Globally unique registry name.')
 param registryName string
 
-@description('ACR SKU. Premium is required for private endpoints and adds geo-replication + higher throughput; Standard suffices for public-endpoint pulls.')
+@description('ACR SKU.')
 @allowed(['Basic', 'Standard', 'Premium'])
 param skuName string = 'Premium'
 
-@description('Object ID of the AKS kubelet identity (the identity nodes present when pulling images).')
+@description('Object ID of the AKS kubelet identity.')
 param kubeletIdentityObjectId string
 
-@description('Reach the registry through a private endpoint (requires the Premium SKU).')
+@description('Use a private endpoint for registry access.')
 param enablePrivateEndpoint bool
+param allowPublicNetworkAccess bool
 
 param privateEndpointsSubnetId string
 param vnetId string
 
-var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+var acrPullRoleId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+)
 
-resource registry 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
+resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   name: registryName
   location: location
-  tags: {
-    Environment: 'rulebricks'
-  }
+  tags: tags
   sku: {
     name: skuName
   }
   properties: {
-    // RBAC-only data plane: nodes pull via the AcrPull assignment below and
-    // operators seed via `az acr import` (an ARM operation) - no admin user.
     adminUserEnabled: false
-    // Public network access stays on so `az acr import` (which copies images
-    // registry-side) works from any operator workstation. The private endpoint
-    // still keeps NODE pulls inside the VNet. Harden to 'Disabled' after
-    // seeding if your policy requires it - re-seeding then needs the trusted-
-    // services bypass or a network rule for your egress IP.
-    // (No minimumTlsVersion property: ACR enforces TLS >= 1.2 platform-wide.)
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: allowPublicNetworkAccess ? 'Enabled' : 'Disabled'
+    networkRuleBypassOptions: 'AzureServices'
   }
 }
 
-// AcrPull for the kubelet identity - the identity AKS nodes present to the
-// registry. Same effect as `az aks update --attach-acr`, but declarative.
 resource acrPullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(registry.id, kubeletIdentityObjectId, 'AcrPull')
   scope: registry
@@ -75,12 +48,10 @@ resource acrPullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-// ----------------------------------------------------------------------------
-// Optional private endpoint + DNS (Premium SKU only)
-// ----------------------------------------------------------------------------
 resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (enablePrivateEndpoint) {
   name: 'privatelink.azurecr.io'
   location: 'global'
+  tags: tags
 }
 
 resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (enablePrivateEndpoint) {
@@ -98,6 +69,7 @@ resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLin
 resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (enablePrivateEndpoint) {
   name: '${registryName}-pe'
   location: location
+  tags: tags
   properties: {
     subnet: {
       id: privateEndpointsSubnetId

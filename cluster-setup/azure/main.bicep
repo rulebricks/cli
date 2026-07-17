@@ -1,70 +1,71 @@
-// =============================================================================
-// Rulebricks AKS cluster.
-//
-// One `az deployment group create` run composes:
-//
-//   modules/network.bicep   VNet with purpose-built subnets (parameterized
-//                           address space - no 10/8 grabs), NSG.
-//   modules/cluster.bicep   AKS with Azure CNI Overlay + Cilium, Workload
-//                           Identity + OIDC, optional private API server and
-//                           Entra/Azure RBAC; core + burst node pools with the
-//                           rulebricks.com/pool=burst label/taint contract.
-//   modules/identity.bicep  The single <cluster>-rulebricks workload identity
-//                           every data-path role binds to; optional
-//                           external-dns identity + federated credential.
-//   modules/storage.bicep   Blob object storage: account + <cluster>-data
-//                           container (decision-logs/ + db-backups/ prefixes)
-//                           + Storage Blob Data Contributor for the identity.
-//   modules/monitoring.bicep enableMetricsRemoteWrite -> Azure Monitor
-//                           managed Prometheus (AMW + DCE + DCR + publisher
-//                           role).
-//   modules/kafka.bicep     enableManagedKafka    -> Event Hubs Premium
-//   modules/redis.bicep     enableManagedRedis    -> Azure Managed Redis
-//   modules/postgres.bicep  enableManagedDatabase -> PostgreSQL Flexible Server
-//   modules/acr.bicep       enableContainerRegistry -> ACR mirror of the
-//                           docker.io/rulebricks/* images (AcrPull for nodes;
-//                           seed it with mirror-to-acr.sh, then set the
-//                           deployment's imageRegistry to the loginServer)
-//
-// The managed data services and the registry are independent true/false
-// toggles - any combination is valid; the Rulebricks chart runs Kafka, Valkey,
-// and Postgres in-cluster for whichever you leave disabled, and pulls from
-// docker.io/rulebricks/* when no registry mirror is configured.
-//
-// Everything except the optional external-dns path is deployment-independent:
-// federated identity credentials are namespace-scoped, so the Rulebricks CLI
-// creates them at `rulebricks deploy` time against the <cluster>-rulebricks
-// identity. One cluster can host any number of deployments.
-//
-// Outputs map 1:1 to the fields the Rulebricks CLI wizard asks for (see the
-// README's outputs table).
-// =============================================================================
-
 targetScope = 'resourceGroup'
 
-// ----------------------------------------------------------------------------
-// Cluster
-// ----------------------------------------------------------------------------
-@description('Name of the AKS cluster; prefixes every resource name. The Rulebricks CLI preselects resources named <cluster>-rulebricks and <cluster>-data, so keep the convention if you rename.')
+@allowed([
+  'test'
+  'production'
+])
+@description('Selects low-cost test defaults or hardened production defaults. Every derived setting can still be overridden.')
+param deploymentProfile string = 'test'
+
 param clusterName string = 'rulebricks-cluster'
-
-@description('Azure region for all resources.')
 param location string = resourceGroup().location
+param environmentName string = deploymentProfile
+param resourceTags object = {
+  environment: environmentName
+  managedBy: 'bicep'
+  workload: 'rulebricks'
+}
 
-@description('AKS Kubernetes version.')
 param kubernetesVersion string = '1.34'
 
-@description('Restrict the Kubernetes API server to private access. Requires VPN/Bastion/jumpbox connectivity to run kubectl, helm, and the Rulebricks CLI.')
-param enablePrivateCluster bool = false
+@allowed([
+  'Free'
+  'Standard'
+  'Premium'
+])
+param aksSkuTier string = deploymentProfile == 'production' ? 'Standard' : 'Free'
 
-@description('Entra ID integration with Azure RBAC for Kubernetes authorization; disables local accounts. Operators need the "Azure Kubernetes Service RBAC Cluster Admin" role and kubelogin.')
-param enableEntraRbac bool = false
+param enablePrivateCluster bool = deploymentProfile == 'production'
+param apiServerAuthorizedIpRanges array = []
+param enableEntraRbac bool = deploymentProfile == 'production'
 
-// ----------------------------------------------------------------------------
-// Network. All CIDRs are parameterized so enterprises can slot the VNet into
-// existing IPAM. serviceCidr/podCidr are cluster-internal but still must not
-// overlap the VNet or peered networks.
-// ----------------------------------------------------------------------------
+@description('Entra group or user object IDs granted AKS RBAC Cluster Admin.')
+param aksAdminPrincipalIds array = []
+param availabilityZones array = deploymentProfile == 'production' ? ['1', '2', '3'] : []
+
+@allowed([
+  'none'
+  'patch'
+  'rapid'
+  'stable'
+])
+param kubernetesUpgradeChannel string = deploymentProfile == 'production' ? 'stable' : 'none'
+
+@allowed([
+  'None'
+  'NodeImage'
+  'SecurityPatch'
+  'Unmanaged'
+])
+param nodeOsUpgradeChannel string = deploymentProfile == 'production' ? 'NodeImage' : 'None'
+
+param enableMaintenanceWindow bool = deploymentProfile == 'production'
+
+@allowed([
+  'Monday'
+  'Tuesday'
+  'Wednesday'
+  'Thursday'
+  'Friday'
+  'Saturday'
+  'Sunday'
+])
+param maintenanceDay string = 'Sunday'
+param maintenanceStartTime string = '02:00'
+param maintenanceUtcOffset string = '+00:00'
+param enableAzurePolicy bool = deploymentProfile == 'production'
+param enableKeyVaultSecretsProvider bool = false
+
 param vnetAddressSpace string = '10.240.0.0/16'
 param aksSubnetPrefix string = '10.240.0.0/22'
 param privateEndpointsSubnetPrefix string = '10.240.4.0/24'
@@ -72,23 +73,10 @@ param postgresSubnetPrefix string = '10.240.5.0/24'
 param serviceCidr string = '172.16.0.0/16'
 param dnsServiceIP string = '172.16.0.10'
 param podCidr string = '192.168.0.0/16'
+param enableDataServicePrivateEndpoints bool = deploymentProfile == 'production'
 
-@description('Reach Event Hubs / Managed Redis / ACR through private endpoints in the private-endpoints subnet (Event Hubs additionally disables public network access; ACR requires the Premium SKU). Postgres Flexible Server is always VNet-only via subnet delegation.')
-param enableDataServicePrivateEndpoints bool = false
-
-// ----------------------------------------------------------------------------
-// Node pools. The chart's steady-state request floor is ~10 vCPU / ~23 GiB,
-// so 3 x 4-vCPU/16-GiB nodes minimum; the burst pool absorbs the KEDA-scaled
-// worker fleet.
-//
-// Ceilings are deliberately liberal: AKS's built-in node autoscaler only adds
-// nodes when scaled-out pods are Pending and deallocates them (parked VMs,
-// scaleDownMode Deallocate) once the fleet cools, so unused ceiling costs
-// nothing at idle while removing hidden throughput walls.
-// ----------------------------------------------------------------------------
 param nodeCount int = 3
-@description('Core-pool ceiling. 8 leaves room for the chart gather plane scaling to 16 HPS pods (1 vCPU request each) plus Traefik HPA headroom on top of the ~10 vCPU core floor.')
-param maxNodeCount int = 8
+param maxNodeCount int = deploymentProfile == 'production' ? 5 : 4
 param nodeVmSize string = 'Standard_F4as_v6'
 
 @minValue(10)
@@ -99,147 +87,161 @@ param maxPods int = 110
 @maxValue(2048)
 param osDiskSizeGB int = 64
 
-@allowed(['Managed', 'Ephemeral'])
+@allowed([
+  'Managed'
+  'Ephemeral'
+])
 param osDiskType string = 'Managed'
 
-param enableBurstPool bool = true
+param separateSystemPool bool = deploymentProfile == 'production'
+param systemNodeCount int = 3
+param systemMaxNodeCount int = 3
+param systemNodeVmSize string = 'Standard_D2as_v4'
+
+param enableBurstPool bool = deploymentProfile == 'production'
 param burstVmSize string = 'Standard_F16as_v6'
-@description('Burst-pool ceiling - in practice the payload-throughput ceiling (each 16-vCPU node adds roughly 30-50k payloads/sec of bulk capacity). Memory binds first on F16as_v6 (32 GiB = ~28 workers x 1 GiB), so 4 nodes hosts a ~112-worker fleet; scale-down to 0 (Deallocate) makes the high ceiling free at idle.')
-param burstMaxCount int = 4
+param burstMaxCount int = 1
 
-// ----------------------------------------------------------------------------
-// Storage / metrics / external-dns
-// ----------------------------------------------------------------------------
-@description('Provision a storage account + the single data container. Set false to bring your own.')
 param createStorage bool = true
-
-@description('BYO: existing storage account for all Rulebricks data. Required when createStorage is false and decision-log or backup export is enabled.')
 param existingStorageAccountName string = ''
-
-@description('Blob container holding all Rulebricks data (decision-logs/ and db-backups/ prefixes).')
+param existingStorageAccountResourceGroup string = ''
 param dataContainerName string = '${clusterName}-data'
-
-@description('Enable Vector decision-log export to Blob.')
 param enableDecisionLogExport bool = true
-
-@description('Enable database backup export to Blob.')
 param enableBackupExport bool = true
 
-@description('Provision Azure Monitor workspace + DCE + DCR. Set false to bring your own DCR.')
-param createMonitorWorkspace bool = true
+@allowed([
+  'Standard_LRS'
+  'Standard_ZRS'
+  'Standard_GRS'
+  'Standard_GZRS'
+  'Standard_RAGZRS'
+])
+param storageSkuName string = deploymentProfile == 'production' ? 'Standard_ZRS' : 'Standard_LRS'
 
-@description('BYO: resource ID of an existing DCR associated with an Azure Monitor workspace.')
-param existingDataCollectionRuleId string = ''
+param allowStorageSharedKeyAccess bool = deploymentProfile == 'test'
+param enableStorageVersioning bool = deploymentProfile == 'production'
 
-@description('Enable identity + role for Prometheus remote write to Azure Monitor. Off by default; leave off to keep metrics in-cluster or send them to an existing observability platform.')
+@minValue(0)
+@maxValue(365)
+param storageSoftDeleteDays int = deploymentProfile == 'production' ? 30 : 7
+
+param enableStoragePrivateEndpoint bool = deploymentProfile == 'production'
+param enableStorageDeleteLock bool = deploymentProfile == 'production'
+
 param enableMetricsRemoteWrite bool = false
+param createMonitorWorkspace bool = true
+param existingDataCollectionRuleName string = ''
+param existingDataCollectionRuleResourceGroup string = ''
+param enableManagedGrafana bool = false
+param grafanaName string = take('rbgraf${take(uniqueString(resourceGroup().id), 6)}', 23)
 
-@description('Enable a user-assigned identity and federated credential for external-dns with Azure DNS.')
 param enableExternalDns bool = false
-
-@description('Resource group containing the Azure DNS zone. Required when enableExternalDns is true.')
+param dnsZoneName string = ''
 param dnsZoneResourceGroup string = ''
-
-@description('Namespace for the external-dns federated credential (rulebricks-<deploymentName>). Only used when enableExternalDns is true.')
 param rulebricksNamespace string = 'rulebricks'
 
-// ----------------------------------------------------------------------------
-// Container registry (ACR mirror of docker.io/rulebricks/*)
-// ----------------------------------------------------------------------------
-@description('Provision an Azure Container Registry to mirror the docker.io/rulebricks/* images (restricted-egress / air-gapped installs). Seed it with mirror-to-acr.sh, then set the deployment\'s imageRegistry to the loginServer output.')
-param enableContainerRegistry bool = false
+param enableKeyVaultIntegration bool = deploymentProfile == 'production'
+param createKeyVault bool = true
+param keyVaultName string = take('rbkv${uniqueString(resourceGroup().id, clusterName)}', 24)
+param existingKeyVaultResourceGroup string = ''
+param allowKeyVaultPublicAccess bool = deploymentProfile == 'test'
+param enableKeyVaultPrivateEndpoint bool = deploymentProfile == 'production'
+param enableKeyVaultPurgeProtection bool = deploymentProfile == 'production'
 
-@description('Registry name; globally unique, 5-50 alphanumeric characters (becomes <name>.azurecr.io).')
-param containerRegistryName string = take('${replace(toLower(clusterName), '-', '')}acr${uniqueString(resourceGroup().id)}', 50)
+@minValue(7)
+@maxValue(90)
+param keyVaultSoftDeleteRetentionDays int = deploymentProfile == 'production' ? 90 : 7
 
-@description('ACR SKU. Premium is required for private endpoints; Standard suffices for public-endpoint pulls.')
-@allowed(['Basic', 'Standard', 'Premium'])
+@description('Object IDs allowed to create and rotate secrets in a newly created vault.')
+param keyVaultWriterPrincipalIds array = []
+
+param esoServiceAccountName string = 'rulebricks-key-vault-reader'
+
+param enableContainerRegistry bool = deploymentProfile == 'production'
+param containerRegistryName string = take(
+  '${replace(toLower(clusterName), '-', '')}acr${uniqueString(resourceGroup().id)}',
+  50
+)
+
+@allowed([
+  'Basic'
+  'Standard'
+  'Premium'
+])
 param containerRegistrySku string = 'Premium'
 
-// ----------------------------------------------------------------------------
-// Managed Kafka (Azure Event Hubs Premium)
-// ----------------------------------------------------------------------------
-@description('Provision Event Hubs Premium as the Kafka backend instead of running Kafka in-cluster. CLI preset: "azure-event-hubs" (SASL PLAIN, $ConnectionString).')
-param enableManagedKafka bool = false
+param allowContainerRegistryPublicAccess bool = deploymentProfile == 'test'
 
-@description('Event Hubs namespace name; globally unique (becomes <name>.servicebus.windows.net).')
+param enableManagedKafka bool = false
 param eventHubsNamespaceName string = '${toLower(clusterName)}-kafka-${take(uniqueString(resourceGroup().id), 6)}'
 
-@description('Premium Processing Units (1, 2, 4, 8, 12, 16). One PU = 200 partitions namespace-wide; the default hub layout uses 152.')
-@allowed([1, 2, 4, 8, 12, 16])
+@allowed([
+  1
+  2
+  4
+  8
+  12
+  16
+])
 param eventHubsCapacityUnits int = 1
 
-@description('Kafka topic prefix; must match the deployment\'s kafkaTopicPrefix (CLI default "com.rulebricks.").')
 param kafkaTopicPrefix string = 'com.rulebricks.'
 
-@description('Partitions for solution/solution-response hubs. Premium caps at 100/hub (the chart default of 128 does not fit) - set rulebricks.hps.workers.solutionPartitions to this same value.')
 @minValue(1)
 @maxValue(100)
 param solutionPartitions int = 64
 
-@description('Partitions for the decision-logs hub.')
 @minValue(1)
 @maxValue(100)
 param logsPartitions int = 24
 
-@description('Event hub retention in hours.')
 param kafkaRetentionHours int = 168
 
-// ----------------------------------------------------------------------------
-// Managed Redis (Azure Managed Redis)
-// ----------------------------------------------------------------------------
-@description('Provision Azure Managed Redis instead of running Valkey in-cluster. CLI: redis mode "external", TLS on, port 10000.')
 param enableManagedRedis bool = false
-
-@description('Azure Managed Redis name; unique within the region.')
 param redisName string = '${toLower(clusterName)}-redis-${take(uniqueString(resourceGroup().id), 6)}'
-
-@description('Azure Managed Redis SKU (Balanced_B0/B1/B3/B5..., MemoryOptimized_M*, ComputeOptimized_X*).')
 param redisSkuName string = 'Balanced_B1'
 
-// ----------------------------------------------------------------------------
-// Managed database (Azure Database for PostgreSQL Flexible Server)
-// ----------------------------------------------------------------------------
-@description('Provision PostgreSQL Flexible Server instead of running Postgres in-cluster. CLI: database "self-hosted" + postgres mode "external".')
 param enableManagedDatabase bool = false
-
-@description('Server name; globally unique (becomes <name>.postgres.database.azure.com).')
 param postgresServerName string = '${toLower(clusterName)}-pg-${take(uniqueString(resourceGroup().id), 6)}'
-
-@description('PostgreSQL major version (the in-cluster Supabase image tracks Postgres 17).')
 param postgresVersion string = '17'
-
-@description('Admin login for bootstrap (the CLI wizard\'s master username).')
 param postgresAdminUsername string = 'rbadmin'
 
 @secure()
-@description('REQUIRED when enableManagedDatabase is true. Admin password; the CLI wizard\'s bootstrap master password.')
 param postgresAdminPassword string = ''
 
-@description('Flexible Server compute SKU.')
 param postgresSkuName string = 'Standard_D4ds_v5'
 
-@allowed(['Burstable', 'GeneralPurpose', 'MemoryOptimized'])
+@allowed([
+  'Burstable'
+  'GeneralPurpose'
+  'MemoryOptimized'
+])
 param postgresSkuTier string = 'GeneralPurpose'
 
-@description('Storage in GB (auto-grow enabled).')
 param postgresStorageSizeGB int = 128
-
-@description('Zone-redundant HA (standby in a second AZ; requires an AZ-enabled region). Set false for single-instance dev/staging or non-AZ regions.')
 param postgresHighAvailability bool = true
 
 @minValue(7)
 @maxValue(35)
 param postgresBackupRetentionDays int = 7
 
-// ============================================================================
-// Modules
-// ============================================================================
+var effectiveDnsZoneResourceGroup = empty(dnsZoneResourceGroup) ? resourceGroup().name : dnsZoneResourceGroup
+var effectiveStorageResourceGroup = empty(existingStorageAccountResourceGroup)
+  ? resourceGroup().name
+  : existingStorageAccountResourceGroup
+var effectiveDcrResourceGroup = empty(existingDataCollectionRuleResourceGroup)
+  ? resourceGroup().name
+  : existingDataCollectionRuleResourceGroup
+var effectiveKeyVaultResourceGroup = empty(existingKeyVaultResourceGroup)
+  ? resourceGroup().name
+  : existingKeyVaultResourceGroup
+
 module network 'modules/network.bicep' = {
   name: '${clusterName}-network'
   params: {
     clusterName: clusterName
     location: location
+    tags: resourceTags
     vnetAddressSpace: vnetAddressSpace
     aksSubnetPrefix: aksSubnetPrefix
     privateEndpointsSubnetPrefix: privateEndpointsSubnetPrefix
@@ -252,7 +254,9 @@ module cluster 'modules/cluster.bicep' = {
   params: {
     clusterName: clusterName
     location: location
+    tags: resourceTags
     kubernetesVersion: kubernetesVersion
+    aksSkuTier: aksSkuTier
     vnetName: network.outputs.vnetName
     aksSubnetId: network.outputs.aksSubnetId
     nodeCount: nodeCount
@@ -261,28 +265,81 @@ module cluster 'modules/cluster.bicep' = {
     maxPods: maxPods
     osDiskSizeGB: osDiskSizeGB
     osDiskType: osDiskType
+    separateSystemPool: separateSystemPool
+    systemNodeCount: systemNodeCount
+    systemMaxNodeCount: systemMaxNodeCount
+    systemNodeVmSize: systemNodeVmSize
     enableBurstPool: enableBurstPool
     burstVmSize: burstVmSize
     burstMaxCount: burstMaxCount
     serviceCidr: serviceCidr
     dnsServiceIP: dnsServiceIP
     podCidr: podCidr
+    availabilityZones: availabilityZones
     enablePrivateCluster: enablePrivateCluster
+    apiServerAuthorizedIpRanges: apiServerAuthorizedIpRanges
     enableEntraRbac: enableEntraRbac
+    aksAdminPrincipalIds: aksAdminPrincipalIds
+    kubernetesUpgradeChannel: kubernetesUpgradeChannel
+    nodeOsUpgradeChannel: nodeOsUpgradeChannel
+    enableMaintenanceWindow: enableMaintenanceWindow
+    maintenanceDay: maintenanceDay
+    maintenanceStartTime: maintenanceStartTime
+    maintenanceUtcOffset: maintenanceUtcOffset
+    enableAzurePolicy: enableAzurePolicy
+    enableKeyVaultSecretsProvider: enableKeyVaultSecretsProvider
   }
 }
 
 module identity 'modules/identity.bicep' = {
-  // Deployment names are their own namespace - no clash with the
-  // <cluster>-identity managed identity resource in cluster.bicep.
   name: '${clusterName}-identity'
   params: {
     clusterName: clusterName
     location: location
+    tags: resourceTags
     oidcIssuerUrl: cluster.outputs.oidcIssuerUrl
     enableExternalDns: enableExternalDns
-    dnsZoneResourceGroup: dnsZoneResourceGroup
+    enableExternalSecrets: enableKeyVaultIntegration
     rulebricksNamespace: rulebricksNamespace
+    esoServiceAccountName: esoServiceAccountName
+  }
+}
+
+module externalDnsRole 'modules/dns-role.bicep' = if (enableExternalDns) {
+  name: '${clusterName}-external-dns-role'
+  scope: resourceGroup(effectiveDnsZoneResourceGroup)
+  params: {
+    dnsZoneName: dnsZoneName
+    principalId: identity.outputs.externalDnsPrincipalId
+  }
+}
+
+module keyVault 'modules/key-vault.bicep' = if (enableKeyVaultIntegration && createKeyVault) {
+  name: '${clusterName}-key-vault'
+  params: {
+    clusterName: clusterName
+    location: location
+    tags: resourceTags
+    keyVaultName: keyVaultName
+    allowPublicNetworkAccess: allowKeyVaultPublicAccess
+    enablePrivateEndpoint: enableKeyVaultPrivateEndpoint
+    enablePurgeProtection: enableKeyVaultPurgeProtection
+    softDeleteRetentionDays: keyVaultSoftDeleteRetentionDays
+    privateEndpointsSubnetId: network.outputs.privateEndpointsSubnetId
+    vnetId: network.outputs.vnetId
+    readerPrincipalId: identity.outputs.externalSecretsPrincipalId
+    readerIdentityId: identity.outputs.externalSecretsIdentityId
+    writerPrincipalIds: keyVaultWriterPrincipalIds
+  }
+}
+
+module keyVaultRoleByo 'modules/key-vault-role.bicep' = if (enableKeyVaultIntegration && !createKeyVault) {
+  name: '${clusterName}-key-vault-role'
+  scope: resourceGroup(effectiveKeyVaultResourceGroup)
+  params: {
+    keyVaultName: keyVaultName
+    principalId: identity.outputs.externalSecretsPrincipalId
+    identityId: identity.outputs.externalSecretsIdentityId
   }
 }
 
@@ -291,25 +348,56 @@ module storage 'modules/storage.bicep' = {
   params: {
     clusterName: clusterName
     location: location
+    tags: resourceTags
     createStorage: createStorage
     existingStorageAccountName: existingStorageAccountName
     dataContainerName: dataContainerName
     enableDecisionLogExport: enableDecisionLogExport
     enableBackupExport: enableBackupExport
+    storageSkuName: storageSkuName
+    allowSharedKeyAccess: allowStorageSharedKeyAccess
+    enableBlobVersioning: enableStorageVersioning
+    blobSoftDeleteDays: storageSoftDeleteDays
+    enablePrivateEndpoint: enableStoragePrivateEndpoint
+    privateEndpointsSubnetId: network.outputs.privateEndpointsSubnetId
+    vnetId: network.outputs.vnetId
+    enableDeleteLock: enableStorageDeleteLock
     rulebricksPrincipalId: identity.outputs.rulebricksPrincipalId
     rulebricksIdentityId: identity.outputs.rulebricksIdentityId
   }
 }
 
-module monitoring 'modules/monitoring.bicep' = if (enableMetricsRemoteWrite) {
+module storageRoleByo 'modules/storage-role.bicep' = if (!createStorage && (enableDecisionLogExport || enableBackupExport)) {
+  name: '${clusterName}-storage-role'
+  scope: resourceGroup(effectiveStorageResourceGroup)
+  params: {
+    storageAccountName: existingStorageAccountName
+    principalId: identity.outputs.rulebricksPrincipalId
+    identityId: identity.outputs.rulebricksIdentityId
+  }
+}
+
+module monitoring 'modules/monitoring.bicep' = if (enableMetricsRemoteWrite && createMonitorWorkspace) {
   name: '${clusterName}-monitoring'
   params: {
     clusterName: clusterName
     location: location
+    tags: resourceTags
     createMonitorWorkspace: createMonitorWorkspace
-    existingDataCollectionRuleId: existingDataCollectionRuleId
+    enableManagedGrafana: enableManagedGrafana
+    grafanaName: grafanaName
     rulebricksPrincipalId: identity.outputs.rulebricksPrincipalId
     rulebricksIdentityId: identity.outputs.rulebricksIdentityId
+  }
+}
+
+module monitoringRoleByo 'modules/monitoring-role.bicep' = if (enableMetricsRemoteWrite && !createMonitorWorkspace) {
+  name: '${clusterName}-monitoring-role'
+  scope: resourceGroup(effectiveDcrResourceGroup)
+  params: {
+    dataCollectionRuleName: existingDataCollectionRuleName
+    principalId: identity.outputs.rulebricksPrincipalId
+    identityId: identity.outputs.rulebricksIdentityId
   }
 }
 
@@ -318,10 +406,12 @@ module acr 'modules/acr.bicep' = if (enableContainerRegistry) {
   params: {
     clusterName: clusterName
     location: location
+    tags: resourceTags
     registryName: containerRegistryName
     skuName: containerRegistrySku
     kubeletIdentityObjectId: cluster.outputs.kubeletIdentityObjectId
     enablePrivateEndpoint: enableDataServicePrivateEndpoints
+    allowPublicNetworkAccess: allowContainerRegistryPublicAccess
     privateEndpointsSubnetId: network.outputs.privateEndpointsSubnetId
     vnetId: network.outputs.vnetId
   }
@@ -332,6 +422,7 @@ module kafka 'modules/kafka.bicep' = if (enableManagedKafka) {
   params: {
     clusterName: clusterName
     location: location
+    tags: resourceTags
     namespaceName: eventHubsNamespaceName
     capacityUnits: eventHubsCapacityUnits
     topicPrefix: kafkaTopicPrefix
@@ -349,6 +440,7 @@ module redis 'modules/redis.bicep' = if (enableManagedRedis) {
   params: {
     clusterName: clusterName
     location: location
+    tags: resourceTags
     redisName: redisName
     skuName: redisSkuName
     enablePrivateEndpoint: enableDataServicePrivateEndpoints
@@ -362,6 +454,7 @@ module postgres 'modules/postgres.bicep' = if (enableManagedDatabase) {
   params: {
     clusterName: clusterName
     location: location
+    tags: resourceTags
     serverName: postgresServerName
     postgresVersion: postgresVersion
     administratorLogin: postgresAdminUsername
@@ -376,46 +469,51 @@ module postgres 'modules/postgres.bicep' = if (enableManagedDatabase) {
   }
 }
 
-// ============================================================================
-// Outputs (grouped by the Rulebricks CLI wizard step that consumes them)
-// ============================================================================
+output deploymentProfile string = deploymentProfile
 output clusterName string = cluster.outputs.clusterName
 output resourceGroupName string = resourceGroup().name
 output location string = location
 output kubeconfigCommand string = 'az aks get-credentials --name ${clusterName} --resource-group ${resourceGroup().name}'
 
-// --- Storage + identity (CLI storage step) -----------------------------------
 output rulebricksClientId string = identity.outputs.rulebricksClientId
 output storageAccountName string = storage.outputs.storageAccountName
 output dataContainer string = storage.outputs.dataContainer
 output externalDnsClientId string = identity.outputs.externalDnsClientId
+output externalSecretsClientId string = enableKeyVaultIntegration ? identity.outputs.externalSecretsClientId : ''
+output externalSecretsTenantId string = enableKeyVaultIntegration ? tenant().tenantId : ''
+output externalSecretsNamespace string = enableKeyVaultIntegration ? rulebricksNamespace : ''
+output externalSecretsServiceAccountName string = enableKeyVaultIntegration ? esoServiceAccountName : ''
+output keyVaultName string = enableKeyVaultIntegration ? keyVaultName : ''
+output keyVaultUri string = enableKeyVaultIntegration
+  ? (createKeyVault ? keyVault!.outputs.vaultUri : keyVaultRoleByo!.outputs.vaultUri)
+  : ''
 
-// --- Container registry (CLI deployment-config field: imageRegistry) ---------
-// Seed with: bash mirror-to-acr.sh --registry <containerRegistryName>, then
-// set imageRegistry in the deployment config to this loginServer.
 output containerRegistryName string = enableContainerRegistry ? acr!.outputs.registryName : ''
 output containerRegistryLoginServer string = enableContainerRegistry ? acr!.outputs.loginServer : ''
 
-// --- Metrics (CLI monitoring step) -------------------------------------------
-// Prometheus remote_write URL =
-//   <dceMetricsIngestionEndpoint>/dataCollectionRules/<dcrImmutableId>/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24
-output dceMetricsIngestionEndpoint string = enableMetricsRemoteWrite ? monitoring!.outputs.dceMetricsIngestionEndpoint : ''
-output dcrImmutableId string = enableMetricsRemoteWrite ? monitoring!.outputs.dcrImmutableId : ''
-output dataCollectionRuleId string = enableMetricsRemoteWrite ? monitoring!.outputs.dataCollectionRuleId : existingDataCollectionRuleId
+output dceMetricsIngestionEndpoint string = enableMetricsRemoteWrite && createMonitorWorkspace
+  ? monitoring!.outputs.dceMetricsIngestionEndpoint
+  : ''
+output dcrImmutableId string = enableMetricsRemoteWrite && createMonitorWorkspace
+  ? monitoring!.outputs.dcrImmutableId
+  : ''
+output dataCollectionRuleId string = enableMetricsRemoteWrite
+  ? (createMonitorWorkspace ? monitoring!.outputs.dataCollectionRuleId : monitoringRoleByo!.outputs.dataCollectionRuleId)
+  : ''
+output grafanaEndpoint string = enableMetricsRemoteWrite && createMonitorWorkspace
+  ? monitoring!.outputs.grafanaEndpoint
+  : ''
 
-// --- Managed Kafka (CLI external-services step, preset azure-event-hubs) -----
 output kafkaBootstrapServers string = enableManagedKafka ? kafka!.outputs.bootstrapServers : ''
 output kafkaTopics array = enableManagedKafka ? kafka!.outputs.topicNames : []
 output kafkaConnectionStringCommand string = enableManagedKafka ? kafka!.outputs.connectionStringCommand : ''
 output kafkaSolutionPartitions int = enableManagedKafka ? solutionPartitions : 0
 
-// --- Managed Redis (CLI external-services step) -------------------------------
 output redisHost string = enableManagedRedis ? redis!.outputs.hostName : ''
 output redisPort int = enableManagedRedis ? redis!.outputs.port : 0
 output redisTlsEnabled bool = enableManagedRedis
 output redisAccessKeyCommand string = enableManagedRedis ? redis!.outputs.accessKeyCommand : ''
 
-// --- Managed database (CLI external-services step, self-hosted Supabase) -----
 output postgresHost string = enableManagedDatabase ? postgres!.outputs.fqdn : ''
 output postgresPort int = enableManagedDatabase ? postgres!.outputs.port : 0
 output postgresDatabase string = enableManagedDatabase ? postgres!.outputs.databaseName : ''

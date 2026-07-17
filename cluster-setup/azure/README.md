@@ -1,218 +1,426 @@
-# Azure Cluster Setup (AKS)
+# Azure cluster setup
 
-One Bicep deployment: `main.bicep` + `modules/`. Managed Kafka (Event Hubs),
-Redis (Azure Managed Redis), Postgres (Flexible Server), metrics remote
-write, and a container-registry image mirror (ACR) are independent toggles
-that **default to off** — the Rulebricks chart runs the data services
-in-cluster and pulls images from `docker.io/rulebricks/*` until you enable
-them.
+This folder provisions an AKS cluster for the Rulebricks Helm chart. The same
+Bicep modules support a low-cost test environment and a hardened production
+environment.
 
-> This IaC is a reference implementation. Treat it as a starting point and
-> customize it to accommodate pre-existing services (VNets, storage accounts,
-> databases) or unique performance requirements.
+The templates are intended for a dedicated resource group. Managed Kafka,
+Redis, PostgreSQL, Azure Monitor, and Grafana remain optional.
 
-## 1. Parameters
+## Deployment profiles
 
-Cluster:
+`deploymentProfile` selects defaults. Any individual parameter can override a
+profile default.
+
+| Setting | Test | Production |
+| --- | --- | --- |
+| AKS tier | Free | Standard |
+| API server | Public | Private |
+| Kubernetes authentication | Local accounts | Entra ID and Azure RBAC |
+| Node pools | Shared system/core pool | Dedicated system and core pools |
+| Availability zones | None | 1, 2, and 3 |
+| Upgrade policy | Manual | Stable channel and weekly node image updates |
+| Azure Policy | Off | On |
+| Key Vault secret sync | Off | Private vault and workload identity |
+| Initial vCPU | 12 | 18 |
+| Default autoscaling ceiling | 16 | 42 |
+| ACR mirror | Off | Premium ACR with a private endpoint |
+| Blob storage | LRS, 7-day soft delete | ZRS, versioning, 30-day soft delete, private endpoint, delete lock |
+| Managed data services | Off | Off |
+
+The test profile uses the same network, AKS, identity, and storage modules as
+production. It omits controls that add cost or require private network access.
+
+Do not convert an existing test cluster to the production profile in place.
+The production profile changes node-pool topology and control-plane access.
+Create a separate production resource group and cluster.
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `main.bicep` | Entry point and profile defaults |
+| `parameters.test.json` | Low-cost, removable test environment |
+| `parameters.production.json` | Production baseline |
+| `parameters.json` | Backward-compatible alias of the test profile |
+| `modules/` | Network, AKS, identity, Key Vault, storage, monitoring, and optional data services |
+| `check-aks-prereqs.sh` | Local configuration, regional availability, access, and quota checks |
+| `mirror-to-acr.sh` | Copies all Rulebricks images into ACR |
+
+## Core parameters
 
 | Parameter | Default | Purpose |
 | --- | --- | --- |
-| `clusterName` | `rulebricks-cluster` | Prefixes every resource name; the CLI preselects `<cluster>-rulebricks` / `<cluster>-data` by convention |
-| `location` | resource group location | Region for all resources |
-| `kubernetesVersion` | `1.34` | AKS version |
-| `enablePrivateCluster` | `false` | Private API server (needs VPN/Bastion for kubectl/helm/CLI) |
-| `enableEntraRbac` | `false` | Entra ID + Azure RBAC for Kubernetes; disables local accounts |
+| `clusterName` | `rulebricks-cluster` | Prefix for resources |
+| `location` | Resource group region | Azure region |
+| `kubernetesVersion` | `1.34` | AKS minor version |
+| `apiServerAuthorizedIpRanges` | `[]` | Optional CIDR allowlist for a public API server |
+| `aksAdminPrincipalIds` | `[]` | Entra group or user object IDs granted AKS Cluster Admin |
+| `nodeCount` | `3` | Initial and minimum core nodes |
+| `maxNodeCount` | Test `4`, production `5` | Core autoscaling ceiling |
+| `systemNodeVmSize` | `Standard_D2as_v4` | Production system-pool size with broadly available quota |
+| `enableBurstPool` | Test `false`, production `true` | Worker pool with the `rulebricks.com/pool=burst` taint |
+| `burstMaxCount` | `1` | Initial burst ceiling; increase after quota is approved |
+| `enableDataServicePrivateEndpoints` | Test `false`, production `true` | Private endpoints for enabled Event Hubs, Redis, and ACR resources |
 
-Networking (all CIDRs parameterized for existing IPAM):
+All network ranges are parameters. The defaults use a `/22` node subnet,
+separate private-endpoint and PostgreSQL subnets, Azure CNI Overlay, and Cilium.
 
-| Parameter | Default | Purpose |
-| --- | --- | --- |
-| `vnetAddressSpace` | `10.240.0.0/16` | VNet |
-| `aksSubnetPrefix` | `10.240.0.0/22` | Nodes + load balancers |
-| `privateEndpointsSubnetPrefix` | `10.240.4.0/24` | Private endpoints for data services |
-| `postgresSubnetPrefix` | `10.240.5.0/24` | Delegated to PostgreSQL Flexible Server |
-| `serviceCidr` / `dnsServiceIP` / `podCidr` | `172.16.0.0/16` / `172.16.0.10` / `192.168.0.0/16` | Cluster-internal; must not overlap peered networks |
-| `enableDataServicePrivateEndpoints` | `false` | Private endpoints for Event Hubs / Managed Redis |
+## Base architecture
 
-Node pools:
+Every profile creates a virtual network with AKS, private-endpoint, and
+PostgreSQL subnets; an AKS cluster with OIDC and Workload Identity; managed
+identities for the cluster and Rulebricks; and blob storage for exports and
+backups. The cluster identity receives Network Contributor on this VNet only.
+The Rulebricks identity receives Blob Data Contributor on its storage account.
 
-| Parameter | Default | Purpose |
-| --- | --- | --- |
-| `nodeCount` / `maxNodeCount` | `3` / `5` | Core pool (autoscaling) |
-| `nodeVmSize` | `Standard_F4as_v6` | 4 vCPU / 16 GiB core nodes |
-| `maxPods` / `osDiskSizeGB` / `osDiskType` | `110` / `64` / `Managed` | Node config |
-| `enableBurstPool` | `true` | Worker pool, taint `rulebricks.com/pool=burst`, 0-N with Deallocate scale-down |
-| `burstVmSize` / `burstMaxCount` | `Standard_F16as_v6` / `1` | 16 vCPU / 64 GiB burst nodes |
+AKS also creates an `MC_*` node resource group for VM scale sets, managed
+disks, and load balancers. Azure removes that node resource group with the AKS
+cluster.
 
-Storage / metrics / DNS:
+## Workload placement
 
-| Parameter | Default | Purpose |
-| --- | --- | --- |
-| `createStorage` | `true` | Storage account + data container; `false` = BYO (`existingStorageAccountName`) |
-| `dataContainerName` | `<cluster>-data` | One container, `decision-logs/` + `db-backups/` prefixes |
-| `enableDecisionLogExport` / `enableBackupExport` | `true` / `true` | Blob role assignments per data path |
-| `enableMetricsRemoteWrite` | `false` | Prometheus remote write to Azure Monitor |
-| `createMonitorWorkspace` | `true` | AMW + DCE + DCR when remote write is on; `false` = BYO (`existingDataCollectionRuleId`) |
-| `enableExternalDns` | `false` | Identity + federated credential for external-dns (`dnsZoneResourceGroup`, `rulebricksNamespace`) |
+The production system pool is reserved for Kubernetes add-ons. The core pool
+holds steady application capacity, including HPS gather pods. HPS workers can
+run on the core pool and prefer the optional burst pool when it scales up. The
+burst pool starts at zero nodes and is capped at one node by default.
 
-Container registry (ACR mirror of `docker.io/rulebricks/*` for
-restricted-egress / air-gapped installs):
+The Bicep profile does not set Helm replica counts. Keep the frontend at one
+replica when that is sufficient, and size `hps.replicas`,
+`hps.workers.minReplicaCount`, and `hps.workers.maxReplicaCount` from measured
+traffic. ClickHouse can remain single-replica because it is outside the request
+path.
 
-| Parameter | Default | Purpose |
-| --- | --- | --- |
-| `enableContainerRegistry` | `false` | ACR + AcrPull for the AKS kubelet identity; seed it with `mirror-to-acr.sh`, then set the deployment's `imageRegistry` to the `containerRegistryLoginServer` output |
-| `containerRegistryName` | `<cluster-no-dashes>acr<hash>` | Globally unique, 5-50 alphanumeric chars (becomes `<name>.azurecr.io`) |
-| `containerRegistrySku` | `Premium` | Premium is required for private endpoints (`enableDataServicePrivateEndpoints`); Standard suffices for public-endpoint pulls |
+Managed Kafka uses Event Hubs Premium and remains off by default. If enabled,
+set the Helm `hps.workers.solutionPartitions` value to the Bicep
+`solutionPartitions` value. The default is 64 because Event Hubs Premium caps
+an individual hub at 100 partitions. Keep the HPS worker maximum at or below
+the partition count.
 
-Managed services (all off by default; the sizing parameters below each toggle
-are ignored unless that toggle is `true`, so they cannot create a bad state):
+## Storage and identity
 
-| Parameter | Default | Purpose |
-| --- | --- | --- |
-| `enableManagedKafka` | `false` | Event Hubs Premium as the Kafka backend (CLI preset `azure-event-hubs`) |
-| `eventHubsNamespaceName` / `eventHubsCapacityUnits` | `<cluster>-kafka-<hash>` / `1` | 1 PU = 200 partitions namespace-wide |
-| `kafkaTopicPrefix` / `solutionPartitions` / `logsPartitions` / `kafkaRetentionHours` | `com.rulebricks.` / `64` / `24` / `168` | Premium caps 100 partitions/hub; set `rulebricks.hps.workers.solutionPartitions` to match |
-| `enableManagedRedis` | `false` | Azure Managed Redis (TLS, port 10000) instead of in-cluster Valkey |
-| `redisName` / `redisSkuName` | `<cluster>-redis-<hash>` / `Balanced_B1` | Redis sizing |
-| `enableManagedDatabase` | `false` | PostgreSQL Flexible Server 17 instead of in-cluster Postgres |
-| `postgresServerName` / `postgresVersion` | `<cluster>-pg-<hash>` / `17` | Server |
-| `postgresAdminUsername` / `postgresAdminPassword` | `rbadmin` / — | Password is `@secure()` and **required** when the toggle is on |
-| `postgresSkuName` / `postgresSkuTier` / `postgresStorageSizeGB` | `Standard_D4ds_v5` / `GeneralPurpose` / `128` | Compute + storage (auto-grow) |
-| `postgresHighAvailability` / `postgresBackupRetentionDays` | `true` / `7` | Zone-redundant HA (needs an AZ-enabled region) / backups |
+The deployment creates `<cluster>-rulebricks`, a user-assigned managed identity
+used by the chart through AKS Workload Identity. The Rulebricks CLI creates the
+namespace-specific federated credentials during `rulebricks deploy`.
 
-## 2. Deployed resources
+The created storage account holds one container with `decision-logs/` and
+`db-backups/` prefixes. `enableBackupExport` grants access to the backup path;
+the actual backup schedule is enabled separately in the Rulebricks CLI.
 
-Always created:
+For an existing storage account, set:
 
-| Resource | Type | Name / notes |
-| --- | --- | --- |
-| NSG | `Microsoft.Network/networkSecurityGroups` | `<cluster>-nsg`; 80/443 inbound to the AKS subnet |
-| VNet | `Microsoft.Network/virtualNetworks` | `<cluster>-vnet`; subnets: aks, private-endpoints, postgres (delegated) |
-| Cluster identity | `Microsoft.ManagedIdentity/userAssignedIdentities` | `<cluster>-identity`; Network Contributor on the VNet only |
-| AKS cluster | `Microsoft.ContainerService/managedClusters` | `<cluster>`; CNI Overlay + Cilium, OIDC issuer + Workload Identity enabled, core + burst pools |
-| Rulebricks identity | `Microsoft.ManagedIdentity/userAssignedIdentities` | `<cluster>-rulebricks`; the single workload identity the CLI federates at deploy time |
-| Storage account + container | `Microsoft.Storage/storageAccounts` (+ blobServices/containers) | `rb<hash>` + `<cluster>-data`; when `createStorage` |
-| Blob role assignment | `Microsoft.Authorization/roleAssignments` | Storage Blob Data Contributor for `<cluster>-rulebricks` |
-
-Note: AKS also auto-creates its node resource group (`MC_<rg>_<cluster>_<region>`) holding VMSS, managed disks, and load balancers. It is deleted with the cluster.
-
-Conditionally created:
-
-| Resource | Type | Condition |
-| --- | --- | --- |
-| Container registry + AcrPull role for the kubelet identity | `Microsoft.ContainerRegistry/registries` | `enableContainerRegistry` |
-| Azure Monitor workspace + DCE + DCR + Monitoring Metrics Publisher role | `Microsoft.Monitor/accounts`, `Microsoft.Insights/dataCollection*` | `enableMetricsRemoteWrite` (+ `createMonitorWorkspace`) |
-| external-dns identity + DNS Zone Contributor + federated credential | `Microsoft.ManagedIdentity/*` | `enableExternalDns` |
-| Event Hubs Premium namespace + `rulebricks` SAS rule (Send+Listen) + 3 hubs | `Microsoft.EventHub/namespaces` (+ eventhubs) | `enableManagedKafka` |
-| Azure Managed Redis cluster + database | `Microsoft.Cache/redisEnterprise` (+ databases) | `enableManagedRedis` |
-| PostgreSQL Flexible Server + private DNS zone + `wal_level=logical` configs | `Microsoft.DBforPostgreSQL/flexibleServers` | `enableManagedDatabase` |
-| Private DNS zones + private endpoints for Event Hubs / Redis / ACR | `Microsoft.Network/privateDnsZones`, `privateEndpoints` | `enableDataServicePrivateEndpoints` |
-
-## 3. Manual provisioning still required
-
-- **Kubeconfig** (after deploy): `az aks get-credentials --name <cluster> --resource-group <rg>`
-- **Registry seeding** (only when `enableContainerRegistry=true`): copy every
-  Rulebricks image into the ACR, then point the deployment at it:
-
-```bash
-export DOCKERHUB_USERNAME=<license docker hub username>
-export DOCKERHUB_TOKEN=<license pull token>
-bash mirror-to-acr.sh --registry <containerRegistryName> --version <productVersion>
+```json
+{
+  "createStorage": { "value": false },
+  "existingStorageAccountName": { "value": "mystorageaccount" },
+  "existingStorageAccountResourceGroup": { "value": "shared-data-rg" },
+  "enableStoragePrivateEndpoint": { "value": false },
+  "enableStorageDeleteLock": { "value": false }
+}
 ```
 
-  This imports every entry in the chart's `images/manifest.yaml` (all
-  infrastructure images) plus the `app`/`hps`/`hps:worker-*` product images
-  for your product version, preserving the `rulebricks/<name>:<tag>` path.
-  Then set `imageRegistry: <containerRegistryLoginServer>` in the deployment
-  config — the CLI rewrites every chart image to the mirror, and nodes pull
-  via the AcrPull role (no imagePullSecret). Re-run the script whenever you
-  upgrade the chart or product version.
-- **Postgres restart** (only when `enableManagedDatabase=true`): `wal_level` is static; run the `postgresRestartCommand` output once after creation, or Supabase Realtime will crashloop.
-- **DNS**: point your app domain at the load balancer the chart creates during `rulebricks deploy` (or use `enableExternalDns`).
-- **SSO with Microsoft Entra ID** (optional): app registrations are Microsoft
-  Graph objects, not ARM resources, so Bicep cannot create them — register the
-  OIDC client manually and pass it to the deployment's `global.sso` values:
+The account and container must already exist. The deployment adds the Blob Data
+Contributor role at the storage-account scope.
 
-```bash
-APP_ID=$(az ad app create --display-name rulebricks-sso \
-  --web-redirect-uris \
-    "https://supabase.<domain>/auth/v1/callback" \
-    "https://<domain>/api/sso-proxy/callback" \
-  --query appId -o tsv)
-az ad app credential reset --id "$APP_ID" --years 2 --query password -o tsv  # SSO client secret
+## Key Vault and Kubernetes secrets
+
+The production profile creates a Key Vault, a private endpoint, private DNS, and
+a dedicated workload identity for External Secrets Operator. That identity gets
+the `Key Vault Secrets User` role on this vault only. It cannot create, update,
+or delete secrets.
+
+The template intentionally does not accept secret values. Grant the
+`Key Vault Secrets Officer` role to the group, user, or automation identity that
+seeds and rotates them:
+
+```json
+"keyVaultWriterPrincipalIds": {
+  "value": ["<secret-writer-object-id>"]
+}
 ```
 
-  Wizard/chart values: provider `azure`, URL
-  `https://login.microsoftonline.com/<tenant-id>`, client ID = `$APP_ID`,
-  client secret = the reset output. The OAuth client needs the `openid`,
-  `email`, and `profile` scopes (granted by default via Microsoft Graph
-  `User.Read`). The chart stores the credentials as the `<release>-sso`
-  Kubernetes Secret and wires GoTrue's `GOTRUE_EXTERNAL_AZURE_*` env vars.
-- **Secrets for the CLI wizard** (only when toggles are on) — run the `kafkaConnectionStringCommand` / `redisAccessKeyCommand` outputs; the Postgres password is the one you passed at deploy.
-- Federated identity credentials are **not** manual — the Rulebricks CLI creates them at `rulebricks deploy` time.
+For an existing RBAC-enabled vault, set:
 
-### Bring your own cluster
-
-If your AKS cluster was not created by this deployment, `rulebricks deploy` needs (validated at preflight):
-
-1. OIDC issuer + workload identity enabled on the cluster:
-
-```bash
-az aks update --name <cluster> --resource-group <rg> \
-  --enable-oidc-issuer --enable-workload-identity
+```json
+{
+  "enableKeyVaultIntegration": { "value": true },
+  "createKeyVault": { "value": false },
+  "keyVaultName": { "value": "shared-rulebricks-vault" },
+  "existingKeyVaultResourceGroup": { "value": "shared-security-rg" }
+}
 ```
 
-2. A user-assigned managed identity (any resource group in the subscription) with Storage Blob Data Contributor on your storage account — never the cluster's control-plane or agentpool identities:
+The deployment adds only the reader role to an existing vault. Its firewall,
+private endpoint, DNS, secret writers, and lifecycle remain owned by the shared
+vault team.
 
-```bash
-az identity create --name <cluster>-rulebricks --resource-group <rg>
-az role assignment create \
-  --assignee "$(az identity show -n <cluster>-rulebricks -g <rg> --query principalId -o tsv)" \
-  --role "Storage Blob Data Contributor" \
-  --scope "$(az storage account show -n <account> -g <rg> --query id -o tsv)"
-```
+After deployment, use the outputs `keyVaultUri`, `externalSecretsClientId`,
+`externalSecretsTenantId`, and `externalSecretsServiceAccountName` in the Helm
+chart's `examples/azure-key-vault-values.yaml`. The chart can install a
+namespace-scoped External Secrets Operator and creates these resources:
 
-## 4. Deploy
+1. A service account annotated with the Azure client and tenant IDs.
+2. A namespaced `SecretStore` that authenticates with AKS Workload Identity.
+3. An `ExternalSecret` that maps selected Key Vault entries into one Kubernetes
+   Secret.
+
+Point `global.secrets.secretRef` and any Supabase secret references at that
+target Secret. No Key Vault value is stored in the Bicep deployment, Helm
+values, or Bicep outputs.
+
+Install the Helm release in the `externalSecretsNamespace` output. If a
+different namespace is required, set `rulebricksNamespace` before deploying
+the infrastructure so the federated credential and Kubernetes service account
+stay aligned.
+
+## Optional services
+
+| Parameter | Resource |
+| --- | --- |
+| `enableContainerRegistry` | ACR mirror and `AcrPull` for the AKS kubelet identity |
+| `enableManagedKafka` | Event Hubs Premium with three Kafka-compatible hubs |
+| `enableManagedRedis` | Azure Managed Redis |
+| `enableManagedDatabase` | PostgreSQL Flexible Server with private DNS and logical replication |
+| `enableMetricsRemoteWrite` | Azure Monitor workspace, DCE, DCR, and publisher role |
+| `enableManagedGrafana` | Azure Managed Grafana connected to the created monitor workspace |
+| `enableExternalDns` | Workload identity and DNS-zone-scoped contributor role |
+| `enableKeyVaultIntegration` | Key Vault reader identity and either a created vault or a scoped role on an existing vault |
+
+For a shared Data Collection Rule, provide
+`existingDataCollectionRuleName` and
+`existingDataCollectionRuleResourceGroup`. For external-dns, provide
+`dnsZoneName` and `dnsZoneResourceGroup`.
+
+## Test deployment
+
+The test environment is the recommended first validation path. It has no
+resource lock and can be removed by deleting its dedicated resource group.
 
 ```bash
 az account set --subscription <subscription-id>
-AZURE_LOCATION=eastus bash check-aks-prereqs.sh   # verifies identity, providers, quota
+az group create --name rulebricks-test-rg --location eastus
 
-az group create --name rulebricks-rg --location eastus
+bash check-aks-prereqs.sh \
+  --parameters parameters.test.json \
+  --resource-group rulebricks-test-rg
+
+az deployment group what-if \
+  --resource-group rulebricks-test-rg \
+  --template-file main.bicep \
+  --parameters @parameters.test.json \
+  --validation-level ProviderNoRbac
 
 az deployment group create \
-  --resource-group rulebricks-rg \
+  --name rulebricks-test \
+  --resource-group rulebricks-test-rg \
   --template-file main.bicep \
-  --parameters @parameters.json \
-  --parameters postgresAdminPassword='<strong-password>'   # only if enableManagedDatabase
+  --parameters @parameters.test.json
 
-az aks get-credentials --name rulebricks-cluster --resource-group rulebricks-rg
+az aks get-credentials \
+  --name rulebricks-test \
+  --resource-group rulebricks-test-rg
 ```
 
-- Timing: ~10-15 min base; Event Hubs Premium adds ~15 min, Flexible Server ~10 min (parallel).
-- Then run `rulebricks init`; outputs (`az deployment group show -g rulebricks-rg -n main --query properties.outputs`) map 1:1 to wizard fields.
+Run `rulebricks init`, select the created AKS cluster, and then deploy the Helm
+release. The CLI detects the Azure disk storage class and creates the workload
+identity bindings used by the chart.
 
-## 5. Take down
+Key Vault is off in the test profile. Enable it for an end-to-end secret-sync
+test without adding a private endpoint or purge protection:
 
 ```bash
-# 1. Remove Kubernetes-created resources first (load balancers, PVC-backed disks)
-rulebricks destroy <deployment-name>
+SIGNED_IN_ID=$(az ad signed-in-user show --query id -o tsv)
 
-# 2. Delete the resource group (cascade-deletes the MC_* node resource group)
-az group delete --name rulebricks-rg --yes
+az deployment group create \
+  --name rulebricks-test \
+  --resource-group rulebricks-test-rg \
+  --template-file main.bicep \
+  --parameters @parameters.test.json \
+  --parameters enableKeyVaultIntegration=true \
+               keyVaultWriterPrincipalIds="[\"$SIGNED_IN_ID\"]"
 ```
 
-Note: deleting the group also deletes the storage account, including your
-decision-log archives (`decision-logs/`) and database backups (`db-backups/`)
-in the `<cluster>-data` container — copy out anything you need first. The
-container registry and its mirrored images go with the group too; re-seed a
-new registry with `mirror-to-acr.sh` if you rebuild.
+## Production deployment
 
-Resources that linger after group deletion — check and remove manually:
+The production API server is private. Run the deployment and all later
+`kubectl`, Helm, and Rulebricks CLI commands from a network that can reach the
+AKS virtual network.
 
-| Leftover | Why | Cleanup |
-| --- | --- | --- |
-| Anything else in a **shared** resource group | `az group delete` removes the whole group — use a dedicated RG, or delete resources individually if shared | Delete per-resource via `az resource delete` |
-| Role assignments on out-of-group scopes | e.g. DNS Zone Contributor on a zone in `dnsZoneResourceGroup` | `az role assignment delete` |
-| Entra ID objects for deleted identities | Stale role assignments can reference them | `az role assignment list --query "[?principalName==null]"` and delete |
-| Kubernetes load balancers / disks | Live in `MC_*` (deleted with the group), but orphan if the cluster was deleted separately first | `rulebricks destroy` before deleting |
+Before deploying, add at least one Entra group object ID to
+`aksAdminPrincipalIds` in `parameters.production.json`. Group-based access is
+preferred so administrators can change without redeploying the cluster.
+
+```json
+"aksAdminPrincipalIds": {
+  "value": ["<entra-group-object-id>"]
+},
+"keyVaultWriterPrincipalIds": {
+  "value": ["<secret-writer-group-object-id>"]
+}
+```
+
+```bash
+az group create --name rulebricks-prod-rg --location eastus
+
+bash check-aks-prereqs.sh \
+  --parameters parameters.production.json \
+  --resource-group rulebricks-prod-rg
+
+az deployment group what-if \
+  --resource-group rulebricks-prod-rg \
+  --template-file main.bicep \
+  --parameters @parameters.production.json \
+  --validation-level ProviderNoRbac
+
+az deployment group create \
+  --name rulebricks-production \
+  --resource-group rulebricks-prod-rg \
+  --template-file main.bicep \
+  --parameters @parameters.production.json
+```
+
+The production profile creates a zero-node burst pool capped at one node.
+Increase `burstMaxCount` only after load testing and quota approval. The
+prerequisite checker treats launch quota as a blocker and a lower-than-ceiling
+quota as a warning, so an unused autoscaling ceiling does not prevent initial
+validation.
+
+## After the infrastructure deployment
+
+Retrieve outputs with:
+
+```bash
+az deployment group show \
+  --resource-group <resource-group> \
+  --name <deployment-name> \
+  --query properties.outputs
+```
+
+Point the application DNS names at the load balancer created by the Helm
+release, or enable external-dns and provide its zone parameters. Microsoft
+Entra application registrations are Microsoft Graph objects, so SSO clients
+are configured separately from this ARM deployment.
+
+When a managed service is enabled, use the returned Kafka or Redis command to
+retrieve its secret at deployment time. The PostgreSQL password is the secure
+value supplied to ARM. None of these secrets appear in Bicep outputs.
+
+### Sync Key Vault secrets
+
+Seed the vault from a trusted workstation or delivery pipeline that has the
+writer role. Production writers must also have network access to the AKS virtual
+network because the vault's public endpoint is disabled. Use your own secret
+names as long as they match the Helm `externalSecrets.remoteRefs` mappings.
+
+```bash
+KV_NAME=$(az deployment group show \
+  --resource-group <resource-group> \
+  --name <deployment-name> \
+  --query properties.outputs.keyVaultName.value -o tsv)
+
+az keyvault secret set \
+  --vault-name "$KV_NAME" \
+  --name rulebricks-license-key \
+  --value "$LICENSE_KEY" \
+  --output none
+```
+
+Copy `examples/azure-key-vault-values.yaml`, replace the four Bicep output
+placeholders, and map each required Kubernetes key to its Key Vault secret
+name. Then include that file in the Rulebricks Helm install or upgrade. Keep
+`externalSecrets.installOperator=false` only when the cluster already has a
+compatible External Secrets Operator.
+
+### Seed the production registry
+
+```bash
+export DOCKERHUB_USERNAME=<license-username>
+export DOCKERHUB_TOKEN=<license-token>
+
+bash mirror-to-acr.sh \
+  --registry <containerRegistryName-output> \
+  --version <product-version>
+```
+
+Set `imageRegistry` in the Rulebricks deployment configuration to the
+`containerRegistryLoginServer` output. ACR imports are server-side and the
+template enables the Azure-services bypass. If tenant policy blocks an import,
+temporarily deploy with `allowContainerRegistryPublicAccess=true`, seed the
+registry, and redeploy with it set to `false`.
+
+### Managed PostgreSQL
+
+When `enableManagedDatabase=true`, pass the administrator password as a secure
+deployment parameter. Do not commit it to a parameter file.
+
+```bash
+az deployment group create \
+  --resource-group rulebricks-prod-rg \
+  --template-file main.bicep \
+  --parameters @parameters.production.json \
+  --parameters enableManagedDatabase=true \
+               postgresAdminPassword='<strong-password>'
+```
+
+Run the `postgresRestartCommand` output once. The restart activates
+`wal_level=logical`, which Supabase Realtime requires.
+
+## Cleanup
+
+Remove the Kubernetes release first so its load balancers and disks are
+deleted cleanly.
+
+```bash
+rulebricks destroy <deployment-name>
+```
+
+The test profile has no locks. If Key Vault was enabled, capture its name so it
+can be purged after the resource group is gone:
+
+```bash
+TEST_VAULT=$(az keyvault list \
+  --resource-group rulebricks-test-rg \
+  --query "[?tags.workload=='rulebricks'].name | [0]" -o tsv)
+
+az group delete --name rulebricks-test-rg --yes
+
+if [[ -n "$TEST_VAULT" ]]; then
+  az keyvault purge --name "$TEST_VAULT" --location eastus
+fi
+```
+
+The production profile protects its created storage account with a delete lock.
+Remove that known lock, then delete the dedicated resource group:
+
+```bash
+STORAGE_ACCOUNT=$(az storage account list \
+  --resource-group rulebricks-prod-rg \
+  --query "[?tags.workload=='rulebricks'].name | [0]" -o tsv)
+
+az lock delete \
+  --name protect-rulebricks-data \
+  --resource-group rulebricks-prod-rg \
+  --resource-type Microsoft.Storage/storageAccounts \
+  --resource-name "$STORAGE_ACCOUNT"
+
+az group delete --name rulebricks-prod-rg --yes
+```
+
+Deleting the resource group also deletes the created storage account, decision
+logs, backups, and mirrored images. Copy out anything that must be retained.
+
+The production vault has purge protection by default. Deleting its resource
+group soft-deletes the vault, retains it for the configured retention period,
+and keeps its name reserved. Recover the vault if the environment must be
+restored during that period. Use the test profile for disposable validation.
+
+If the deployment assigned roles in shared storage, DNS, or monitoring resource
+groups, remove those assignments before deleting the managed identity. These
+external resources are never deleted by this template.
+
+## Validation scope
+
+`az bicep build` and `az bicep lint` provide local validation. The prerequisite
+checker adds parameter consistency, regional AKS version, VM SKU, access, and
+quota checks. `az deployment group what-if` performs provider validation and
+shows the exact Azure changes without creating resources.

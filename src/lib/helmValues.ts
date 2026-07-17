@@ -2251,6 +2251,29 @@ export function buildHelmValues(
       },
     },
 
+    "external-secrets": {
+      installCRDs: true,
+      crds: {
+        createClusterExternalSecret: false,
+        createClusterSecretStore: false,
+        createSecretStore: true,
+        createClusterGenerator: false,
+        createClusterPushSecret: false,
+        createPushSecret: false,
+      },
+      scopedRBAC: true,
+      processClusterExternalSecret: false,
+      processClusterPushSecret: false,
+      processClusterStore: false,
+      processClusterGenerator: false,
+      processPushSecret: false,
+      processSecretStore: true,
+      global: {
+        repository: `${reg}/${IMAGE_REPOSITORIES.externalSecrets}`,
+        imagePullSecrets: rulebricksPullSecret,
+      },
+    },
+
     // Cluster Issuer for Let's Encrypt
     clusterIssuer: {
       enabled: tlsEnabled,

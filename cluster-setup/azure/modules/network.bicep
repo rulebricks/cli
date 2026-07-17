@@ -1,16 +1,6 @@
-// Network: one VNet with purpose-built subnets.
-//
-//   aks-subnet               nodes + internal load balancers (CNI Overlay:
-//                            pods draw from podCidr, not from this subnet,
-//                            so a /22 comfortably holds the node fleet)
-//   private-endpoints-subnet private endpoints for Event Hubs / Managed Redis
-//   postgres-subnet          delegated to PostgreSQL Flexible Server
-//
-// The address space is parameterized (default 10.240.0.0/16) so enterprises
-// can slot it into existing IPAM without conflicts - unlike a 10/8 grab.
-
 param clusterName string
 param location string
+param tags object
 param vnetAddressSpace string
 param aksSubnetPrefix string
 param privateEndpointsSubnetPrefix string
@@ -19,9 +9,7 @@ param postgresSubnetPrefix string
 resource nsg 'Microsoft.Network/networkSecurityGroups@2023-11-01' = {
   name: '${clusterName}-nsg'
   location: location
-  tags: {
-    Environment: 'rulebricks'
-  }
+  tags: tags
   properties: {
     securityRules: [
       {
@@ -51,9 +39,6 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-11-01' = {
         }
       }
       {
-        // Traefik's LoadBalancer service; 80 exists for ACME HTTP-01 +
-        // redirect-to-HTTPS. Tighten sourceAddressPrefix to a corporate CIDR
-        // for internal-only deployments.
         name: 'AllowHTTPInbound'
         properties: {
           priority: 110
@@ -86,17 +71,13 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-11-01' = {
 resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
   name: '${clusterName}-vnet'
   location: location
-  tags: {
-    Environment: 'rulebricks'
-  }
+  tags: tags
   properties: {
     addressSpace: {
       addressPrefixes: [
         vnetAddressSpace
       ]
     }
-    // Subnets are declared inline (not as child resources) so repeat
-    // deployments never try to delete/recreate them.
     subnets: [
       {
         name: 'aks-subnet'
@@ -111,6 +92,7 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
         name: 'private-endpoints-subnet'
         properties: {
           addressPrefix: privateEndpointsSubnetPrefix
+          privateEndpointNetworkPolicies: 'Disabled'
         }
       }
       {

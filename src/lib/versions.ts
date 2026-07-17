@@ -77,6 +77,7 @@ export const IMAGE_REPOSITORIES = {
   kedaAdmissionWebhooks: "rulebricks/keda-admission-webhooks",
   vector: "rulebricks/vector",
   externalDns: "rulebricks/external-dns",
+  externalSecrets: "rulebricks/external-secrets",
   clusterAutoscaler: "rulebricks/cluster-autoscaler",
 } as const;
 

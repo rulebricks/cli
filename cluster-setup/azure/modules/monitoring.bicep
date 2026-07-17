@@ -1,55 +1,42 @@
-// Monitoring: Prometheus remote write -> Azure Monitor managed Prometheus.
-//
-// createMonitorWorkspace = true provisions an Azure Monitor workspace + an
-// explicit Data Collection Endpoint + Rule in THIS resource group, so the
-// Monitoring Metrics Publisher role is scoped to a DCR we own and name. Role
-// propagation takes ~30 min; expect HTTP 403 from remote write until then.
-//
-// createMonitorWorkspace = false is the BYO path: pass the resource ID of an
-// existing DCR (associated with an Azure Monitor workspace) and only the role
-// assignment is created.
-//
-// The grantee is the <cluster>-rulebricks workload identity (identity.bicep);
-// the in-cluster Prometheus authenticates via AKS Workload Identity.
-//
-// This module is only deployed when enableMetricsRemoteWrite is true (see
-// main.bicep) - leave it off to keep metrics in-cluster or send them to an
-// existing observability platform.
-
 param clusterName string
 param location string
+param tags object
 
 param createMonitorWorkspace bool
-param existingDataCollectionRuleId string
+param enableManagedGrafana bool
+param grafanaName string
 
-@description('Principal ID of the <cluster>-rulebricks workload identity (grantee of the metrics-publisher role).')
 param rulebricksPrincipalId string
-
-@description('Resource ID of the <cluster>-rulebricks workload identity (role-assignment guid() seed).')
 param rulebricksIdentityId string
 
-var monitoringMetricsPublisherRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4e42-8a64-420c390055eb')
-
-var monitorWorkspaceName = '${clusterName}-amw'
-var dceName = '${clusterName}-dce'
-var dcrName = '${clusterName}-dcr'
+var monitoringMetricsPublisherRoleId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  '3913510d-42f4-4e42-8a64-420c390055eb'
+)
+var monitoringDataReaderRoleId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  'b0d8363b-8ddd-447d-831f-62ca05bff136'
+)
 
 resource monitorWorkspace 'Microsoft.Monitor/accounts@2023-04-03' = if (createMonitorWorkspace) {
-  name: monitorWorkspaceName
+  name: '${clusterName}-amw'
   location: location
+  tags: tags
 }
 
 resource dce 'Microsoft.Insights/dataCollectionEndpoints@2023-03-11' = if (createMonitorWorkspace) {
-  name: dceName
+  name: '${clusterName}-dce'
   location: location
   kind: 'Linux'
+  tags: tags
   properties: {}
 }
 
 resource dcr 'Microsoft.Insights/dataCollectionRules@2023-03-11' = if (createMonitorWorkspace) {
-  name: dcrName
+  name: '${clusterName}-dcr'
   location: location
   kind: 'Linux'
+  tags: tags
   properties: {
     dataCollectionEndpointId: dce!.id
     dataSources: {
@@ -84,11 +71,6 @@ resource dcr 'Microsoft.Insights/dataCollectionRules@2023-03-11' = if (createMon
   }
 }
 
-// BYO DCR reference (createMonitorWorkspace = false)
-resource existingDcr 'Microsoft.Insights/dataCollectionRules@2023-03-11' existing = if (!createMonitorWorkspace && !empty(existingDataCollectionRuleId)) {
-  name: last(split(existingDataCollectionRuleId, '/'))
-}
-
 resource metricsPublisherRoleCreated 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createMonitorWorkspace) {
   name: guid(dcr!.id, rulebricksIdentityId, 'Monitoring Metrics Publisher')
   scope: dcr
@@ -99,16 +81,38 @@ resource metricsPublisherRoleCreated 'Microsoft.Authorization/roleAssignments@20
   }
 }
 
-resource metricsPublisherRoleByo 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!createMonitorWorkspace && !empty(existingDataCollectionRuleId)) {
-  name: guid(existingDataCollectionRuleId, rulebricksIdentityId, 'Monitoring Metrics Publisher')
-  scope: existingDcr
+resource grafana 'Microsoft.Dashboard/grafana@2023-09-01' = if (enableManagedGrafana && createMonitorWorkspace) {
+  name: grafanaName
+  location: location
+  tags: tags
+  sku: {
+    name: 'Standard'
+  }
+  identity: {
+    type: 'SystemAssigned'
+  }
   properties: {
-    roleDefinitionId: monitoringMetricsPublisherRoleId
-    principalId: rulebricksPrincipalId
+    grafanaIntegrations: {
+      azureMonitorWorkspaceIntegrations: [
+        {
+          azureMonitorWorkspaceResourceId: monitorWorkspace!.id
+        }
+      ]
+    }
+  }
+}
+
+resource grafanaAmwReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableManagedGrafana && createMonitorWorkspace) {
+  name: guid(monitorWorkspace!.id, grafanaName, 'Monitoring Data Reader')
+  scope: monitorWorkspace
+  properties: {
+    roleDefinitionId: monitoringDataReaderRoleId
+    principalId: grafana!.identity.principalId
     principalType: 'ServicePrincipal'
   }
 }
 
 output dceMetricsIngestionEndpoint string = createMonitorWorkspace ? dce!.properties.metricsIngestion.endpoint : ''
 output dcrImmutableId string = createMonitorWorkspace ? dcr!.properties.immutableId : ''
-output dataCollectionRuleId string = createMonitorWorkspace ? dcr!.id : existingDataCollectionRuleId
+output dataCollectionRuleId string = dcr!.id
+output grafanaEndpoint string = enableManagedGrafana ? grafana!.properties.endpoint : ''

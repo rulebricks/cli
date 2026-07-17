@@ -37,6 +37,22 @@ export const BUNDLED_IMAGE_MANIFEST: {
       "tag": "1.0.1-debian13-kafka-4.2.0"
     },
     {
+      "name": "strimzi-kafka-bridge",
+      "tag": "1.0.0-debian13"
+    },
+    {
+      "name": "kaniko-executor",
+      "tag": "1.0.1"
+    },
+    {
+      "name": "buildah",
+      "tag": "1.0.1"
+    },
+    {
+      "name": "maven-builder",
+      "tag": "1.0.1"
+    },
+    {
       "name": "prometheus",
       "tag": "3.12.0-debian13"
     },
@@ -115,6 +131,10 @@ export const BUNDLED_IMAGE_MANIFEST: {
     {
       "name": "external-dns",
       "tag": "0.21.0-debian13"
+    },
+    {
+      "name": "external-secrets",
+      "tag": "v2.7.0"
     },
     {
       "name": "cluster-autoscaler",
@@ -246,7 +266,7 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "curljq",
-      "tag": "latest"
+      "tag": "1.0.0"
     }
   ]
 };

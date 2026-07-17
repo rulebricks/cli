@@ -1,53 +1,34 @@
-// Managed Kafka: Azure Event Hubs Premium with the Kafka endpoint.
-//
-// The Rulebricks chart speaks the Kafka protocol to Event Hubs on port 9093
-// with SASL PLAIN, username "$ConnectionString", password = the namespace
-// connection string (the CLI's "azure-event-hubs" preset fills these in).
-//
-// Unlike AWS MSK (where the chart's provisioning job creates topics), Event
-// Hubs topics are the event hub resources themselves - so this module creates
-// the three hubs the platform needs, partitioned to match the deployment's
-// worker ceiling:
-//
-//   <prefix>solution           solutionPartitions   work queue; partition
-//                                                    count caps worker
-//                                                    concurrency (KEDA max)
-//   <prefix>solution-response  solutionPartitions   response path back to HPS
-//   <prefix>logs               logsPartitions       decision-log stream
-//
-// PARTITION LIMITS: Premium allows 100 partitions per event hub and 200 per
-// PU per namespace. The chart's default solution partition count (128)
-// exceeds the per-hub cap, so solutionPartitions defaults to 64 here -
-// 64 + 64 + 24 = 152 partitions fits one PU. Set the deployment's
-// rulebricks.hps.workers.solutionPartitions to the same value.
+// Event Hubs exposes Kafka on port 9093 using SASL PLAIN. The three hubs and
+// their partition counts must match the topic settings generated for Helm.
 
 param clusterName string
 param location string
+param tags object
 
-@description('Globally-unique Event Hubs namespace name (becomes <name>.servicebus.windows.net).')
+@description('Globally unique Event Hubs namespace name.')
 param namespaceName string
 
-@description('Premium Processing Units (1, 2, 4, 8, 12, 16). One PU allows 200 partitions namespace-wide and ~5-10 MB/s ingress.')
+@description('Event Hubs Premium capacity units.')
 @allowed([1, 2, 4, 8, 12, 16])
 param capacityUnits int = 1
 
-@description('Kafka topic prefix; must match the deployment\'s kafkaTopicPrefix (CLI default "com.rulebricks.").')
+@description('Prefix shared by the provisioned hubs and Helm topic settings.')
 param topicPrefix string = 'com.rulebricks.'
 
-@description('Partitions for the solution and solution-response hubs. Caps worker concurrency; keep <= 100 (Premium per-hub limit) and set rulebricks.hps.workers.solutionPartitions to match.')
+@description('Partitions for the solution and solution-response hubs.')
 @minValue(1)
 @maxValue(100)
 param solutionPartitions int = 64
 
-@description('Partitions for the decision-logs hub.')
+@description('Partitions for the decision-log hub.')
 @minValue(1)
 @maxValue(100)
 param logsPartitions int = 24
 
-@description('Retention for all hubs, in hours (Premium supports up to 90 days).')
+@description('Retention for all hubs in hours.')
 param retentionHours int = 168
 
-@description('Reach the namespace through a private endpoint and disable public network access.')
+@description('Use a private endpoint and disable public network access.')
 param enablePrivateEndpoint bool
 
 param privateEndpointsSubnetId string
@@ -56,9 +37,7 @@ param vnetId string
 resource namespace 'Microsoft.EventHub/namespaces@2024-01-01' = {
   name: namespaceName
   location: location
-  tags: {
-    Environment: 'rulebricks'
-  }
+  tags: tags
   sku: {
     name: 'Premium'
     tier: 'Premium'
@@ -67,13 +46,11 @@ resource namespace 'Microsoft.EventHub/namespaces@2024-01-01' = {
   properties: {
     kafkaEnabled: true
     minimumTlsVersion: '1.2'
-    disableLocalAuth: false // chart auth = SAS connection string over SASL PLAIN
+    disableLocalAuth: false
     publicNetworkAccess: enablePrivateEndpoint ? 'Disabled' : 'Enabled'
   }
 }
 
-// Least-privilege SAS rule for the chart: produce + consume, no Manage. The
-// namespace's RootManageSharedAccessKey stays for administrators.
 resource authRule 'Microsoft.EventHub/namespaces/authorizationRules@2024-01-01' = {
   parent: namespace
   name: 'rulebricks'
@@ -121,15 +98,10 @@ resource logsHub 'Microsoft.EventHub/namespaces/eventhubs@2024-01-01' = {
   }
 }
 
-// Kafka consumer groups (hps-response-consumer, generic-workers, vector, KEDA)
-// are managed dynamically through the Kafka group protocol - no pre-creation.
-
-// ----------------------------------------------------------------------------
-// Optional private endpoint + DNS
-// ----------------------------------------------------------------------------
 resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (enablePrivateEndpoint) {
   name: 'privatelink.servicebus.windows.net'
   location: 'global'
+  tags: tags
 }
 
 resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (enablePrivateEndpoint) {
@@ -147,6 +119,7 @@ resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLin
 resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (enablePrivateEndpoint) {
   name: '${namespaceName}-pe'
   location: location
+  tags: tags
   properties: {
     subnet: {
       id: privateEndpointsSubnetId
@@ -183,6 +156,4 @@ resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGr
 output namespaceName string = namespace.name
 output bootstrapServers string = '${namespace.name}.servicebus.windows.net:9093'
 output topicNames array = [solutionHub.name, solutionResponseHub.name, logsHub.name]
-// The connection string is a secret; fetch it out-of-band with this command
-// (paste the value into the CLI wizard's Event Hubs connection string field):
 output connectionStringCommand string = 'az eventhubs namespace authorization-rule keys list --resource-group ${resourceGroup().name} --namespace-name ${namespace.name} --name ${authRule.name} --query primaryConnectionString -o tsv'

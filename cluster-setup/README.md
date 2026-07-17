@@ -1,15 +1,14 @@
 # Cluster Setup
 
-Infrastructure-as-code for standing up a Rulebricks-ready Kubernetes cluster —
-one template per cloud. Managed Kafka, Redis, and Postgres are independent
+Infrastructure as code for standing up a Rulebricks-ready Kubernetes cluster,
+with one template per cloud. Managed Kafka, Redis, and Postgres are independent
 true/false toggles on each template that **default to off**: everything runs
 in-cluster until you enable them, and any combination is valid.
 
 > These templates are reference implementations. Treat them as a starting
 > point and customize them to accommodate pre-existing services or unique
-> performance requirements. Every resource is commented with why Rulebricks
-> needs it, so the templates double as the authoritative statement of
-> requirements for infra/cyber review.
+> performance requirements. Each cloud README documents the design and the
+> operational requirements used for infrastructure and security review.
 
 ## Layout
 
@@ -22,7 +21,7 @@ gcp/*.tf                          GKE (Terraform) + Managed Kafka/Memorystore/
                                   Cloud SQL toggles
 ```
 
-Each folder ships a parameters sample (`parameters.json` /
+Each folder ships parameter samples (`parameters.json` /
 `terraform.tfvars.example`), a `check-*-prereqs.sh` access checker, and a
 README with five sections: parameters, deployed resources, remaining manual
 steps, deploy command, and take-down command.
@@ -66,14 +65,19 @@ outputs (data-service rows appear only when the matching toggle is on):
 | Postgres endpoint | `DbEndpoint` / `DbPort` / `DbName` | `postgresHost` / `postgresPort` / `postgresDatabase` | `postgres_host` / `postgres_port` / `postgres_database` (config-file only; the wizard does not prompt for GCP Postgres) |
 | Postgres bootstrap creds | `DbMasterUsername` + `DbMasterPasswordCommand` (run it) | `postgresAdminUsernameOut` + your `@secure` password | `postgres_master_username` + your `TF_VAR` password |
 
-Secrets never appear in template outputs — the `*Command` outputs print them
+Secrets never appear in template outputs. The `*Command` outputs print them
 on demand from Secrets Manager / the Azure control plane / gcloud.
 
 Azure additionally offers an ACR image mirror (`enableContainerRegistry`) for
 restricted-egress installs: its `containerRegistryLoginServer` output is not a
 wizard field but goes into the deployment config's `imageRegistry` setting
 after seeding the registry with `azure/mirror-to-acr.sh` (see the Azure
-README's "Manual provisioning" section).
+README's "Seed the production registry" section).
+
+Azure provides separate `test` and `production` profiles. The test profile is
+low cost and has no delete locks. The production profile enables private AKS,
+Entra RBAC, availability zones, managed upgrades, private endpoints, and stronger
+storage protection without forcing managed data services on every deployment.
 
 ## Related documentation
 

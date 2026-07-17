@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 #
-# mirror-to-acr.sh — seed an Azure Container Registry with every image a
+# Seed an Azure Container Registry with every image a
 # Rulebricks deployment pulls, so clusters with no (or restricted) egress to
 # Docker Hub can run fully self-contained.
 #
@@ -10,9 +10,9 @@ set -euo pipefail
 # preserving the rulebricks/<name>:<tag> path so the deployment's single
 # imageRegistry override (registry HOST swap) covers everything:
 #
-#   1. Infrastructure images — every entry in the chart's images/manifest.yaml
+#   1. Infrastructure images from the chart's images/manifest.yaml
 #      (the single source of truth shipped inside each chart version).
-#   2. Product images — rulebricks/app, rulebricks/hps, and the HPS worker
+#   2. Product images for the app, HPS, and HPS workers
 #      (rulebricks/hps:worker-<version>), governed by your product version.
 #
 # Imports run server-side via `az acr import` (multi-arch manifest lists are
