@@ -9,17 +9,27 @@
 //                           Identity + OIDC, optional private API server and
 //                           Entra/Azure RBAC; core + burst node pools with the
 //                           rulebricks.com/pool=burst label/taint contract.
-//   modules/data.bicep      The single <cluster>-rulebricks identity, blob
-//                           storage for decision logs + DB backups, Azure
-//                           Monitor managed Prometheus (AMW + DCE + DCR),
-//                           optional external-dns identity.
+//   modules/identity.bicep  The single <cluster>-rulebricks workload identity
+//                           every data-path role binds to; optional
+//                           external-dns identity + federated credential.
+//   modules/storage.bicep   Blob object storage: account + <cluster>-data
+//                           container (decision-logs/ + db-backups/ prefixes)
+//                           + Storage Blob Data Contributor for the identity.
+//   modules/monitoring.bicep enableMetricsRemoteWrite -> Azure Monitor
+//                           managed Prometheus (AMW + DCE + DCR + publisher
+//                           role).
 //   modules/kafka.bicep     enableManagedKafka    -> Event Hubs Premium
 //   modules/redis.bicep     enableManagedRedis    -> Azure Managed Redis
 //   modules/postgres.bicep  enableManagedDatabase -> PostgreSQL Flexible Server
+//   modules/acr.bicep       enableContainerRegistry -> ACR mirror of the
+//                           docker.io/rulebricks/* images (AcrPull for nodes;
+//                           seed it with mirror-to-acr.sh, then set the
+//                           deployment's imageRegistry to the loginServer)
 //
-// The three managed data services are independent true/false toggles - any
-// combination is valid; the Rulebricks chart runs Kafka, Valkey, and Postgres
-// in-cluster for whichever you leave disabled.
+// The managed data services and the registry are independent true/false
+// toggles - any combination is valid; the Rulebricks chart runs Kafka, Valkey,
+// and Postgres in-cluster for whichever you leave disabled, and pulls from
+// docker.io/rulebricks/* when no registry mirror is configured.
 //
 // Everything except the optional external-dns path is deployment-independent:
 // federated identity credentials are namespace-scoped, so the Rulebricks CLI
@@ -63,7 +73,7 @@ param serviceCidr string = '172.16.0.0/16'
 param dnsServiceIP string = '172.16.0.10'
 param podCidr string = '192.168.0.0/16'
 
-@description('Reach Event Hubs / Managed Redis through private endpoints in the private-endpoints subnet (Event Hubs additionally disables public network access). Postgres Flexible Server is always VNet-only via subnet delegation.')
+@description('Reach Event Hubs / Managed Redis / ACR through private endpoints in the private-endpoints subnet (Event Hubs additionally disables public network access; ACR requires the Premium SKU). Postgres Flexible Server is always VNet-only via subnet delegation.')
 param enableDataServicePrivateEndpoints bool = false
 
 // ----------------------------------------------------------------------------
@@ -132,6 +142,19 @@ param dnsZoneResourceGroup string = ''
 
 @description('Namespace for the external-dns federated credential (rulebricks-<deploymentName>). Only used when enableExternalDns is true.')
 param rulebricksNamespace string = 'rulebricks'
+
+// ----------------------------------------------------------------------------
+// Container registry (ACR mirror of docker.io/rulebricks/*)
+// ----------------------------------------------------------------------------
+@description('Provision an Azure Container Registry to mirror the docker.io/rulebricks/* images (restricted-egress / air-gapped installs). Seed it with mirror-to-acr.sh, then set the deployment\'s imageRegistry to the loginServer output.')
+param enableContainerRegistry bool = false
+
+@description('Registry name; globally unique, 5-50 alphanumeric characters (becomes <name>.azurecr.io).')
+param containerRegistryName string = take('${replace(toLower(clusterName), '-', '')}acr${uniqueString(resourceGroup().id)}', 50)
+
+@description('ACR SKU. Premium is required for private endpoints; Standard suffices for public-endpoint pulls.')
+@allowed(['Basic', 'Standard', 'Premium'])
+param containerRegistrySku string = 'Premium'
 
 // ----------------------------------------------------------------------------
 // Managed Kafka (Azure Event Hubs Premium)
@@ -249,8 +272,10 @@ module cluster 'modules/cluster.bicep' = {
   }
 }
 
-module data 'modules/data.bicep' = {
-  name: '${clusterName}-data'
+module identity 'modules/identity.bicep' = {
+  // Deployment names are their own namespace - no clash with the
+  // <cluster>-identity managed identity resource in cluster.bicep.
+  name: '${clusterName}-identity'
   params: {
     clusterName: clusterName
     location: location
@@ -258,14 +283,47 @@ module data 'modules/data.bicep' = {
     enableExternalDns: enableExternalDns
     dnsZoneResourceGroup: dnsZoneResourceGroup
     rulebricksNamespace: rulebricksNamespace
+  }
+}
+
+module storage 'modules/storage.bicep' = {
+  name: '${clusterName}-storage'
+  params: {
+    clusterName: clusterName
+    location: location
     createStorage: createStorage
     existingStorageAccountName: existingStorageAccountName
     dataContainerName: dataContainerName
     enableDecisionLogExport: enableDecisionLogExport
     enableBackupExport: enableBackupExport
+    rulebricksPrincipalId: identity.outputs.rulebricksPrincipalId
+    rulebricksIdentityId: identity.outputs.rulebricksIdentityId
+  }
+}
+
+module monitoring 'modules/monitoring.bicep' = if (enableMetricsRemoteWrite) {
+  name: '${clusterName}-monitoring'
+  params: {
+    clusterName: clusterName
+    location: location
     createMonitorWorkspace: createMonitorWorkspace
     existingDataCollectionRuleId: existingDataCollectionRuleId
-    enableMetricsRemoteWrite: enableMetricsRemoteWrite
+    rulebricksPrincipalId: identity.outputs.rulebricksPrincipalId
+    rulebricksIdentityId: identity.outputs.rulebricksIdentityId
+  }
+}
+
+module acr 'modules/acr.bicep' = if (enableContainerRegistry) {
+  name: '${clusterName}-acr'
+  params: {
+    clusterName: clusterName
+    location: location
+    registryName: containerRegistryName
+    skuName: containerRegistrySku
+    kubeletIdentityObjectId: cluster.outputs.kubeletIdentityObjectId
+    enablePrivateEndpoint: enableDataServicePrivateEndpoints
+    privateEndpointsSubnetId: network.outputs.privateEndpointsSubnetId
+    vnetId: network.outputs.vnetId
   }
 }
 
@@ -327,17 +385,23 @@ output location string = location
 output kubeconfigCommand string = 'az aks get-credentials --name ${clusterName} --resource-group ${resourceGroup().name}'
 
 // --- Storage + identity (CLI storage step) -----------------------------------
-output rulebricksClientId string = data.outputs.rulebricksClientId
-output storageAccountName string = data.outputs.storageAccountName
-output dataContainer string = data.outputs.dataContainer
-output externalDnsClientId string = data.outputs.externalDnsClientId
+output rulebricksClientId string = identity.outputs.rulebricksClientId
+output storageAccountName string = storage.outputs.storageAccountName
+output dataContainer string = storage.outputs.dataContainer
+output externalDnsClientId string = identity.outputs.externalDnsClientId
+
+// --- Container registry (CLI deployment-config field: imageRegistry) ---------
+// Seed with: bash mirror-to-acr.sh --registry <containerRegistryName>, then
+// set imageRegistry in the deployment config to this loginServer.
+output containerRegistryName string = enableContainerRegistry ? acr!.outputs.registryName : ''
+output containerRegistryLoginServer string = enableContainerRegistry ? acr!.outputs.loginServer : ''
 
 // --- Metrics (CLI monitoring step) -------------------------------------------
 // Prometheus remote_write URL =
 //   <dceMetricsIngestionEndpoint>/dataCollectionRules/<dcrImmutableId>/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24
-output dceMetricsIngestionEndpoint string = data.outputs.dceMetricsIngestionEndpoint
-output dcrImmutableId string = data.outputs.dcrImmutableId
-output dataCollectionRuleId string = data.outputs.dataCollectionRuleId
+output dceMetricsIngestionEndpoint string = enableMetricsRemoteWrite ? monitoring!.outputs.dceMetricsIngestionEndpoint : ''
+output dcrImmutableId string = enableMetricsRemoteWrite ? monitoring!.outputs.dcrImmutableId : ''
+output dataCollectionRuleId string = enableMetricsRemoteWrite ? monitoring!.outputs.dataCollectionRuleId : existingDataCollectionRuleId
 
 // --- Managed Kafka (CLI external-services step, preset azure-event-hubs) -----
 output kafkaBootstrapServers string = enableManagedKafka ? kafka!.outputs.bootstrapServers : ''

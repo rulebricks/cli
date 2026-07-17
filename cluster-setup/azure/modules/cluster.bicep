@@ -181,3 +181,6 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-05-01' = {
 output clusterName string = aks.name
 output oidcIssuerUrl string = aks.properties.oidcIssuerProfile.issuerURL
 output clusterIdentityPrincipalId string = aksIdentity.properties.principalId
+// The auto-created kubelet identity - what nodes present when pulling images
+// (the AcrPull grantee for the optional container-registry module).
+output kubeletIdentityObjectId string = aks.properties.identityProfile.kubeletidentity.objectId

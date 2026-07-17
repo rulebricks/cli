@@ -1,9 +1,11 @@
 # Azure Cluster Setup (AKS)
 
 One Bicep deployment: `main.bicep` + `modules/`. Managed Kafka (Event Hubs),
-Redis (Azure Managed Redis), Postgres (Flexible Server), and metrics remote
-write are independent toggles that **default to off** — the Rulebricks chart
-runs those services in-cluster until you enable them.
+Redis (Azure Managed Redis), Postgres (Flexible Server), metrics remote
+write, and a container-registry image mirror (ACR) are independent toggles
+that **default to off** — the Rulebricks chart runs the data services
+in-cluster and pulls images from `docker.io/rulebricks/*` until you enable
+them.
 
 > This IaC is a reference implementation. Treat it as a starting point and
 > customize it to accommodate pre-existing services (VNets, storage accounts,
@@ -53,6 +55,15 @@ Storage / metrics / DNS:
 | `createMonitorWorkspace` | `true` | AMW + DCE + DCR when remote write is on; `false` = BYO (`existingDataCollectionRuleId`) |
 | `enableExternalDns` | `false` | Identity + federated credential for external-dns (`dnsZoneResourceGroup`, `rulebricksNamespace`) |
 
+Container registry (ACR mirror of `docker.io/rulebricks/*` for
+restricted-egress / air-gapped installs):
+
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `enableContainerRegistry` | `false` | ACR + AcrPull for the AKS kubelet identity; seed it with `mirror-to-acr.sh`, then set the deployment's `imageRegistry` to the `containerRegistryLoginServer` output |
+| `containerRegistryName` | `<cluster-no-dashes>acr<hash>` | Globally unique, 5-50 alphanumeric chars (becomes `<name>.azurecr.io`) |
+| `containerRegistrySku` | `Premium` | Premium is required for private endpoints (`enableDataServicePrivateEndpoints`); Standard suffices for public-endpoint pulls |
+
 Managed services (all off by default; the sizing parameters below each toggle
 are ignored unless that toggle is `true`, so they cannot create a bad state):
 
@@ -89,18 +100,54 @@ Conditionally created:
 
 | Resource | Type | Condition |
 | --- | --- | --- |
+| Container registry + AcrPull role for the kubelet identity | `Microsoft.ContainerRegistry/registries` | `enableContainerRegistry` |
 | Azure Monitor workspace + DCE + DCR + Monitoring Metrics Publisher role | `Microsoft.Monitor/accounts`, `Microsoft.Insights/dataCollection*` | `enableMetricsRemoteWrite` (+ `createMonitorWorkspace`) |
 | external-dns identity + DNS Zone Contributor + federated credential | `Microsoft.ManagedIdentity/*` | `enableExternalDns` |
 | Event Hubs Premium namespace + `rulebricks` SAS rule (Send+Listen) + 3 hubs | `Microsoft.EventHub/namespaces` (+ eventhubs) | `enableManagedKafka` |
 | Azure Managed Redis cluster + database | `Microsoft.Cache/redisEnterprise` (+ databases) | `enableManagedRedis` |
 | PostgreSQL Flexible Server + private DNS zone + `wal_level=logical` configs | `Microsoft.DBforPostgreSQL/flexibleServers` | `enableManagedDatabase` |
-| Private DNS zones + private endpoints for Event Hubs / Redis | `Microsoft.Network/privateDnsZones`, `privateEndpoints` | `enableDataServicePrivateEndpoints` |
+| Private DNS zones + private endpoints for Event Hubs / Redis / ACR | `Microsoft.Network/privateDnsZones`, `privateEndpoints` | `enableDataServicePrivateEndpoints` |
 
 ## 3. Manual provisioning still required
 
 - **Kubeconfig** (after deploy): `az aks get-credentials --name <cluster> --resource-group <rg>`
+- **Registry seeding** (only when `enableContainerRegistry=true`): copy every
+  Rulebricks image into the ACR, then point the deployment at it:
+
+```bash
+export DOCKERHUB_USERNAME=<license docker hub username>
+export DOCKERHUB_TOKEN=<license pull token>
+bash mirror-to-acr.sh --registry <containerRegistryName> --version <productVersion>
+```
+
+  This imports every entry in the chart's `images/manifest.yaml` (all
+  infrastructure images) plus the `app`/`hps`/`hps:worker-*` product images
+  for your product version, preserving the `rulebricks/<name>:<tag>` path.
+  Then set `imageRegistry: <containerRegistryLoginServer>` in the deployment
+  config — the CLI rewrites every chart image to the mirror, and nodes pull
+  via the AcrPull role (no imagePullSecret). Re-run the script whenever you
+  upgrade the chart or product version.
 - **Postgres restart** (only when `enableManagedDatabase=true`): `wal_level` is static; run the `postgresRestartCommand` output once after creation, or Supabase Realtime will crashloop.
 - **DNS**: point your app domain at the load balancer the chart creates during `rulebricks deploy` (or use `enableExternalDns`).
+- **SSO with Microsoft Entra ID** (optional): app registrations are Microsoft
+  Graph objects, not ARM resources, so Bicep cannot create them — register the
+  OIDC client manually and pass it to the deployment's `global.sso` values:
+
+```bash
+APP_ID=$(az ad app create --display-name rulebricks-sso \
+  --web-redirect-uris \
+    "https://supabase.<domain>/auth/v1/callback" \
+    "https://<domain>/api/sso-proxy/callback" \
+  --query appId -o tsv)
+az ad app credential reset --id "$APP_ID" --years 2 --query password -o tsv  # SSO client secret
+```
+
+  Wizard/chart values: provider `azure`, URL
+  `https://login.microsoftonline.com/<tenant-id>`, client ID = `$APP_ID`,
+  client secret = the reset output. The OAuth client needs the `openid`,
+  `email`, and `profile` scopes (granted by default via Microsoft Graph
+  `User.Read`). The chart stores the credentials as the `<release>-sso`
+  Kubernetes Secret and wires GoTrue's `GOTRUE_EXTERNAL_AZURE_*` env vars.
 - **Secrets for the CLI wizard** (only when toggles are on) — run the `kafkaConnectionStringCommand` / `redisAccessKeyCommand` outputs; the Postgres password is the one you passed at deploy.
 - Federated identity credentials are **not** manual — the Rulebricks CLI creates them at `rulebricks deploy` time.
 
@@ -157,7 +204,9 @@ az group delete --name rulebricks-rg --yes
 
 Note: deleting the group also deletes the storage account, including your
 decision-log archives (`decision-logs/`) and database backups (`db-backups/`)
-in the `<cluster>-data` container — copy out anything you need first.
+in the `<cluster>-data` container — copy out anything you need first. The
+container registry and its mirrored images go with the group too; re-seed a
+new registry with `mirror-to-acr.sh` if you rebuild.
 
 Resources that linger after group deletion — check and remove manually:
 

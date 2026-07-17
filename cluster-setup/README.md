@@ -16,7 +16,8 @@ in-cluster until you enable them, and any combination is valid.
 ```
 aws/rulebricks-cluster.cfn.yaml   EKS (CloudFormation) + MSK/ElastiCache/RDS toggles
 azure/main.bicep + modules/       AKS (Bicep) + Event Hubs/Managed Redis/
-                                  PostgreSQL Flexible Server toggles
+                                  PostgreSQL Flexible Server/ACR image-mirror
+                                  toggles (+ mirror-to-acr.sh seeding script)
 gcp/*.tf                          GKE (Terraform) + Managed Kafka/Memorystore/
                                   Cloud SQL toggles
 ```
@@ -67,6 +68,12 @@ outputs (data-service rows appear only when the matching toggle is on):
 
 Secrets never appear in template outputs — the `*Command` outputs print them
 on demand from Secrets Manager / the Azure control plane / gcloud.
+
+Azure additionally offers an ACR image mirror (`enableContainerRegistry`) for
+restricted-egress installs: its `containerRegistryLoginServer` output is not a
+wizard field but goes into the deployment config's `imageRegistry` setting
+after seeding the registry with `azure/mirror-to-acr.sh` (see the Azure
+README's "Manual provisioning" section).
 
 ## Related documentation
 

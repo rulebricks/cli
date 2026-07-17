@@ -37,6 +37,9 @@
     "enableExternalDns": { "value": false },
     "dnsZoneResourceGroup": { "value": "" },
 
+    "enableContainerRegistry": { "value": false },
+    "containerRegistrySku": { "value": "Premium" },
+
     "enableManagedKafka": { "value": false },
     "eventHubsCapacityUnits": { "value": 1 },
     "kafkaTopicPrefix": { "value": "com.rulebricks." },

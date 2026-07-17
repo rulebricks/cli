@@ -29,7 +29,8 @@ VERBOSE="${VERBOSE:-0}"
 
 # Providers needed by the template. Storage covers decision-log/backup
 # blob; Monitor/Insights/AlertsManagement cover the managed-Prometheus path
-# (Azure Monitor workspace + data collection endpoint/rule).
+# (Azure Monitor workspace + data collection endpoint/rule); ContainerRegistry
+# covers the optional ACR image mirror (enableContainerRegistry).
 REQUIRED_PROVIDERS=(
   Microsoft.ContainerService
   Microsoft.Network
@@ -40,6 +41,7 @@ REQUIRED_PROVIDERS=(
   Microsoft.Monitor
   Microsoft.Insights
   Microsoft.AlertsManagement
+  Microsoft.ContainerRegistry
 )
 
 ACTIONS=()
