@@ -60,6 +60,11 @@ interface GenerateOptions {
   // autoscaler without credentials guarantees a fatal crashloop ("no EC2 IMDS
   // role found") that stalls helm --wait, so generation disables it instead.
   clusterAutoscalerIdentityMissing?: boolean;
+  // PEM CA bundle for the external managed database, wired into
+  // supabase.externalDatabase.sslRootCert. The async generate* entry points
+  // resolve it automatically for RDS hosts (resolveExternalDbSslRootCert);
+  // pass explicitly to override.
+  dbSslRootCert?: string;
 }
 
 // Names of the Kubernetes Secrets the CLI creates in k8s secret mode. Shared by
@@ -2446,6 +2451,15 @@ export function buildHelmValues(
                       enabled: true,
                       host: pgExt.host ?? "",
                       port: pgExt.port ?? 5432,
+                      // CA bundle for the managed instance (resolved by the
+                      // async generate* entry points, e.g. the AWS RDS regional
+                      // bundle). Without it, Studio's Table/SQL editor fails
+                      // against force-TLS servers: Studio hands postgres-meta a
+                      // connection string that cannot carry sslmode, and meta
+                      // only encrypts those when PG_META_DB_SSL_ROOT_CERT is set.
+                      ...(options.dbSslRootCert
+                        ? { sslRootCert: options.dbSslRootCert }
+                        : {}),
                       bootstrap: {
                         enabled: pgExt.bootstrap?.enabled ?? true,
                         masterUsername:
@@ -2912,6 +2926,44 @@ async function resolveGenerateImages(
 }
 
 /**
+ * Resolves the CA bundle for an external managed database. Currently AWS RDS
+ * only: fetches the REGIONAL trust bundle (region parsed from the endpoint,
+ * e.g. name.id.us-east-1.rds.amazonaws.com) from AWS's public truststore.
+ * Regional, not global, on purpose: the value ships to postgres-meta as one
+ * env var and Linux caps a single env entry at 128KiB (the ~170KiB global
+ * bundle makes exec fail with "argument list too long"). Fail-open: on any
+ * fetch problem returns undefined and the deploy proceeds without it (Studio's
+ * Table/SQL editor degrades against force-TLS servers; nothing else does).
+ */
+async function resolveExternalDbSslRootCert(
+  config: DeploymentConfig,
+): Promise<string | undefined> {
+  const pgExt =
+    config.externalServices?.postgres?.mode === "external"
+      ? config.externalServices.postgres.external
+      : undefined;
+  const host = pgExt?.host ?? "";
+  const match = host.match(/\.([a-z0-9-]+)\.rds\.amazonaws\.com$/i);
+  if (!match) return undefined;
+  const region = match[1];
+  try {
+    const res = await fetch(
+      `https://truststore.pki.rds.amazonaws.com/${region}/${region}-bundle.pem`,
+      { signal: AbortSignal.timeout(10_000) },
+    );
+    if (!res.ok) return undefined;
+    const pem = await res.text();
+    // Sanity: must be PEM and safely under the 128KiB per-env-var exec limit.
+    if (!pem.includes("BEGIN CERTIFICATE") || pem.length > 100_000) {
+      return undefined;
+    }
+    return pem;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Generates Helm values from the deployment configuration
  */
 export async function generateHelmValues(
@@ -2919,7 +2971,9 @@ export async function generateHelmValues(
   options: GenerateOptions = {},
 ): Promise<void> {
   const images = await resolveGenerateImages(config, options);
-  const values = buildHelmValues(config, { ...options, images });
+  const dbSslRootCert =
+    options.dbSslRootCert ?? (await resolveExternalDbSslRootCert(config));
+  const values = buildHelmValues(config, { ...options, images, dbSslRootCert });
   // Last-line guardrail: never write/deploy values the chart would reject.
   assertValidHelmValues(values);
   await saveHelmValues(config.name, values);
@@ -2969,8 +3023,14 @@ export async function generateHelmValuesPreservingEdits(
   options: GenerateOptions = {},
 ): Promise<void> {
   const images = await resolveGenerateImages(config, options);
+  const dbSslRootCert =
+    options.dbSslRootCert ?? (await resolveExternalDbSslRootCert(config));
   const existing = await loadHelmValues(config.name);
-  const values = buildDeployValues(existing, config, { ...options, images });
+  const values = buildDeployValues(existing, config, {
+    ...options,
+    images,
+    dbSslRootCert,
+  });
   // Last-line guardrail: never write/deploy values the chart would reject.
   assertValidHelmValues(values);
   await saveHelmValues(config.name, values);
