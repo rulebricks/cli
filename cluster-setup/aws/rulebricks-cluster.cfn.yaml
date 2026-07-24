@@ -30,6 +30,23 @@ Metadata:
           - VpcCidr
           - SingleNatGateway
           - EnableVpcInterfaceEndpoints
+      - Label: { default: "Secrets (External Secrets Operator)" }
+        Parameters:
+          - EnableExternalSecrets
+          - SecretsPrefix
+          - SecretsKmsKeyArn
+      - Label: { default: "Registry mirror (ECR pull-through cache)" }
+        Parameters:
+          - EnableRegistryMirror
+          - RegistryMirrorUsername
+          - RegistryMirrorAccessToken
+      - Label: { default: "DNS (external-dns)" }
+        Parameters:
+          - EnableExternalDns
+          - DnsZoneId
+      - Label: { default: Object storage }
+        Parameters:
+          - EnableDataBucketProtection
       - Label: { default: Core node group }
         Parameters:
           - NodeInstanceType
@@ -141,6 +158,95 @@ Parameters:
       Add interface VPC endpoints (ECR, EC2, STS, EKS, EKS Auth, ELB, Logs) so
       node/pod control traffic never leaves the VPC. Recommended for
       restricted-egress environments; adds per-endpoint hourly cost.
+
+  # ---------------------------------------------------------------------------
+  # Secrets (External Secrets Operator)
+  # ---------------------------------------------------------------------------
+  EnableExternalSecrets:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: >-
+      Create the <cluster>-external-secrets Pod Identity role that the External
+      Secrets Operator's reader ServiceAccount assumes to sync AWS Secrets
+      Manager entries into Kubernetes Secrets. Read-only, scoped to the
+      SecretsPrefix below. Unlike Azure Key Vault there is no vault resource to
+      create - the name prefix is the organizational unit within Secrets
+      Manager. The Rulebricks CLI seeds entries under the prefix and preselects
+      this role by name.
+  SecretsPrefix:
+    Type: String
+    Default: ""
+    Description: >-
+      Secrets Manager name prefix the external-secrets role may read (one JSON
+      object per Rulebricks secret lives under it, e.g. <prefix>/app,
+      <prefix>/supabase-jwt - see the chart's .secrets.example). Leave empty
+      to default to "rulebricks". A trailing slash is added automatically.
+  SecretsKmsKeyArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional customer-managed KMS key ARN that encrypts the Secrets Manager
+      entries under SecretsPrefix. Grants the external-secrets role kms:Decrypt
+      on it. Leave empty when entries use the AWS-managed key.
+
+  # ---------------------------------------------------------------------------
+  # Registry mirror (ECR pull-through cache)
+  # ---------------------------------------------------------------------------
+  EnableRegistryMirror:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: >-
+      Create an ECR pull-through cache for the private docker.io/rulebricks/*
+      images (ACR-mirror parity). First pull populates the cache; later pulls
+      stay in-region and survive Docker Hub outages/rate limits. Point the
+      chart's global.imageRegistry at the RegistryMirrorUri output. For
+      air-gapped push-based mirroring use mirror-to-ecr.sh instead.
+  RegistryMirrorUsername:
+    Type: String
+    Default: rulebricks
+    Description: Docker Hub username for the pull-through cache credential.
+  RegistryMirrorAccessToken:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >-
+      Docker Hub access token for the pull-through cache credential. For
+      Rulebricks images this is "dckr_pat_" + your license key. Required when
+      EnableRegistryMirror=true; stored in Secrets Manager under the
+      ecr-pullthroughcache/ prefix ECR requires.
+
+  # ---------------------------------------------------------------------------
+  # DNS (external-dns)
+  # ---------------------------------------------------------------------------
+  EnableExternalDns:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: >-
+      Create the <cluster>-external-dns Pod Identity role scoped to one Route53
+      hosted zone so the chart's external-dns can manage DNS records
+      automatically (Azure dns-role parity). Requires DnsZoneId.
+  DnsZoneId:
+    Type: String
+    Default: ""
+    Description: >-
+      Route53 hosted zone ID (e.g. Z0123456789ABC) external-dns may write to.
+      Required when EnableExternalDns=true.
+
+  # ---------------------------------------------------------------------------
+  # Object storage hardening
+  # ---------------------------------------------------------------------------
+  EnableDataBucketProtection:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: >-
+      Production hardening for the data bucket: object versioning with a
+      30-day noncurrent-version expiry (accidental-delete recovery, parity
+      with the Azure storage soft-delete/versioning posture). Leave false for
+      removable test stacks.
 
   # ---------------------------------------------------------------------------
   # Core node group
@@ -326,6 +432,16 @@ Conditions:
   InterfaceEndpointsEnabled: !Equals [!Ref EnableVpcInterfaceEndpoints, "true"]
   CreateKmsKey: !Equals [!Ref KmsKeyArn, ""]
   HasAdminPrincipal: !Not [!Equals [!Ref AdminPrincipalArn, ""]]
+  ExternalSecretsEnabled: !Equals [!Ref EnableExternalSecrets, "true"]
+  DefaultSecretsPrefix: !Equals [!Ref SecretsPrefix, ""]
+  HasSecretsKmsKey:
+    !And [
+      { Condition: ExternalSecretsEnabled },
+      !Not [!Equals [!Ref SecretsKmsKeyArn, ""]],
+    ]
+  RegistryMirrorEnabled: !Equals [!Ref EnableRegistryMirror, "true"]
+  ExternalDnsEnabled: !Equals [!Ref EnableExternalDns, "true"]
+  DataBucketProtectionEnabled: !Equals [!Ref EnableDataBucketProtection, "true"]
   ManagedKafkaEnabled: !Equals [!Ref EnableManagedKafka, "true"]
   ManagedRedisEnabled: !Equals [!Ref EnableManagedRedis, "true"]
   RedisMultiAzEnabled:
@@ -975,6 +1091,19 @@ Resources:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      # Production hardening (EnableDataBucketProtection): versioning gives
+      # accidental-delete/overwrite recovery; the lifecycle rule caps the cost
+      # of keeping noncurrent versions (Azure storage soft-delete parity).
+      VersioningConfiguration:
+        !If [DataBucketProtectionEnabled, { Status: Enabled }, !Ref AWS::NoValue]
+      LifecycleConfiguration:
+        !If
+        - DataBucketProtectionEnabled
+        - Rules:
+            - Id: expire-noncurrent-versions
+              Status: Enabled
+              NoncurrentVersionExpiration: { NoncurrentDays: 30 }
+        - !Ref AWS::NoValue
       Tags:
         - { Key: Environment, Value: rulebricks }
 
@@ -1108,6 +1237,127 @@ Resources:
                     - kafka-cluster:DescribeGroup
                   Resource:
                     - !Sub "arn:${AWS::Partition}:kafka:*:${AWS::AccountId}:group/*/*/*"
+
+  # ===========================================================================
+  # EXTERNAL SECRETS IDENTITY - EnableExternalSecrets=true (default)
+  # Read-only role the External Secrets Operator's reader ServiceAccount
+  # assumes via Pod Identity (the CLI creates the association at deploy time,
+  # same as the rulebricks role). Scoped to the SecretsPrefix so ESO can only
+  # read Rulebricks entries, never the rest of Secrets Manager. Azure parity:
+  # identity.bicep external-secrets UAMI + key-vault.bicep Secrets User role.
+  # ===========================================================================
+  ExternalSecretsRole:
+    Type: AWS::IAM::Role
+    Condition: ExternalSecretsEnabled
+    Properties:
+      RoleName: !Sub "${ClusterName}-external-secrets"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: pods.eks.amazonaws.com }
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: read-rulebricks-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Sub
+                    - "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}/*"
+                    - Prefix: !If [DefaultSecretsPrefix, "rulebricks", !Ref SecretsPrefix]
+        - !If
+          - HasSecretsKmsKey
+          - PolicyName: decrypt-rulebricks-secrets
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                  Resource:
+                    - !Ref SecretsKmsKeyArn
+          - !Ref AWS::NoValue
+
+  # ===========================================================================
+  # REGISTRY MIRROR (ECR pull-through cache) - EnableRegistryMirror=true
+  # ACR-mirror parity: in-region cache of docker.io/rulebricks/* so image
+  # pulls survive Docker Hub outages/rate limits and stay off the NAT path
+  # (via the ECR interface endpoints when enabled). Point the chart's
+  # global.imageRegistry at the RegistryMirrorUri output, e.g.
+  # <account>.dkr.ecr.<region>.amazonaws.com/<cluster>-mirror/rulebricks/app.
+  # ===========================================================================
+  # ECR requires pull-through cache credentials to live in Secrets Manager
+  # under the reserved ecr-pullthroughcache/ name prefix.
+  RegistryMirrorCredentialSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: RegistryMirrorEnabled
+    Properties:
+      Name: !Sub "ecr-pullthroughcache/${ClusterName}-dockerhub"
+      Description: Docker Hub credential for the Rulebricks ECR pull-through cache
+      SecretString: !Sub |
+        {"username":"${RegistryMirrorUsername}","accessToken":"${RegistryMirrorAccessToken}"}
+
+  RegistryMirrorPullThroughCacheRule:
+    Type: AWS::ECR::PullThroughCacheRule
+    Condition: RegistryMirrorEnabled
+    Properties:
+      EcrRepositoryPrefix: !Sub "${ClusterName}-mirror"
+      UpstreamRegistry: docker-hub
+      UpstreamRegistryUrl: registry-1.docker.io
+      CredentialArn: !Ref RegistryMirrorCredentialSecret
+
+  # Auto-create cache repositories on first pull without granting nodes
+  # ecr:CreateRepository.
+  RegistryMirrorRepositoryTemplate:
+    Type: AWS::ECR::RepositoryCreationTemplate
+    Condition: RegistryMirrorEnabled
+    Properties:
+      Prefix: !Sub "${ClusterName}-mirror"
+      AppliedFor: [PULL_THROUGH_CACHE]
+      Description: Repositories auto-created by the Rulebricks pull-through cache
+
+  # ===========================================================================
+  # EXTERNAL-DNS IDENTITY - EnableExternalDns=true
+  # Azure dns-role.bicep parity: a dedicated Pod Identity role scoped to one
+  # Route53 hosted zone so the chart's external-dns manages records
+  # automatically (single-phase install with TLS from the start).
+  # ===========================================================================
+  ExternalDnsRole:
+    Type: AWS::IAM::Role
+    Condition: ExternalDnsEnabled
+    Properties:
+      RoleName: !Sub "${ClusterName}-external-dns"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: pods.eks.amazonaws.com }
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: manage-dns-zone
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:route53:::hostedzone/${DnsZoneId}"
+              - Effect: Allow
+                Action:
+                  - route53:ListHostedZones
+                  - route53:ListResourceRecordSets
+                  - route53:ListTagsForResource
+                Resource: "*"
 
   # ===========================================================================
   # MANAGED KAFKA (Amazon MSK) - EnableManagedKafka=true
@@ -1347,6 +1597,37 @@ Outputs:
       Pod Identity role for the chart-managed cluster-autoscaler; the CLI's
       workload-identity step binds the autoscaler ServiceAccount to it.
     Value: !GetAtt ClusterAutoscalerRole.Arn
+
+  # --- Secrets (CLI secrets step) ----------------------------------------------
+  ExternalSecretsRoleArn:
+    Condition: ExternalSecretsEnabled
+    Description: >-
+      Read-only Pod Identity role for the External Secrets Operator reader
+      ServiceAccount; the CLI's secrets step preselects it by name.
+    Value: !GetAtt ExternalSecretsRole.Arn
+  ExternalSecretsPrefix:
+    Condition: ExternalSecretsEnabled
+    Description: >-
+      Secrets Manager name prefix the role may read. Seed one JSON object per
+      Rulebricks secret under it (see the chart's .secrets.example).
+    Value: !If [DefaultSecretsPrefix, "rulebricks", !Ref SecretsPrefix]
+
+  # --- Registry mirror ---------------------------------------------------------
+  RegistryMirrorUri:
+    Condition: RegistryMirrorEnabled
+    Description: >-
+      Registry root for mirrored pulls - set the chart's global.imageRegistry
+      to "<this>/" + the upstream org path, e.g.
+      <uri>/rulebricks/app resolves through the pull-through cache.
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ClusterName}-mirror"
+
+  # --- DNS (external-dns) --------------------------------------------------------
+  ExternalDnsRoleArn:
+    Condition: ExternalDnsEnabled
+    Description: >-
+      Pod Identity role for the chart's external-dns ServiceAccount, scoped to
+      the DnsZoneId hosted zone.
+    Value: !GetAtt ExternalDnsRole.Arn
 
   # --- Metrics (CLI monitoring step) ------------------------------------------
   PrometheusWorkspaceId:

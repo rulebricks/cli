@@ -65,7 +65,11 @@ program
   .option("--version <version>", "Deprecated alias for --chart-version")
   .option(
     "--inline-secrets",
-    "Write secrets inline into values.yaml instead of creating Kubernetes Secrets (dev clusters only)",
+    "Write secrets inline into values.yaml instead of using the configured secrets backend (dev clusters only)",
+  )
+  .option(
+    "--sync-secrets",
+    "Overwrite the secrets manager entries with this config's values (default: create missing entries only, preserving rotated values)",
   )
   .action(async (name, options) => {
     const deploymentName = name || (await selectDeployment("deploy"));
@@ -81,6 +85,7 @@ program
         name={deploymentName}
         version={options.chartVersion || options.version}
         inlineSecrets={options.inlineSecrets}
+        syncSecrets={options.syncSecrets}
       />,
     );
     await waitUntilExit();

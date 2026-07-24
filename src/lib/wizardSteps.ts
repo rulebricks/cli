@@ -5,6 +5,7 @@ export const WIZARD_STEP_ORDER = [
   "database",
   "database-creds",
   "external-services",
+  "secrets",
   "storage",
   "observability",
   "features",
@@ -41,6 +42,9 @@ export function getActiveWizardSteps(
   }
 
   steps.push("external-services");
+  // After database + external services: the set of required secrets is known,
+  // and the cloud/cluster chosen earlier filters the offered backends.
+  steps.push("secrets");
   steps.push("storage");
   steps.push("observability");
   steps.push("features");

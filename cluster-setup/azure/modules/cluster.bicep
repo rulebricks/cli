@@ -40,6 +40,8 @@ param maintenanceStartTime string
 param maintenanceUtcOffset string
 param enableAzurePolicy bool
 param enableKeyVaultSecretsProvider bool
+param enableControlPlaneLogs bool
+param controlPlaneLogAnalyticsWorkspaceId string
 
 var networkContributorRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
@@ -260,6 +262,31 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-08-01' = {
   dependsOn: [
     aksNetworkRole
   ]
+}
+
+// Control-plane log parity with the EKS stack (api/audit/authenticator
+// logging is always on there). BYO Log Analytics workspace: enterprises
+// usually centralize diagnostics, so the module never creates one.
+resource controlPlaneDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (enableControlPlaneLogs) {
+  name: '${clusterName}-control-plane-logs'
+  scope: aks
+  properties: {
+    workspaceId: controlPlaneLogAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'kube-apiserver'
+        enabled: true
+      }
+      {
+        category: 'kube-audit-admin'
+        enabled: true
+      }
+      {
+        category: 'guard'
+        enabled: true
+      }
+    ]
+  }
 }
 
 resource aksAdminRoles 'Microsoft.Authorization/roleAssignments@2022-04-01' = [

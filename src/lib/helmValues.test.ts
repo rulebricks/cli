@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { buildHelmValues, signSupabaseJwt } from "./helmValues.js";
+import { bundledImageCatalog } from "./imageCatalog.js";
 import { getActiveWizardSteps } from "./wizardSteps.js";
 import {
   collectConfigIssues,
@@ -267,7 +268,7 @@ test("wizard orders storage before observability and skips feature config for bu
       steps.indexOf("external-services"),
       steps.indexOf("version"),
     ),
-    ["external-services", "storage", "observability", "features"],
+    ["external-services", "secrets", "storage", "observability", "features"],
   );
   assert.equal(steps.includes("feature-config"), false);
 });
@@ -1527,9 +1528,10 @@ test("default image refs use the rulebricks/* split shape with no legacy hosts",
     values["cluster-autoscaler"].image.repository,
     "docker.io/rulebricks/cluster-autoscaler",
   );
+  // Derived from the bundled manifest snapshot so tag bumps don't break the test.
   assert.equal(
     values["cluster-autoscaler"].image.tag,
-    "1.34.3-debian13",
+    bundledImageCatalog().image("cluster-autoscaler").tag,
   );
 
   // Whole-output guard: no dhi.io and no index.docker.io anywhere.
@@ -1693,7 +1695,7 @@ test("cluster-autoscaler enabled on AWS with cluster name + region, disabled els
     awsRegion: aws.infrastructure.region,
     image: {
       repository: "docker.io/rulebricks/cluster-autoscaler",
-      tag: "1.34.3-debian13",
+      tag: bundledImageCatalog().image("cluster-autoscaler").tag,
       pullSecrets: [`${getReleaseName(aws.name)}-regcred`],
     },
   });

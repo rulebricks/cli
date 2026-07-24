@@ -7,6 +7,7 @@ export { FeaturesStep } from './FeaturesStep.js';
 export { StorageStep } from './StorageStep.js';
 export { ObservabilityStep } from './ObservabilityStep.js';
 export { ExternalServicesStep } from './ExternalServicesStep.js';
+export { SecretsStep } from './SecretsStep.js';
 export { FeatureConfigStep } from './FeatureConfigStep.js';
 export { VersionStep } from './VersionStep.js';
 export { ReviewStep } from './ReviewStep.js';

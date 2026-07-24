@@ -22,11 +22,29 @@ function recordingDeps(log: string[]): InstallSequenceDeps {
     applySecrets: async () => {
       log.push("secrets");
     },
+    setupExternalSecrets: async () => {
+      log.push("eso");
+    },
     installChart: async () => {
       log.push("install");
     },
   };
 }
+
+test("eso mode seeds/syncs external secrets before helm", async () => {
+  const log: string[] = [];
+  await runInstallSequence(
+    { regenerateValues: true, tlsEnabled: false, secretMode: "eso" },
+    recordingDeps(log),
+  );
+  assert.deepEqual(log, [
+    "generate(tls=false,mode=eso)",
+    "validate",
+    "namespace",
+    "eso",
+    "install",
+  ]);
+});
 
 test("k8s mode applies secrets before helm on the manual-DNS path", async () => {
   const log: string[] = [];

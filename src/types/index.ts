@@ -929,6 +929,58 @@ export const DeploymentConfigSchema = z.object({
     })
     .optional(),
 
+  // Secrets backend. Default (and recommended): the cloud's native secrets
+  // manager via the External Secrets Operator - the CLI seeds entries under
+  // `prefix`, applies SecretStore/ExternalSecret manifests, and the chart's
+  // secretRef seams point at the ESO-synced Kubernetes Secrets. Alternatives:
+  // any ESO-compatible platform through an existing (Cluster)SecretStore
+  // ("byo-secret-store", user seeds values themselves), or plain in-cluster
+  // Secrets applied by the CLI ("cluster", dev/test only). Absent block =
+  // "cluster" (pre-ESO config files).
+  secrets: z
+    .object({
+      backend: z.enum([
+        "aws-secrets-manager",
+        "azure-key-vault",
+        "gcp-secret-manager",
+        "byo-secret-store",
+        "cluster",
+      ]),
+      // Native backends: name prefix for seeded entries. AWS: "<prefix>/<name>"
+      // paths; Azure/GCP: "<prefix>-<name>" (no "/" in their secret IDs).
+      prefix: z.string().optional(),
+      aws: z
+        .object({
+          // Pod Identity role ESO's reader ServiceAccount assumes
+          // (<cluster>-external-secrets from the CloudFormation stack).
+          roleArn: z.string().optional(),
+        })
+        .optional(),
+      azure: z
+        .object({
+          vaultName: z.string().optional(),
+          vaultUri: z.string().optional(),
+          // Workload identity (federated to the ESO reader ServiceAccount).
+          clientId: z.string().optional(),
+          tenantId: z.string().optional(),
+        })
+        .optional(),
+      gcp: z
+        .object({
+          // GSA the ESO reader ServiceAccount impersonates
+          // (<cluster>-secrets from the Terraform stack).
+          serviceAccountEmail: z.string().optional(),
+        })
+        .optional(),
+      byo: z
+        .object({
+          storeName: z.string().optional(),
+          storeKind: z.enum(["SecretStore", "ClusterSecretStore"]).optional(),
+        })
+        .optional(),
+    })
+    .optional(),
+
   // Optional features
   features: z.object({
     ai: z.object({
@@ -1029,6 +1081,9 @@ export const DeploymentConfigSchema = z.object({
 });
 
 export type DeploymentConfig = z.infer<typeof DeploymentConfigSchema>;
+
+/** Secrets backend options (see DeploymentConfigSchema.secrets). */
+export type SecretsBackend = NonNullable<DeploymentConfig["secrets"]>["backend"];
 
 // Deployment state tracking
 export interface DeploymentState {

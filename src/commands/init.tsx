@@ -15,6 +15,7 @@ import {
   StorageStep,
   ObservabilityStep,
   ExternalServicesStep,
+  SecretsStep,
   FeatureConfigStep,
   VersionStep,
   ReviewStep,
@@ -43,6 +44,7 @@ import {
 } from "../lib/helmValues.js";
 import { resolveImageCatalog } from "../lib/imageCatalog.js";
 import { assertValidHelmValues } from "../lib/validateValues.js";
+import { secretModeForConfig } from "../lib/deploySequence.js";
 import { ProfileConfig } from "../types/index.js";
 import {
   getActiveWizardSteps,
@@ -86,6 +88,10 @@ const STEP_INFO: Record<StepId, { title: string; description: string }> = {
   "external-services": {
     title: "External Services",
     description: "Use managed Redis/Kafka (optional)",
+  },
+  secrets: {
+    title: "Secrets",
+    description: "Link your secrets platform (External Secrets Operator)",
   },
   features: {
     title: "Optional Features",
@@ -276,9 +282,13 @@ function WizardStepController({
       }
 
       await saveDeploymentConfig(config);
-      // k8s secret mode keeps plaintext secrets out of the generated values;
-      // deploy creates the referenced Kubernetes Secrets before Helm runs.
-      await generateHelmValues(config, { secretMode: "k8s" });
+      // Ref-based generation keeps plaintext secrets out of the generated
+      // values; deploy materializes the referenced Kubernetes Secrets before
+      // Helm runs (ESO sync from the configured secrets backend, or direct
+      // kubectl apply for the "cluster" backend).
+      await generateHelmValues(config, {
+        secretMode: secretModeForConfig(config),
+      });
 
       // Save configuration values to profile for future deployments
       const profileData = extractProfileFromConfig(config);
@@ -453,6 +463,8 @@ function WizardStepController({
         );
       case "external-services":
         return <ExternalServicesStep {...nav} entryDirection={navDirection} />;
+      case "secrets":
+        return <SecretsStep {...nav} entryDirection={navDirection} />;
       case "features":
         return <FeaturesStep {...nav} />;
       case "storage":

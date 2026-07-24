@@ -211,6 +211,58 @@ interface SubjectBinding {
 }
 
 /**
+ * The ServiceAccount the External Secrets Operator's SecretStore references to
+ * read the cloud secrets manager on Azure/GCP (ESO mints tokens for it via the
+ * TokenRequest API, so it needs no pod). The CLI creates it (with the
+ * per-cloud identity annotations) alongside the SecretStore/ExternalSecret
+ * manifests and binds it here like every other workload identity. Matches the
+ * name used in the Helm chart's examples/external-secrets manifests.
+ */
+export const ESO_READER_SERVICE_ACCOUNT = "rulebricks-secrets-reader";
+
+/**
+ * The ESO controller's own ServiceAccount (fixed by the CLI-managed operator
+ * release name). AWS is bound here instead of a reader SA: EKS Pod Identity
+ * delivers credentials to running PODS, so the association must target the
+ * controller pod - a serviceAccountRef would be the IRSA flow, which the
+ * cluster-setup role's trust policy (pods.eks.amazonaws.com) does not allow.
+ */
+export const ESO_CONTROLLER_SERVICE_ACCOUNT = "external-secrets";
+
+/** The (serviceAccount, principal) pair ESO needs, per the secrets backend. */
+export function esoBinding(
+  config: DeploymentConfig,
+): SubjectBinding | undefined {
+  const secrets = config.secrets;
+  switch (secrets?.backend) {
+    case "aws-secrets-manager":
+      return secrets.aws?.roleArn
+        ? {
+            serviceAccount: ESO_CONTROLLER_SERVICE_ACCOUNT,
+            principal: secrets.aws.roleArn,
+          }
+        : undefined;
+    case "azure-key-vault":
+      return secrets.azure?.clientId
+        ? {
+            serviceAccount: ESO_READER_SERVICE_ACCOUNT,
+            principal: secrets.azure.clientId,
+          }
+        : undefined;
+    case "gcp-secret-manager":
+      return secrets.gcp?.serviceAccountEmail
+        ? {
+            serviceAccount: ESO_READER_SERVICE_ACCOUNT,
+            principal: secrets.gcp.serviceAccountEmail,
+          }
+        : undefined;
+    default:
+      // cluster / byo-secret-store: no CLI-managed secrets identity.
+      return undefined;
+  }
+}
+
+/**
  * The SAs that talk directly to a token-auth managed broker: HPS + the worker
  * fleet produce/consume, the kafka-topic-provision pre-install hook creates
  * topics. Shared between plannedBindings and the manual-association preflight
@@ -235,6 +287,14 @@ export function plannedBindings(config: DeploymentConfig): SubjectBinding[] {
   const storage = config.storage;
   const releaseName = getReleaseName(config.name);
   const usesSecretAuth = storage?.cloudAuthMode === "secret";
+
+  // External Secrets Operator: syncs the cloud secrets manager into the
+  // Kubernetes Secrets every secretRef seam points at. Only for the
+  // native-manager backends; byo-secret-store users own their store's auth.
+  const eso = esoBinding(config);
+  if (eso) {
+    bindings.push(eso);
+  }
 
   const storagePrincipal =
     storage?.provider === "s3"

@@ -35,7 +35,13 @@ const chartDir =
 const buildDeps = process.argv.includes("--build-deps");
 
 function run(cmd, args, opts = {}) {
-  return execFileSync(cmd, args, { encoding: "utf8", ...opts });
+  // helm template output for full-featured configs exceeds the 1 MiB default
+  // (ENOBUFS); 64 MiB comfortably fits every rendered manifest set.
+  return execFileSync(cmd, args, {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    ...opts,
+  });
 }
 
 function helmAvailable() {

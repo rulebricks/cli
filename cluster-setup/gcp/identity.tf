@@ -45,3 +45,60 @@ resource "google_project_iam_member" "rulebricks_metric_writer" {
   role    = "roles/monitoring.metricWriter"
   member  = "serviceAccount:${google_service_account.rulebricks.email}"
 }
+
+# ------------------------------------------------------------------------------
+# External Secrets Operator identity (AWS <cluster>-external-secrets / Azure
+# Key Vault reader parity). Read-only, restricted by IAM condition to Secret
+# Manager entries whose IDs start with secrets_prefix. The namespace-scoped
+# roles/iam.workloadIdentityUser binding to the ESO reader Kubernetes
+# ServiceAccount is created by the Rulebricks CLI at deploy time, like every
+# other workload identity here. Named <cluster>-secrets (not
+# -external-secrets) to fit the 30-char service account ID limit.
+# ------------------------------------------------------------------------------
+resource "google_project_service" "secretmanager" {
+  count              = var.enable_external_secrets ? 1 : 0
+  service            = "secretmanager.googleapis.com"
+  disable_on_destroy = false
+}
+
+data "google_project" "current" {}
+
+resource "google_service_account" "external_secrets" {
+  count        = var.enable_external_secrets ? 1 : 0
+  account_id   = "${var.cluster_name}-secrets"
+  display_name = "External Secrets Operator reader (Rulebricks)"
+
+  depends_on = [google_project_service.base]
+}
+
+resource "google_project_iam_member" "external_secrets_accessor" {
+  count   = var.enable_external_secrets ? 1 : 0
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.external_secrets[0].email}"
+
+  # IAM conditions on Secret Manager match the project NUMBER, not the ID.
+  condition {
+    title       = "rulebricks-secrets-only"
+    description = "Read only Secret Manager entries under the Rulebricks prefix"
+    expression  = "resource.name.startsWith(\"projects/${data.google_project.current.number}/secrets/${var.secrets_prefix}\")"
+  }
+
+  depends_on = [google_project_service.secretmanager]
+}
+
+# ESO's SecretStore also calls DescribeSecret-style metadata reads.
+resource "google_project_iam_member" "external_secrets_viewer" {
+  count   = var.enable_external_secrets ? 1 : 0
+  project = var.project_id
+  role    = "roles/secretmanager.viewer"
+  member  = "serviceAccount:${google_service_account.external_secrets[0].email}"
+
+  condition {
+    title       = "rulebricks-secrets-only"
+    description = "View only Secret Manager entries under the Rulebricks prefix"
+    expression  = "resource.name.startsWith(\"projects/${data.google_project.current.number}/secrets/${var.secrets_prefix}\")"
+  }
+
+  depends_on = [google_project_service.secretmanager]
+}

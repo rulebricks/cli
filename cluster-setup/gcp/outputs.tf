@@ -26,6 +26,17 @@ output "data_bucket" {
   value       = google_storage_bucket.data.name
 }
 
+# --- Secrets (CLI secrets step) --------------------------------------------------
+output "external_secrets_service_account" {
+  description = "Read-only GSA the External Secrets Operator reader impersonates; the CLI's secrets step preselects it."
+  value       = var.enable_external_secrets ? google_service_account.external_secrets[0].email : ""
+}
+
+output "secrets_prefix" {
+  description = "Secret Manager ID prefix the service account may read (entries named <prefix>-<deployment>-app etc.)."
+  value       = var.enable_external_secrets ? var.secrets_prefix : ""
+}
+
 # --- Managed Kafka (CLI external-services step, preset gcp-managed) ------------
 output "kafka_bootstrap_servers" {
   description = "CLI wizard Kafka brokers field (TLS, port 9092)."

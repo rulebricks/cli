@@ -28,6 +28,8 @@ import {
 } from "../lib/helmValues.js";
 import { resolveImageCatalog } from "../lib/imageCatalog.js";
 import { ensureNamespace, applyDeploymentSecrets } from "../lib/secrets.js";
+import { setupExternalSecrets } from "../lib/eso.js";
+import { secretModeForConfig } from "../lib/deploySequence.js";
 import { formatDate } from "../lib/versions.js";
 import {
   ChartVersion,
@@ -162,7 +164,7 @@ function ChartUpgradeCommandInner({
       const images = await resolveImageCatalog(target.version);
       await generateHelmValuesPreservingEdits(cfg, {
         tlsEnabled,
-        secretMode: "k8s",
+        secretMode: secretModeForConfig(cfg),
         images,
       });
 
@@ -187,10 +189,16 @@ function ChartUpgradeCommandInner({
     setStep("upgrading");
 
     try {
-      // Values were regenerated in k8s secret mode, so the referenced
-      // Kubernetes Secrets must exist before helm renders against them.
+      // Values were regenerated in ref-based secret mode, so the referenced
+      // Kubernetes Secrets must exist before helm renders against them:
+      // ESO-synced from the configured backend, or CLI-applied for the
+      // "cluster" backend.
       await ensureNamespace(namespace);
-      await applyDeploymentSecrets(config, namespace);
+      if (secretModeForConfig(config) === "eso") {
+        await setupExternalSecrets(config, { overwriteSecrets: false });
+      } else {
+        await applyDeploymentSecrets(config, namespace);
+      }
 
       await upgradeChart(name, {
         releaseName,

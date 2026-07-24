@@ -75,6 +75,7 @@ Always created:
 | GKE cluster | `google_container_cluster` | `<cluster>`; private nodes, Dataplane V2, Workload Identity pool `<project>.svc.id.goog` |
 | Node pools | `google_container_node_pool` x2 | `core` (3-6 nodes), `burst` (0-N, taint `rulebricks.com/pool=burst`, when `enable_burst_pool`) |
 | Rulebricks service account | `google_service_account` | `<cluster>-rulebricks`; the single workload identity the CLI binds at deploy time |
+| External Secrets service account | `google_service_account` | `<cluster>-secrets` (when `enable_external_secrets`, default on); read-only on Secret Manager entries whose IDs start with `secrets_prefix` (default `rulebricks`). The CLI's secrets step seeds entries like `rulebricks-<deployment>-app` and binds the ESO reader ServiceAccount to this GSA at deploy time |
 | Data bucket | `google_storage_bucket` | `<cluster>-data-<project>`; uniform access, public access prevented; `roles/storage.objectAdmin` for the Rulebricks SA |
 
 Conditionally created:

@@ -1,8 +1,21 @@
 // Ordered install sequence shared by every deploy path. Values are generated
-// and validated first, then (in k8s secret mode) the namespace and Secrets are
-// created so the chart's secretRef seams resolve before Helm installs.
+// and validated first, then the secrets backend is materialized so the
+// chart's secretRef seams resolve before Helm installs:
+//   - eso:    seed the cloud secrets manager, bind the ESO reader identity,
+//             apply SecretStore/ExternalSecret manifests, and wait for every
+//             ExternalSecret to reach SecretSynced=True.
+//   - k8s:    apply plain in-cluster Secrets with kubectl (dev/test).
+//   - inline: secrets live in the generated values; nothing to pre-create.
 
-export type SecretMode = "k8s" | "inline";
+import type { DeploymentConfig } from "../types/index.js";
+
+export type SecretMode = "eso" | "k8s" | "inline";
+
+/** Map the config's secrets backend to the deploy-time secret mode. */
+export function secretModeForConfig(config: DeploymentConfig): SecretMode {
+  const backend = config.secrets?.backend ?? "cluster";
+  return backend === "cluster" ? "k8s" : "eso";
+}
 
 export interface InstallSequenceOptions {
   regenerateValues: boolean;
@@ -15,6 +28,8 @@ export interface InstallSequenceDeps {
   validateValues: () => Promise<void>;
   ensureNamespace: () => Promise<void>;
   applySecrets: () => Promise<void>;
+  /** Seed + bind + apply + gate for the External Secrets Operator path. */
+  setupExternalSecrets: () => Promise<void>;
   installChart: () => Promise<void>;
 }
 
@@ -29,6 +44,9 @@ export async function runInstallSequence(
   if (options.secretMode === "k8s") {
     await deps.ensureNamespace();
     await deps.applySecrets();
+  } else if (options.secretMode === "eso") {
+    await deps.ensureNamespace();
+    await deps.setupExternalSecrets();
   }
   await deps.installChart();
 }

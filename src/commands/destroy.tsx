@@ -31,6 +31,8 @@ import {
 } from "../lib/kubernetes.js";
 import { CommandDeniedError } from "../lib/commandApproval.js";
 import { removeWorkloadIdentityFederation } from "../lib/workloadIdentity.js";
+import { removeEsoResources } from "../lib/eso.js";
+import { secretModeForConfig } from "../lib/deploySequence.js";
 import {
   DeploymentConfig,
   DeploymentState,
@@ -78,6 +80,9 @@ function DestroyCommandInner({
     useState<DeploymentConfig | null>(null);
   const [scope, setScope] = useState<DeploymentScope | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [remainingSecretEntries, setRemainingSecretEntries] = useState<
+    string[]
+  >([]);
   const [status, setStatus] = useState<StepStatus>({
     helm: "pending",
     pvc: "pending",
@@ -153,6 +158,19 @@ function DestroyCommandInner({
         const releaseName = getReleaseName(name);
 
         if (deploymentScope.clusterAccessible) {
+          // ESO cleanup first, while the operator is still running: deleting
+          // the ExternalSecrets/SecretStore is orderly here, and the entries
+          // in the client's secrets platform are NEVER touched (they are the
+          // system of record; the completion screen lists what remains).
+          if (cfg && secretModeForConfig(cfg) === "eso") {
+            try {
+              const eso = await removeEsoResources(cfg);
+              setRemainingSecretEntries(eso.remainingRemoteKeys);
+            } catch {
+              // Best-effort; namespace deletion below covers the resources.
+            }
+          }
+
           if (deploymentScope.hasHelmRelease && deploymentScope.hasNamespace) {
             setStatus((s) => ({ ...s, helm: "running" }));
             try {
@@ -367,6 +385,22 @@ function DestroyCommandInner({
                 Local configuration files preserved in
                 ~/.rulebricks/deployments/{name}/
               </Text>
+            </Box>
+          )}
+
+          {remainingSecretEntries.length > 0 && (
+            <Box marginTop={1} flexDirection="column">
+              <Text color={colors.muted}>
+                Secrets manager entries were NOT deleted (your platform is the
+                system of record). Remove them yourself when retiring this
+                deployment:
+              </Text>
+              {remainingSecretEntries.map((entry) => (
+                <Text key={entry} color={colors.muted}>
+                  {" "}
+                  • {entry}
+                </Text>
+              ))}
             </Box>
           )}
         </Box>

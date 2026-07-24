@@ -39,10 +39,13 @@ import YAML from "yaml";
 
 interface GenerateOptions {
   tlsEnabled?: boolean;
-  // "k8s" (default at deploy time): sensitive values are created as Kubernetes
-  // Secrets by the CLI and the generated values carry only *.secretRef; no
-  // plaintext. "inline": secrets are written into the values (dev / direct-chart).
-  secretMode?: "k8s" | "inline";
+  // "eso" (the deploy-time default): secrets live in the client's secrets
+  // platform and the External Secrets Operator syncs them into Kubernetes
+  // Secrets; "k8s": the CLI creates the same Secrets directly with kubectl
+  // (dev/test). Both carry only *.secretRef in the generated values - the
+  // Secret NAMES are identical (deploymentSecretNames), only the producer
+  // differs. "inline": secrets are written into the values (dev/direct-chart).
+  secretMode?: "k8s" | "eso" | "inline";
   // Infrastructure image tags, resolved from the chart's images/manifest.yaml
   // (see src/lib/imageCatalog.ts). When omitted, buildHelmValues falls back to
   // the snapshot bundled with this CLI release; the async generate* entry
@@ -381,6 +384,7 @@ function generateVectorEnv(config: DeploymentConfig): Array<Record<string, unkno
     "KAFKA_SASL_ENABLED",
     "KAFKA_SASL_MECHANISM",
     "KAFKA_LOG_TOPIC",
+    "KAFKA_CONSUMER_GROUP",
   ];
   const env: Array<Record<string, unknown>> = [
     // CA bundle seeded by the ca-certs initContainer (generateVectorCaBundle).
@@ -2317,7 +2321,10 @@ export function buildHelmValues(
               "${KAFKA_BOOTSTRAP_SERVERS:-rulebricks-kafka:9092}",
             // KAFKA_LOG_TOPIC carries the namespace prefix (e.g. com.rulebricks.logs).
             topics: ["${KAFKA_LOG_TOPIC:-logs}"],
-            group_id: "vector-consumers",
+            // KAFKA_CONSUMER_GROUP carries the same prefix (e.g.
+            // com.rulebricks.vector-consumers) so co-tenant deployments on a
+            // shared Kafka cluster don't rebalance each other.
+            group_id: "${KAFKA_CONSUMER_GROUP:-vector-consumers}",
             auto_offset_reset: "latest",
             // TLS + SASL driven by env from vector-kafka-env (disabled for
             // in-cluster Kafka and the kafka-proxy bridge path).
@@ -2727,10 +2734,12 @@ export function buildHelmValues(
     };
   }
 
-  // In k8s secret mode, the CLI creates Kubernetes Secrets and the chart reads
-  // them by reference. Point the chart's secretRef seams at those Secrets and
-  // strip every plaintext secret out of the generated values.
-  if (secretMode === "k8s") {
+  // In k8s and eso secret modes the chart reads pre-existing Kubernetes
+  // Secrets by reference (CLI-created via kubectl, or ESO-synced from the
+  // cloud secrets manager - same names either way). Point the chart's
+  // secretRef seams at those Secrets and strip every plaintext secret out of
+  // the generated values.
+  if (secretMode !== "inline") {
     return redactSecretsToRefs(values, config);
   }
 
@@ -2911,7 +2920,7 @@ export function buildDeployValues(
   // Match buildHelmValues' default secret mode so an inline generation is
   // never immediately scrubbed back to refs.
   const secretMode = options.secretMode ?? "inline";
-  return secretMode === "k8s" ? redactSecretsToRefs(merged, config) : merged;
+  return secretMode !== "inline" ? redactSecretsToRefs(merged, config) : merged;
 }
 
 /**

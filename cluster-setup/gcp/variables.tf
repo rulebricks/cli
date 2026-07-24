@@ -162,6 +162,31 @@ variable "cluster_deletion_protection" {
 }
 
 # ------------------------------------------------------------------------------
+# Secrets (External Secrets Operator)
+# ------------------------------------------------------------------------------
+variable "enable_external_secrets" {
+  description = <<-EOT
+    Create the <cluster>-secrets Google service account the External Secrets
+    Operator's reader Kubernetes ServiceAccount impersonates (via Workload
+    Identity, bound by the Rulebricks CLI at deploy time) to sync Secret
+    Manager entries into Kubernetes Secrets. Read-only, restricted to secrets
+    whose IDs start with secrets_prefix.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "secrets_prefix" {
+  description = <<-EOT
+    Secret Manager ID prefix the external-secrets service account may read
+    (Secret Manager IDs cannot contain "/", so entries are named like
+    <prefix>-<deployment>-app - see the Helm chart's .secrets.example).
+  EOT
+  type        = string
+  default     = "rulebricks"
+}
+
+# ------------------------------------------------------------------------------
 # Storage (always on; the identity/bucket back every deployment) + metrics
 # ------------------------------------------------------------------------------
 variable "enable_metrics_writer" {

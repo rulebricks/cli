@@ -155,18 +155,20 @@ private endpoint, DNS, secret writers, and lifecycle remain owned by the shared
 vault team.
 
 After deployment, use the outputs `keyVaultUri`, `externalSecretsClientId`,
-`externalSecretsTenantId`, and `externalSecretsServiceAccountName` in the Helm
-chart's `examples/azure-key-vault-values.yaml`. The chart can install a
-namespace-scoped External Secrets Operator and creates these resources:
+`externalSecretsTenantId`, and `externalSecretsServiceAccountName` to fill the
+placeholders in the Helm chart's
+`examples/external-secrets/azure-key-vault.yaml`. That manifest is applied with
+`kubectl` (the chart renders no vault-specific resources) and creates:
 
 1. A service account annotated with the Azure client and tenant IDs.
 2. A namespaced `SecretStore` that authenticates with AKS Workload Identity.
-3. An `ExternalSecret` that maps selected Key Vault entries into one Kubernetes
-   Secret.
+3. `ExternalSecret` resources that map Key Vault entries into the Kubernetes
+   Secrets listed in the chart's `.secrets.example`.
 
-Point `global.secrets.secretRef` and any Supabase secret references at that
-target Secret. No Key Vault value is stored in the Bicep deployment, Helm
-values, or Bicep outputs.
+The chart can still install a namespace-scoped External Secrets Operator via
+`externalSecrets.installOperator: true`. Point `global.secrets.secretRef` and
+any Supabase secret references at the synced Secrets. No Key Vault value is
+stored in the Bicep deployment, Helm values, or Bicep outputs.
 
 Install the Helm release in the `externalSecretsNamespace` output. If a
 different namespace is required, set `rulebricksNamespace` before deploying
@@ -185,6 +187,7 @@ stay aligned.
 | `enableManagedGrafana` | Azure Managed Grafana connected to the created monitor workspace |
 | `enableExternalDns` | Workload identity and DNS-zone-scoped contributor role |
 | `enableKeyVaultIntegration` | Key Vault reader identity and either a created vault or a scoped role on an existing vault |
+| `enableControlPlaneLogs` | AKS control-plane diagnostics (kube-apiserver, kube-audit-admin, guard) to an existing Log Analytics workspace (`controlPlaneLogAnalyticsWorkspaceId`) |
 
 For a shared Data Collection Rule, provide
 `existingDataCollectionRuleName` and
@@ -310,7 +313,8 @@ value supplied to ARM. None of these secrets appear in Bicep outputs.
 Seed the vault from a trusted workstation or delivery pipeline that has the
 writer role. Production writers must also have network access to the AKS virtual
 network because the vault's public endpoint is disabled. Use your own secret
-names as long as they match the Helm `externalSecrets.remoteRefs` mappings.
+names as long as they match the `remoteRef` mappings in your applied
+`ExternalSecret` manifests.
 
 ```bash
 KV_NAME=$(az deployment group show \
@@ -325,11 +329,11 @@ az keyvault secret set \
   --output none
 ```
 
-Copy `examples/azure-key-vault-values.yaml`, replace the four Bicep output
-placeholders, and map each required Kubernetes key to its Key Vault secret
-name. Then include that file in the Rulebricks Helm install or upgrade. Keep
-`externalSecrets.installOperator=false` only when the cluster already has a
-compatible External Secrets Operator.
+Copy `examples/external-secrets/azure-key-vault.yaml` from the Helm chart,
+replace the Bicep output placeholders, map each required Kubernetes Secret key
+to its Key Vault secret name, and apply it with `kubectl`. Set
+`externalSecrets.installOperator=true` in the Helm values unless the cluster
+already has a compatible External Secrets Operator.
 
 ### Seed the production registry
 

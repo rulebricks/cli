@@ -19,6 +19,8 @@ export type ClusterSetupCategory =
   | "metrics-identity"
   | "decision-logs-identity"
   | "backups-identity"
+  | "secrets-identity"
+  | "secrets-vault"
   | "decision-logs-bucket"
   | "backups-bucket"
   | "decision-logs-container"
@@ -59,6 +61,19 @@ function patternsFor(
         `${cluster}-backups`,
         "-backups",
       ];
+    case "secrets-identity":
+      // AWS role / Azure UAMI `${cluster}-external-secrets`; GCP GSA
+      // `${cluster}-secrets` (30-char service-account ID limit).
+      return [
+        `${cluster}-external-secrets`,
+        "-external-secrets",
+        `${cluster}-secrets`,
+        "-secrets",
+      ];
+    case "secrets-vault":
+      // Azure Key Vault names cap at 24 chars; the Bicep default derives from
+      // the cluster name (dashes and length permitting), so prefer that.
+      return [cluster, "rulebricks", "-kv", "vault"];
     case "decision-logs-bucket":
     case "backups-bucket":
       return [

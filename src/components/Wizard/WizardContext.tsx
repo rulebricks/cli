@@ -19,6 +19,7 @@ import {
   DEFAULT_EMAIL_SUBJECTS,
   ProfileConfig,
   SecretKeyRef,
+  SecretsBackend,
   RemoteWriteConfig,
   TracingDestination,
   validateRemoteWriteConfig,
@@ -90,6 +91,19 @@ export interface WizardState {
   storageAzureBlobTenantId: string;
   storageAzureBlobConnectionStringSecretRef: string;
   storageGcpServiceAccountEmail: string;
+
+  // Secrets backend (External Secrets Operator by default; "cluster" = plain
+  // CLI-applied Kubernetes Secrets for dev/test)
+  secretsBackend: SecretsBackend | null;
+  secretsPrefix: string;
+  secretsAwsRoleArn: string;
+  secretsAzureVaultName: string;
+  secretsAzureVaultUri: string;
+  secretsAzureClientId: string;
+  secretsAzureTenantId: string;
+  secretsGcpServiceAccountEmail: string;
+  secretsByoStoreName: string;
+  secretsByoStoreKind: "SecretStore" | "ClusterSecretStore";
 
   // Features - AI
   aiEnabled: boolean;
@@ -343,6 +357,24 @@ type WizardAction =
         Pick<WizardState, "loggingPlatformCredential" | "loggingPlatformDetail">
       >;
     }
+  | {
+      type: "SET_SECRETS_CONFIG";
+      config: Partial<
+        Pick<
+          WizardState,
+          | "secretsBackend"
+          | "secretsPrefix"
+          | "secretsAwsRoleArn"
+          | "secretsAzureVaultName"
+          | "secretsAzureVaultUri"
+          | "secretsAzureClientId"
+          | "secretsAzureTenantId"
+          | "secretsGcpServiceAccountEmail"
+          | "secretsByoStoreName"
+          | "secretsByoStoreKind"
+        >
+      >;
+    }
   | { type: "SET_TRACING_ENABLED"; enabled: boolean }
   | {
       type: "SET_TRACING_CONFIG";
@@ -508,6 +540,19 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
         : "",
     storageGcpServiceAccountEmail:
       profile?.storage?.gcpServiceAccountEmail ?? "",
+
+    // Secrets backend - the SecretsStep defaults this to the cloud-native
+    // manager once the provider is known.
+    secretsBackend: null,
+    secretsPrefix: "",
+    secretsAwsRoleArn: "",
+    secretsAzureVaultName: "",
+    secretsAzureVaultUri: "",
+    secretsAzureClientId: "",
+    secretsAzureTenantId: "",
+    secretsGcpServiceAccountEmail: "",
+    secretsByoStoreName: "",
+    secretsByoStoreKind: "ClusterSecretStore",
 
     // Features - AI - pre-populate from profile
     aiEnabled: !!profile?.openaiApiKey,
@@ -957,6 +1002,32 @@ export function collectConfigIssues(state: WizardState): string[] {
   if (state.storageProvider === "s3" && !state.storageAwsIamRoleArn) {
     issues.push("S3 storage requires an IAM role (IRSA).");
   }
+  if (state.secretsBackend === "aws-secrets-manager" && !state.secretsAwsRoleArn) {
+    issues.push(
+      "AWS Secrets Manager requires the external-secrets IAM role (cluster-setup output ExternalSecretsRoleArn).",
+    );
+  }
+  if (
+    state.secretsBackend === "azure-key-vault" &&
+    (!state.secretsAzureVaultName || !state.secretsAzureClientId)
+  ) {
+    issues.push(
+      "Azure Key Vault requires a vault and the external-secrets workload identity (cluster-setup outputs keyVaultName / externalSecretsClientId).",
+    );
+  }
+  if (
+    state.secretsBackend === "gcp-secret-manager" &&
+    !state.secretsGcpServiceAccountEmail
+  ) {
+    issues.push(
+      "GCP Secret Manager requires the external-secrets service account (cluster-setup output external_secrets_service_account).",
+    );
+  }
+  if (state.secretsBackend === "byo-secret-store" && !state.secretsByoStoreName) {
+    issues.push(
+      "The external secret store backend requires an existing SecretStore or ClusterSecretStore name.",
+    );
+  }
   if (state.storageProvider === "azure-blob") {
     if (!state.storageAzureBlobContainer) {
       issues.push("Azure Blob storage requires a container name.");
@@ -1160,6 +1231,18 @@ export function configToWizardState(
       storage?.azureBlobConnectionStringSecretRef,
     ),
     storageGcpServiceAccountEmail: storage?.gcpServiceAccountEmail ?? "",
+    secretsBackend: config.secrets?.backend ?? null,
+    secretsPrefix: config.secrets?.prefix ?? "",
+    secretsAwsRoleArn: config.secrets?.aws?.roleArn ?? "",
+    secretsAzureVaultName: config.secrets?.azure?.vaultName ?? "",
+    secretsAzureVaultUri: config.secrets?.azure?.vaultUri ?? "",
+    secretsAzureClientId: config.secrets?.azure?.clientId ?? "",
+    secretsAzureTenantId: config.secrets?.azure?.tenantId ?? "",
+    secretsGcpServiceAccountEmail:
+      config.secrets?.gcp?.serviceAccountEmail ?? "",
+    secretsByoStoreName: config.secrets?.byo?.storeName ?? "",
+    secretsByoStoreKind:
+      config.secrets?.byo?.storeKind ?? base.secretsByoStoreKind,
     aiEnabled: config.features.ai.enabled,
     openaiApiKey: config.features.ai.openaiApiKey ?? "",
     ssoEnabled: config.features.sso.enabled,
@@ -1369,6 +1452,16 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
         storageAzureBlobTenantId: "",
         storageAzureBlobConnectionStringSecretRef: "",
         storageGcpServiceAccountEmail: "",
+        // Secrets backend is cloud-specific; reset with the provider.
+        secretsBackend: null,
+        secretsPrefix: "",
+        secretsAwsRoleArn: "",
+        secretsAzureVaultName: "",
+        secretsAzureVaultUri: "",
+        secretsAzureClientId: "",
+        secretsAzureTenantId: "",
+        secretsGcpServiceAccountEmail: "",
+        secretsByoStoreName: "",
         redisMode: "embedded",
         redisHost: "",
         redisPort: 6379,
@@ -1493,6 +1586,8 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
     case "SET_STORAGE_CONFIG":
       return { ...state, ...action.config };
     case "SET_LOGGING_CONFIG":
+      return { ...state, ...action.config };
+    case "SET_SECRETS_CONFIG":
       return { ...state, ...action.config };
     case "SET_CLICKSTACK_ENABLED":
       return {
@@ -1741,6 +1836,39 @@ export function WizardProvider({
         schedule: state.backupSchedule || "0 2 * * *",
         retentionDays: state.backupRetentionDays || 7,
       },
+      secrets: state.secretsBackend
+        ? {
+            backend: state.secretsBackend,
+            prefix: state.secretsPrefix || undefined,
+            aws:
+              state.secretsBackend === "aws-secrets-manager"
+                ? { roleArn: state.secretsAwsRoleArn || undefined }
+                : undefined,
+            azure:
+              state.secretsBackend === "azure-key-vault"
+                ? {
+                    vaultName: state.secretsAzureVaultName || undefined,
+                    vaultUri: state.secretsAzureVaultUri || undefined,
+                    clientId: state.secretsAzureClientId || undefined,
+                    tenantId: state.secretsAzureTenantId || undefined,
+                  }
+                : undefined,
+            gcp:
+              state.secretsBackend === "gcp-secret-manager"
+                ? {
+                    serviceAccountEmail:
+                      state.secretsGcpServiceAccountEmail || undefined,
+                  }
+                : undefined,
+            byo:
+              state.secretsBackend === "byo-secret-store"
+                ? {
+                    storeName: state.secretsByoStoreName || undefined,
+                    storeKind: state.secretsByoStoreKind,
+                  }
+                : undefined,
+          }
+        : undefined,
       externalServices,
       features: {
         ai: {

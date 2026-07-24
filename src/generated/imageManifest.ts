@@ -10,7 +10,7 @@ export const BUNDLED_IMAGE_MANIFEST: {
   "images": [
     {
       "name": "clickhouse-server",
-      "tag": "25.8.28-debian13"
+      "tag": "26.6.1-debian13"
     },
     {
       "name": "valkey",
@@ -18,7 +18,7 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "redis-exporter",
-      "tag": "1.86.0-debian13"
+      "tag": "1.87.0-debian13"
     },
     {
       "name": "kafka-exporter",
@@ -26,15 +26,15 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "opentelemetry-collector",
-      "tag": "0.155.0-debian13-contrib"
+      "tag": "0.156.0-debian13-contrib"
     },
     {
       "name": "strimzi-operator",
-      "tag": "1.0.1-debian13"
+      "tag": "1.1.0-debian13"
     },
     {
       "name": "strimzi-kafka",
-      "tag": "1.0.1-debian13-kafka-4.2.0"
+      "tag": "1.1.0-debian13-kafka-4.2.1"
     },
     {
       "name": "strimzi-kafka-bridge",
@@ -42,19 +42,19 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "kaniko-executor",
-      "tag": "1.0.1"
+      "tag": "1.1.0"
     },
     {
       "name": "buildah",
-      "tag": "1.0.1"
+      "tag": "1.1.0"
     },
     {
       "name": "maven-builder",
-      "tag": "1.0.1"
+      "tag": "1.1.0"
     },
     {
       "name": "prometheus",
-      "tag": "3.12.0-debian13"
+      "tag": "3.13.1-debian13"
     },
     {
       "name": "grafana",
@@ -62,7 +62,7 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "node-exporter",
-      "tag": "1.11.1-debian13"
+      "tag": "1.12.1-debian13"
     },
     {
       "name": "kube-state-metrics",
@@ -82,15 +82,15 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "prometheus-operator",
-      "tag": "v0.92.1"
+      "tag": "0.92.1-debian13"
     },
     {
       "name": "alertmanager",
-      "tag": "v0.33.1"
+      "tag": "0.33.1-debian13"
     },
     {
       "name": "traefik",
-      "tag": "3.7.5-debian13"
+      "tag": "3.7.6-debian13"
     },
     {
       "name": "keda",
@@ -106,27 +106,27 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "cert-manager-controller",
-      "tag": "1.20.3-debian13"
+      "tag": "1.21.0-debian13"
     },
     {
       "name": "cert-manager-webhook",
-      "tag": "1.20.3-debian13"
+      "tag": "1.21.0-debian13"
     },
     {
       "name": "cert-manager-cainjector",
-      "tag": "1.20.3-debian13"
+      "tag": "1.21.0-debian13"
     },
     {
       "name": "cert-manager-startupapicheck",
-      "tag": "1.20.3-debian13"
+      "tag": "1.21.0-debian13"
     },
     {
       "name": "cert-manager-acmesolver",
-      "tag": "1.20.3-debian13"
+      "tag": "1.21.0-debian13"
     },
     {
       "name": "vector",
-      "tag": "0.56.0-debian13"
+      "tag": "0.57.0-debian13"
     },
     {
       "name": "external-dns",
@@ -134,19 +134,19 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "external-secrets",
-      "tag": "v2.7.0"
+      "tag": "2.8.0-debian13"
     },
     {
       "name": "cluster-autoscaler",
-      "tag": "1.34.3-debian13"
+      "tag": "1.35.1-debian13"
     },
     {
       "name": "thanos",
-      "tag": "0.41.0-debian13"
+      "tag": "0.42.2-debian13"
     },
     {
       "name": "kube-rbac-proxy",
-      "tag": "0.22.0-debian13"
+      "tag": "0.22.1-debian13"
     },
     {
       "name": "prometheus-operator-admission-webhook",
@@ -162,11 +162,11 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "curl",
-      "tag": "8.14.1-debian13"
+      "tag": "8.21.0-alpine"
     },
     {
       "name": "grafana-image-renderer",
-      "tag": "5.9.1-debian13"
+      "tag": "5.10.1-debian13"
     },
     {
       "name": "haproxy",
@@ -193,7 +193,7 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "busybox",
-      "tag": "1.37.0-debian13"
+      "tag": "1.38.0-alpine"
     },
     {
       "name": "pause",
@@ -201,40 +201,40 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "node24",
-      "tag": "24-alpine",
+      "tag": "24-alpine-r1",
       "target": "rulebricks/node"
     },
     {
       "name": "rclone",
-      "tag": "1.74.3"
+      "tag": "1.74.4"
     },
     {
       "name": "kafka-proxy",
-      "tag": "0.4.3"
+      "tag": "0.4.3-r1"
     },
     {
       "name": "valkey-admin",
-      "tag": "1.0.2"
+      "tag": "1.0.2-r1"
     },
     {
       "name": "serverless-redis-http",
-      "tag": "0.0.10"
+      "tag": "0.0.10-r1"
     },
     {
       "name": "hyperdx",
-      "tag": "2.29.0"
+      "tag": "2.31.0"
     },
     {
       "name": "clickstack-otel-collector",
-      "tag": "2.29.0"
+      "tag": "2.31.0-r1"
     },
     {
       "name": "ferretdb",
-      "tag": "2.7.0"
+      "tag": "2.7.0-r1"
     },
     {
       "name": "postgres-documentdb",
-      "tag": "17-0.107.0-ferretdb-2.7.0"
+      "tag": "17-0.107.0-ferretdb-2.7.0-r1"
     },
     {
       "name": "supabase-postgres",
@@ -242,11 +242,11 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "supabase-studio",
-      "tag": "2026.07.06-sha-66cf431"
+      "tag": "2026.07.20-sha-74a0848-r1"
     },
     {
       "name": "supabase-gotrue",
-      "tag": "v2.192.0"
+      "tag": "v2.193.1-r1"
     },
     {
       "name": "supabase-postgrest",
@@ -254,19 +254,19 @@ export const BUNDLED_IMAGE_MANIFEST: {
     },
     {
       "name": "supabase-realtime",
-      "tag": "v2.112.4"
+      "tag": "v2.117.0-r1"
     },
     {
       "name": "supabase-postgres-meta",
-      "tag": "v0.96.6"
+      "tag": "v0.96.6-r1"
     },
     {
       "name": "supabase-kong",
-      "tag": "3.9.3"
+      "tag": "3.9.3-debian13"
     },
     {
       "name": "curljq",
-      "tag": "1.0.0"
+      "tag": "1.0.1"
     }
   ]
 };

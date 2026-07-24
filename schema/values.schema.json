@@ -456,23 +456,9 @@
     },
     "externalSecrets": {
       "type": "object",
-      "description": "Overlay-facing External Secrets metadata (not rendered directly by this chart)",
+      "description": "External Secrets Operator convenience toggle. The chart consumes pre-existing Secrets via *.secretRef seams and renders no ExternalSecret/SecretStore resources; see examples/external-secrets/. Unknown keys are tolerated for older overlay-era values files.",
       "properties": {
-        "enabled": { "type": "boolean", "default": false },
-        "secretStoreRef": {
-          "type": "object",
-          "properties": {
-            "name": { "type": "string" },
-            "kind": { "type": "string", "enum": ["SecretStore", "ClusterSecretStore"] }
-          }
-        },
-        "refreshInterval": { "type": "string", "default": "1h" },
-        "remoteRefs": {
-          "type": "object",
-          "description": "Map local keys to remote secret paths",
-          "additionalProperties": { "type": "string" }
-        },
-        "targetSecretName": { "type": "string" }
+        "installOperator": { "type": "boolean", "default": false }
       }
     },
     "rulebricks": {

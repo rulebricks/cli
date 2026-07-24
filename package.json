@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "sync-schema": "node scripts/sync-schema.mjs",
     "sync-images": "node scripts/sync-image-manifest.mjs",
-    "test": "npm run build && node --test dist/lib/versions.test.js dist/lib/helm.test.js dist/lib/helmValues.test.js dist/lib/imageCatalog.test.js dist/lib/dns.test.js dist/lib/workloadIdentity.test.js dist/lib/clusterSetupDefaults.test.js dist/lib/wizardFlow.test.js dist/lib/deploySequence.test.js dist/lib/cloudCli.test.js",
+    "test": "npm run build && node --test dist/lib/versions.test.js dist/lib/helm.test.js dist/lib/helmValues.test.js dist/lib/imageCatalog.test.js dist/lib/dns.test.js dist/lib/workloadIdentity.test.js dist/lib/clusterSetupDefaults.test.js dist/lib/wizardFlow.test.js dist/lib/deploySequence.test.js dist/lib/eso.test.js dist/lib/cloudCli.test.js",
     "verify-chart": "npm run build && node scripts/verify-against-chart.mjs"
   },
   "keywords": [

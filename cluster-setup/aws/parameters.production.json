@@ -1,26 +1,26 @@
 [
-  { "ParameterKey": "ClusterName", "ParameterValue": "rulebricks-cluster" },
+  { "ParameterKey": "ClusterName", "ParameterValue": "rulebricks-prod" },
   { "ParameterKey": "KubernetesVersion", "ParameterValue": "1.34" },
-  { "ParameterKey": "ClusterEndpointAccess", "ParameterValue": "PublicAndPrivate" },
+  { "ParameterKey": "ClusterEndpointAccess", "ParameterValue": "PrivateOnly" },
   { "ParameterKey": "AdminPrincipalArn", "ParameterValue": "" },
   { "ParameterKey": "KmsKeyArn", "ParameterValue": "" },
 
   { "ParameterKey": "VpcCidr", "ParameterValue": "10.0.0.0/16" },
-  { "ParameterKey": "SingleNatGateway", "ParameterValue": "true" },
-  { "ParameterKey": "EnableVpcInterfaceEndpoints", "ParameterValue": "false" },
+  { "ParameterKey": "SingleNatGateway", "ParameterValue": "false" },
+  { "ParameterKey": "EnableVpcInterfaceEndpoints", "ParameterValue": "true" },
 
   { "ParameterKey": "EnableExternalSecrets", "ParameterValue": "true" },
   { "ParameterKey": "SecretsPrefix", "ParameterValue": "" },
   { "ParameterKey": "SecretsKmsKeyArn", "ParameterValue": "" },
 
-  { "ParameterKey": "EnableRegistryMirror", "ParameterValue": "false" },
+  { "ParameterKey": "EnableRegistryMirror", "ParameterValue": "true" },
   { "ParameterKey": "RegistryMirrorUsername", "ParameterValue": "rulebricks" },
   { "ParameterKey": "RegistryMirrorAccessToken", "ParameterValue": "" },
 
   { "ParameterKey": "EnableExternalDns", "ParameterValue": "false" },
   { "ParameterKey": "DnsZoneId", "ParameterValue": "" },
 
-  { "ParameterKey": "EnableDataBucketProtection", "ParameterValue": "false" },
+  { "ParameterKey": "EnableDataBucketProtection", "ParameterValue": "true" },
 
   { "ParameterKey": "NodeInstanceType", "ParameterValue": "m7i.xlarge" },
   { "ParameterKey": "NodeDesiredCapacity", "ParameterValue": "3" },

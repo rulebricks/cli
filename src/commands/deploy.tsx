@@ -43,7 +43,12 @@ import {
 } from "../lib/helmValues.js";
 import { resolveImageCatalog } from "../lib/imageCatalog.js";
 import { ensureNamespace, applyDeploymentSecrets } from "../lib/secrets.js";
-import { runInstallSequence } from "../lib/deploySequence.js";
+import { setupExternalSecrets } from "../lib/eso.js";
+import {
+  runInstallSequence,
+  secretModeForConfig,
+  SecretMode,
+} from "../lib/deploySequence.js";
 import { CommandDeniedError } from "../lib/commandApproval.js";
 import {
   DeploymentConfig,
@@ -60,9 +65,14 @@ interface DeployCommandProps {
   regenerateValues?: boolean;
   assumeDnsConfigured?: boolean;
   // When true, secrets are written inline into values.yaml (dev/direct-chart).
-  // Default (false) = k8s mode: the CLI creates Kubernetes Secrets and the
-  // generated values carry only secretRef references.
+  // Default (false): the config's secrets backend decides - "eso" (cloud
+  // secrets manager synced by the External Secrets Operator, the default) or
+  // "k8s" (CLI-created cluster Secrets, the "cluster" backend). Either way
+  // the generated values carry only secretRef references.
   inlineSecrets?: boolean;
+  // ESO backends only: overwrite provider entries with the config's values
+  // (default is create-if-absent so client-rotated values are preserved).
+  syncSecrets?: boolean;
 }
 
 function getConfigProductVersion(config: DeploymentConfig): string {
@@ -98,8 +108,8 @@ function DeployCommandInner({
   regenerateValues = true,
   assumeDnsConfigured = false,
   inlineSecrets = false,
+  syncSecrets = false,
 }: DeployCommandProps) {
-  const secretMode: "k8s" | "inline" = inlineSecrets ? "inline" : "k8s";
   const { exit } = useApp();
   const { colors } = useTheme();
   const [step, setStep] = useState<DeployStep>("loading");
@@ -246,6 +256,12 @@ function DeployCommandInner({
       // once so both TLS generation phases use the same catalog.
       const imageCatalog = await resolveImageCatalog(version);
 
+      // The config's secrets backend decides the mode (ESO by default);
+      // --inline-secrets remains the explicit dev/direct-chart escape hatch.
+      const secretMode: SecretMode = inlineSecrets
+        ? "inline"
+        : secretModeForConfig(cfg);
+
       await runInstallSequence(
         {
           regenerateValues,
@@ -265,6 +281,9 @@ function DeployCommandInner({
           ensureNamespace: () => ensureNamespace(namespace),
           applySecrets: async () => {
             await applyDeploymentSecrets(cfg, namespace);
+          },
+          setupExternalSecrets: async () => {
+            await setupExternalSecrets(cfg, { overwriteSecrets: syncSecrets });
           },
           installChart: () =>
             installOrUpgradeChart(name, {

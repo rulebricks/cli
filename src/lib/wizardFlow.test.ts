@@ -33,7 +33,7 @@ function stepState(overrides: Partial<WizardStepState> = {}): WizardStepState {
   };
 }
 
-test("minimal create path lists eleven steps", () => {
+test("minimal create path lists twelve steps", () => {
   assert.deepEqual(getActiveWizardSteps(stepState(), "create"), [
     "cloud",
     "domain",
@@ -41,6 +41,7 @@ test("minimal create path lists eleven steps", () => {
     "database",
     "database-creds",
     "external-services",
+    "secrets",
     "storage",
     "observability",
     "features",
@@ -65,6 +66,7 @@ test("configure sections are the active steps minus cloud and review", () => {
     "database",
     "database-creds",
     "external-services",
+    "secrets",
     "storage",
     "observability",
     "features",

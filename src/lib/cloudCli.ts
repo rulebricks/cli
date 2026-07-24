@@ -7,6 +7,7 @@
 
 import { exec } from "child_process";
 import { promisify } from "util";
+import { execa } from "execa";
 import { CloudProvider, CLOUD_REGIONS } from "../types/index.js";
 import { approveCloudCommandOrThrow } from "./commandApproval.js";
 import { filterAzureWorkloadIdentities } from "./clusterSetupDefaults.js";
@@ -1329,6 +1330,46 @@ export async function listAzureWorkloadIdentities(
 }
 
 /**
+ * Azure Key Vault discovered through the Azure CLI.
+ */
+export interface AzureKeyVault {
+  name: string;
+  uri: string;
+  resourceGroup?: string;
+}
+
+/**
+ * List Key Vaults visible to the logged-in Azure CLI (CLI secrets step).
+ */
+export async function listAzureKeyVaults(): Promise<AzureKeyVault[]> {
+  try {
+    const result = await execCommand(
+      'az keyvault list --query "[].{name:name, uri:properties.vaultUri, resourceGroup:resourceGroup}" --output json',
+      { intent: "Discover Key Vaults", provider: "azure" },
+    );
+    if (result.stderr && !result.stdout) {
+      return [];
+    }
+    const vaults = JSON.parse(result.stdout) as Array<{
+      name: string;
+      uri: string | null;
+      resourceGroup?: string;
+    }>;
+    return vaults
+      .map((v) => ({
+        name: v.name,
+        // vaultUri is null in `az keyvault list` for some API versions; the
+        // canonical public URI is derivable from the name.
+        uri: v.uri || `https://${v.name}.vault.azure.net/`,
+        resourceGroup: v.resourceGroup,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * List buckets/storage for a specific provider
  */
 export async function listBuckets(provider: CloudProvider): Promise<string[]> {
@@ -2208,4 +2249,193 @@ export async function getGcpRedisAuthString(
   } catch {
     return null;
   }
+}
+
+// ============================================================================
+// Secrets manager seeding (ESO secrets backend)
+//
+// Secret VALUES never appear in a shell string or process argv: writes run
+// through execa (no shell) and stream the value over stdin. The approval
+// prompt shows a redacted command. create-if-absent by default so values a
+// client rotated in their platform are never clobbered; overwrite=true forces
+// an update (deploy --sync-secrets).
+// ============================================================================
+
+export interface SecretWriteResult {
+  created: boolean;
+  updated: boolean;
+  skipped: boolean;
+}
+
+async function approvedExeca(
+  displayCommand: string,
+  intent: string,
+  provider: CloudProvider,
+  file: string,
+  args: string[],
+  input?: string,
+): Promise<void> {
+  await approveCloudCommandOrThrow({
+    command: displayCommand,
+    intent,
+    provider,
+    mutating: true,
+  });
+  await execa(file, args, input === undefined ? {} : { input });
+}
+
+/**
+ * Seed one AWS Secrets Manager entry (JSON object per the chart's
+ * .secrets.example section).
+ */
+export async function writeAwsSecretsManagerSecret(options: {
+  name: string;
+  value: string;
+  region: string;
+  overwrite: boolean;
+}): Promise<SecretWriteResult> {
+  const { name, value, region, overwrite } = options;
+  const describe = await execCommand(
+    `aws secretsmanager describe-secret --secret-id "${name}" --region ${region} --query ARN --output text`,
+    { intent: "Check secrets manager entry", provider: "aws" },
+  );
+  const exists = Boolean(describe.stdout.trim()) && !describe.stderr;
+
+  if (exists && !overwrite) {
+    return { created: false, updated: false, skipped: true };
+  }
+  if (exists) {
+    await approvedExeca(
+      `aws secretsmanager put-secret-value --secret-id ${name} --region ${region} --secret-string <redacted>`,
+      "Update secrets manager entry",
+      "aws",
+      "aws",
+      [
+        "secretsmanager",
+        "put-secret-value",
+        "--secret-id",
+        name,
+        "--region",
+        region,
+        "--secret-string",
+        "file:///dev/stdin",
+      ],
+      value,
+    );
+    return { created: false, updated: true, skipped: false };
+  }
+  await approvedExeca(
+    `aws secretsmanager create-secret --name ${name} --region ${region} --secret-string <redacted>`,
+    "Create secrets manager entry",
+    "aws",
+    "aws",
+    [
+      "secretsmanager",
+      "create-secret",
+      "--name",
+      name,
+      "--region",
+      region,
+      "--description",
+      "Rulebricks deployment secret (synced into Kubernetes by External Secrets Operator)",
+      "--secret-string",
+      "file:///dev/stdin",
+    ],
+    value,
+  );
+  return { created: true, updated: false, skipped: false };
+}
+
+/**
+ * Seed one Azure Key Vault entry.
+ */
+export async function writeAzureKeyVaultSecret(options: {
+  vaultName: string;
+  name: string;
+  value: string;
+  overwrite: boolean;
+}): Promise<SecretWriteResult> {
+  const { vaultName, name, value, overwrite } = options;
+  const show = await execCommand(
+    `az keyvault secret show --vault-name ${vaultName} --name ${name} --query id --output tsv`,
+    { intent: "Check Key Vault entry", provider: "azure" },
+  );
+  const exists = Boolean(show.stdout.trim()) && !show.stderr;
+
+  if (exists && !overwrite) {
+    return { created: false, updated: false, skipped: true };
+  }
+  await approvedExeca(
+    `az keyvault secret set --vault-name ${vaultName} --name ${name} --file <redacted>`,
+    exists ? "Update Key Vault entry" : "Create Key Vault entry",
+    "azure",
+    "az",
+    [
+      "keyvault",
+      "secret",
+      "set",
+      "--vault-name",
+      vaultName,
+      "--name",
+      name,
+      "--file",
+      "/dev/stdin",
+      "--output",
+      "none",
+    ],
+    value,
+  );
+  return exists
+    ? { created: false, updated: true, skipped: false }
+    : { created: true, updated: false, skipped: false };
+}
+
+/**
+ * Seed one GCP Secret Manager entry.
+ */
+export async function writeGcpSecretManagerSecret(options: {
+  projectId: string;
+  name: string;
+  value: string;
+  overwrite: boolean;
+}): Promise<SecretWriteResult> {
+  const { projectId, name, value, overwrite } = options;
+  const describe = await execCommand(
+    `gcloud secrets describe ${name} --project ${projectId} --format="value(name)"`,
+    { intent: "Check Secret Manager entry", provider: "gcp" },
+  );
+  const exists = Boolean(describe.stdout.trim()) && !describe.stderr;
+
+  if (exists && !overwrite) {
+    return { created: false, updated: false, skipped: true };
+  }
+  if (exists) {
+    await approvedExeca(
+      `gcloud secrets versions add ${name} --project ${projectId} --data-file=<redacted>`,
+      "Update Secret Manager entry",
+      "gcp",
+      "gcloud",
+      ["secrets", "versions", "add", name, "--project", projectId, "--data-file=-"],
+      value,
+    );
+    return { created: false, updated: true, skipped: false };
+  }
+  await approvedExeca(
+    `gcloud secrets create ${name} --project ${projectId} --data-file=<redacted>`,
+    "Create Secret Manager entry",
+    "gcp",
+    "gcloud",
+    [
+      "secrets",
+      "create",
+      name,
+      "--project",
+      projectId,
+      "--replication-policy",
+      "automatic",
+      "--data-file=-",
+    ],
+    value,
+  );
+  return { created: true, updated: false, skipped: false };
 }

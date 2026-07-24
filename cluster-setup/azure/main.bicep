@@ -65,6 +65,9 @@ param maintenanceStartTime string = '02:00'
 param maintenanceUtcOffset string = '+00:00'
 param enableAzurePolicy bool = deploymentProfile == 'production'
 param enableKeyVaultSecretsProvider bool = false
+@description('Send AKS control-plane logs (kube-apiserver, kube-audit-admin, guard) to an existing Log Analytics workspace - EKS control-plane logging parity. Requires controlPlaneLogAnalyticsWorkspaceId.')
+param enableControlPlaneLogs bool = false
+param controlPlaneLogAnalyticsWorkspaceId string = ''
 
 param vnetAddressSpace string = '10.240.0.0/16'
 param aksSubnetPrefix string = '10.240.0.0/22'
@@ -288,6 +291,8 @@ module cluster 'modules/cluster.bicep' = {
     maintenanceUtcOffset: maintenanceUtcOffset
     enableAzurePolicy: enableAzurePolicy
     enableKeyVaultSecretsProvider: enableKeyVaultSecretsProvider
+    enableControlPlaneLogs: enableControlPlaneLogs
+    controlPlaneLogAnalyticsWorkspaceId: controlPlaneLogAnalyticsWorkspaceId
   }
 }
 
