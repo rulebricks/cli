@@ -33,6 +33,7 @@ import {
   bundledImageCatalog,
   resolveImageCatalog,
 } from "./imageCatalog.js";
+import { AZURE_POSTGRES_CA_BUNDLE } from "./azurePostgresCa.js";
 import { createHmac } from "crypto";
 import fs from "fs/promises";
 import YAML from "yaml";
@@ -2926,23 +2927,43 @@ async function resolveGenerateImages(
 }
 
 /**
- * Resolves the CA bundle for an external managed database. Currently AWS RDS
- * only: fetches the REGIONAL trust bundle (region parsed from the endpoint,
- * e.g. name.id.us-east-1.rds.amazonaws.com) from AWS's public truststore.
- * Regional, not global, on purpose: the value ships to postgres-meta as one
- * env var and Linux caps a single env entry at 128KiB (the ~170KiB global
- * bundle makes exec fail with "argument list too long"). Fail-open: on any
- * fetch problem returns undefined and the deploy proceeds without it (Studio's
+ * Resolves the CA bundle for an external managed database, wired into
+ * supabase.externalDatabase.sslRootCert (postgres-meta needs it to encrypt
+ * the per-request connections Studio sends; force-TLS servers reject them
+ * otherwise).
+ *
+ * AWS RDS: fetches the REGIONAL trust bundle (region parsed from the
+ * endpoint, e.g. name.id.us-east-1.rds.amazonaws.com) from AWS's public
+ * truststore. Regional, not global, on purpose: the value ships to
+ * postgres-meta as one env var and Linux caps a single env entry at 128KiB
+ * (the ~170KiB global bundle makes exec fail with "argument list too long").
+ *
+ * Azure Flexible Server: embedded public roots (see azurePostgresCa.ts) -
+ * no fetch needed. GCP Cloud SQL is NOT covered: its server CA is private
+ * and per-instance, so it must be supplied via values edits.
+ *
+ * Detection prefers the config's explicit provider field, falling back to
+ * the endpoint's hostname for configs that omit it. Fail-open: on any fetch
+ * problem returns undefined and the deploy proceeds without it (Studio's
  * Table/SQL editor degrades against force-TLS servers; nothing else does).
  */
-async function resolveExternalDbSslRootCert(
+export async function resolveExternalDbSslRootCert(
   config: DeploymentConfig,
 ): Promise<string | undefined> {
   const pgExt =
     config.externalServices?.postgres?.mode === "external"
       ? config.externalServices.postgres.external
       : undefined;
-  const host = pgExt?.host ?? "";
+  if (!pgExt) return undefined;
+  const host = pgExt.host ?? "";
+
+  if (
+    pgExt.provider === "azure" ||
+    /\.postgres\.database\.azure\.com$/i.test(host)
+  ) {
+    return AZURE_POSTGRES_CA_BUNDLE;
+  }
+
   const match = host.match(/\.([a-z0-9-]+)\.rds\.amazonaws\.com$/i);
   if (!match) return undefined;
   const region = match[1];

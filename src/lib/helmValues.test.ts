@@ -2,7 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { buildHelmValues, signSupabaseJwt } from "./helmValues.js";
+import {
+  buildHelmValues,
+  resolveExternalDbSslRootCert,
+  signSupabaseJwt,
+} from "./helmValues.js";
+import { AZURE_POSTGRES_CA_BUNDLE } from "./azurePostgresCa.js";
 import { bundledImageCatalog } from "./imageCatalog.js";
 import { getActiveWizardSteps } from "./wizardSteps.js";
 import {
@@ -1731,4 +1736,39 @@ test("per-chart imagePullSecrets are still emitted for private rulebricks/*", ()
 
   // global has no legacy dhi.io reference.
   assert.ok(!JSON.stringify(values.global).includes("dhi.io"));
+});
+
+test("external DB CA bundle: Azure gets embedded roots, GCP/embedded get none", async () => {
+  // Azure Flexible Server forces TLS (require_secure_transport) and Studio's
+  // per-request connection strings cannot carry sslmode, so the resolver must
+  // hand postgres-meta the embedded public roots - no network fetch involved.
+  const azure = cloneFixture("azure-external-postgres");
+  const azureCa = await resolveExternalDbSslRootCert(azure);
+  assert.equal(azureCa, AZURE_POSTGRES_CA_BUNDLE);
+  // All three roots from Microsoft's CA-migration guidance.
+  assert.equal((azureCa?.match(/BEGIN CERTIFICATE/g) ?? []).length, 3);
+
+  // Hostname fallback for configs that omit the provider field.
+  const noProvider = cloneFixture("azure-external-postgres");
+  delete (noProvider.externalServices!.postgres!.external as { provider?: string })
+    .provider;
+  assert.equal(
+    await resolveExternalDbSslRootCert(noProvider),
+    AZURE_POSTGRES_CA_BUNDLE,
+  );
+
+  // Cloud SQL's server CA is private and per-instance: never auto-resolved.
+  const gcp = cloneFixture("gcp-external-postgres");
+  assert.equal(await resolveExternalDbSslRootCert(gcp), undefined);
+
+  // Embedded (in-cluster) postgres: nothing to resolve.
+  const embedded = cloneFixture("aws-self-hosted-minimal");
+  assert.equal(await resolveExternalDbSslRootCert(embedded), undefined);
+
+  // The resolved bundle flows through generation into the chart seam.
+  const values = buildHelmValues(azure, { dbSslRootCert: azureCa }) as Record<
+    string,
+    any
+  >;
+  assert.equal(values.supabase.externalDatabase.sslRootCert, azureCa);
 });
