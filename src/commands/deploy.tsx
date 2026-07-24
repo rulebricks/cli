@@ -35,6 +35,7 @@ import {
 } from "../lib/cloudCli.js";
 import {
   ensureWorkloadIdentityFederation,
+  verifyClusterAutoscalerIdentity,
   verifyManualKafkaAssociations,
 } from "../lib/workloadIdentity.js";
 import {
@@ -118,6 +119,7 @@ function DeployCommandInner({
   const [useExternalDns, setUseExternalDns] = useState(false);
   const [tlsWarning, setTlsWarning] = useState<string | null>(null);
   const [federationWarning, setFederationWarning] = useState<string | null>(null);
+  const [autoscalerWarning, setAutoscalerWarning] = useState<string | null>(null);
   const [status, setStatus] = useState<StepStatus>({
     preflight: "pending",
     federation: "pending",
@@ -262,6 +264,29 @@ function DeployCommandInner({
         ? "inline"
         : secretModeForConfig(cfg);
 
+      // Never ship a known-crashlooping autoscaler: when neither the
+      // conventional cluster-setup role nor an existing association backs the
+      // fixed "cluster-autoscaler" SA, disable it in the generated values and
+      // say so instead of stalling helm --wait for the full timeout.
+      let clusterAutoscalerIdentityMissing = false;
+      try {
+        const autoscalerIdentity = await verifyClusterAutoscalerIdentity(cfg);
+        if (!autoscalerIdentity.ok) {
+          clusterAutoscalerIdentityMissing = true;
+          setAutoscalerWarning(
+            `Node autoscaling is disabled for this deploy: no IAM credentials found for the cluster-autoscaler. ` +
+              `Provision the ${cfg.infrastructure.clusterName}-cluster-autoscaler role (cluster-setup stack) or create a ` +
+              `Pod Identity association for the "cluster-autoscaler" service account in ${namespace}, then redeploy.`,
+          );
+        }
+      } catch (autoscalerError) {
+        if (!(autoscalerError instanceof CommandDeniedError)) {
+          throw autoscalerError;
+        }
+        // Denied cloud lookups: keep the autoscaler enabled and assume
+        // manually-managed credentials, matching the federation fallback.
+      }
+
       await runInstallSequence(
         {
           regenerateValues,
@@ -276,6 +301,7 @@ function DeployCommandInner({
               tlsEnabled,
               secretMode: mode,
               images: imageCatalog,
+              clusterAutoscalerIdentityMissing,
             }),
           validateValues: ensureGeneratedValuesValid,
           ensureNamespace: () => ensureNamespace(namespace),
@@ -636,6 +662,11 @@ function DeployCommandInner({
                 <Text color={colors.warning}>⚠ {federationWarning}</Text>
               </Box>
             )}
+            {autoscalerWarning && (
+              <Box marginTop={1}>
+                <Text color={colors.warning}>⚠ {autoscalerWarning}</Text>
+              </Box>
+            )}
           </Box>
 
           <Box marginTop={1} flexDirection="column">
@@ -694,6 +725,11 @@ function DeployCommandInner({
         {federationWarning && (
           <Box marginLeft={2}>
             <Text color={colors.warning}>{federationWarning}</Text>
+          </Box>
+        )}
+        {autoscalerWarning && (
+          <Box marginLeft={2}>
+            <Text color={colors.warning}>{autoscalerWarning}</Text>
           </Box>
         )}
         <StatusLine status={status.helmInstall} label={helmInstallLabel} />

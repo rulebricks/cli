@@ -274,10 +274,62 @@ export async function installChart(
   }
 }
 
+interface HelmHistoryEntry {
+  revision?: number;
+  status?: string;
+}
+
+/**
+ * True when an existing release is stranded where `helm upgrade --install`
+ * cannot act: no revision was ever deployed, because the FIRST install failed
+ * (e.g. its --wait timed out) or a helm process died mid-install and left
+ * `pending-install` behind. Upgrading such a release fails with "has no
+ * deployed releases" / "another operation is in progress", so the only way
+ * forward is uninstalling the dead release and installing fresh - safe
+ * precisely because nothing was ever successfully deployed. Fail-open: a
+ * missing release or unreadable history reports false and lets helm surface
+ * its own error.
+ */
+async function isReleaseStrandedBeforeFirstDeploy(
+  releaseName: string,
+  namespace: string,
+): Promise<boolean> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execa(
+      "helm",
+      ["history", releaseName, "--namespace", namespace, "--output", "json"],
+      { timeout: 30000 },
+    ));
+  } catch {
+    // Release not found (fresh install) or history unavailable.
+    return false;
+  }
+
+  try {
+    const entries = JSON.parse(stdout) as HelmHistoryEntry[];
+    if (!Array.isArray(entries) || entries.length === 0) return false;
+    const everDeployed = entries.some(
+      (entry) => entry.status === "deployed" || entry.status === "superseded",
+    );
+    if (everDeployed) return false;
+    const latest = entries[entries.length - 1];
+    return latest.status === "failed" || latest.status === "pending-install";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Installs or upgrades the Rulebricks Helm chart (idempotent operation).
  * Uses `helm upgrade --install` which will install if release doesn't exist,
  * or upgrade if it does. This is safe to run multiple times.
+ *
+ * A release stranded before its first successful deploy (failed or orphaned
+ * pending-install revision 1) is uninstalled first, since helm cannot upgrade
+ * past it. NOTE: this also matches a pending-install held by a live helm
+ * process; the CLI runs one deploy per deployment at a time, so a stuck lock
+ * is by far the more likely owner.
  */
 export async function installOrUpgradeChart(
   deploymentName: string,
@@ -298,6 +350,16 @@ export async function installOrUpgradeChart(
     timeout = "15m",
     createNamespace = true,
   } = options;
+
+  if (await isReleaseStrandedBeforeFirstDeploy(releaseName, namespace)) {
+    // Wait for resource deletion so the fresh install below never races
+    // still-terminating objects from the dead release.
+    await uninstallChart(releaseName, namespace, {
+      wait: true,
+      timeout: "10m",
+      processTimeoutMs: 10 * 60_000,
+    });
+  }
 
   const valuesPath = getHelmValuesPath(deploymentName);
 
@@ -398,9 +460,15 @@ export async function uninstallChart(
   options: {
     wait?: boolean;
     timeout?: string;
+    /**
+     * Kill-switch for the helm process itself (default 60s). Callers that
+     * pass wait: true should raise it to at least the helm --timeout, or the
+     * wait is silently cut short (timeouts are tolerated below).
+     */
+    processTimeoutMs?: number;
   } = {},
 ): Promise<void> {
-  const { wait = false, timeout = "10m" } = options;
+  const { wait = false, timeout = "10m", processTimeoutMs = 60000 } = options;
 
   const args = ["uninstall", releaseName, "--namespace", namespace];
 
@@ -410,8 +478,7 @@ export async function uninstallChart(
   }
 
   try {
-    // 60 second process timeout to prevent hanging
-    await execa("helm", args, { timeout: 60000 });
+    await execa("helm", args, { timeout: processTimeoutMs });
   } catch (error) {
     const execaError = error as ExecaError;
     // Ignore "release not found" errors and timeouts (we'll continue anyway)

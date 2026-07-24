@@ -54,6 +54,12 @@ interface GenerateOptions {
   // Chart version the values are generated for; used to resolve the matching
   // image manifest when options.images is not supplied.
   chartVersion?: string;
+  // Set by deploy when neither the conventional cluster-setup role nor an
+  // existing Pod Identity association backs the fixed "cluster-autoscaler"
+  // ServiceAccount (see verifyClusterAutoscalerIdentity). Shipping the
+  // autoscaler without credentials guarantees a fatal crashloop ("no EC2 IMDS
+  // role found") that stalls helm --wait, so generation disables it instead.
+  clusterAutoscalerIdentityMissing?: boolean;
 }
 
 // Names of the Kubernetes Secrets the CLI creates in k8s secret mode. Shared by
@@ -387,6 +393,15 @@ function generateVectorEnv(config: DeploymentConfig): Array<Record<string, unkno
     "KAFKA_CONSUMER_GROUP",
   ];
   const env: Array<Record<string, unknown>> = [
+    // Vector 0.57 disabled env-var interpolation in config files by default.
+    // The kafka source in customConfig is driven entirely by ${KAFKA_*}
+    // placeholders resolved from this env list, so restore the pre-0.57
+    // behavior. Without it, boolean fields (tls/sasl enabled) fail config
+    // parsing with the raw placeholder and Vector crashloops.
+    {
+      name: "VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION",
+      value: "true",
+    },
     // CA bundle seeded by the ca-certs initContainer (generateVectorCaBundle).
     // The hardened vector image has no system CA store, so without this every
     // TLS sink (S3/GCS/Azure decision-log archive, Datadog, ...) fails with
@@ -501,10 +516,17 @@ function generateClusterAutoscaler(
   images: ImageCatalog,
   registry: string,
   pullSecretName: string,
+  identityMissing: boolean,
 ): Record<string, unknown> {
   const cluster = config.infrastructure.clusterName;
   const region = config.infrastructure.region;
   if (config.infrastructure.provider !== "aws" || !cluster || !region) {
+    return { enabled: false };
+  }
+  // No credentials available for the autoscaler pod: installing it anyway
+  // guarantees a crashloop that blocks helm --wait. Deploy surfaces a warning
+  // with the fix (cluster-setup role or manual association) when it sets this.
+  if (identityMissing) {
     return { enabled: false };
   }
   const image = images.image("cluster-autoscaler", registry);
@@ -2692,14 +2714,16 @@ export function buildHelmValues(
     // scaler strands Pending pods and the burst nodegroup (min 0) never
     // activates - benchmarked as the primary throughput cliff. IAM comes from
     // the cluster-setup stack's <cluster>-cluster-autoscaler Pod Identity role,
-    // bound to the fixed "cluster-autoscaler" SA by the workload-identity step;
-    // on BYO clusters without that role, create an equivalent role or disable
-    // this block via values edits.
+    // bound to the fixed "cluster-autoscaler" SA by the workload-identity step.
+    // When neither that role nor a manual association exists, deploy sets
+    // clusterAutoscalerIdentityMissing and the autoscaler is disabled instead
+    // of shipping a guaranteed crashloop.
     "cluster-autoscaler": generateClusterAutoscaler(
       config,
       images,
       reg,
       `${releaseName}-regcred`,
+      options.clusterAutoscalerIdentityMissing === true,
     ),
   };
 

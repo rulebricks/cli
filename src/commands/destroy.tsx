@@ -24,10 +24,12 @@ import {
   deleteNamespace,
   deletePVCs,
   deleteRulebricksCRDs,
+  forceReleaseStuckNamespaceFinalizers,
   isClusterAccessible,
   isLastRulebricksDeployment,
   namespaceExists,
   removeBlockingFinalizers,
+  waitForNamespaceDeletion,
 } from "../lib/kubernetes.js";
 import { CommandDeniedError } from "../lib/commandApproval.js";
 import { removeWorkloadIdentityFederation } from "../lib/workloadIdentity.js";
@@ -206,6 +208,22 @@ function DestroyCommandInner({
               await removeBlockingFinalizers(namespace);
               await cleanupNamespaceAPIServices(namespace);
               await deleteNamespace(namespace);
+              // Namespace deletion is asynchronous: without waiting here,
+              // destroy reports success while the namespace is still
+              // Terminating, and an immediate redeploy is rejected with
+              // "unable to create new content in namespace ... because it is
+              // being terminated". If the wait times out, an operator torn
+              // down mid-finalization has usually orphaned a finalizer the
+              // pre-delete sweep didn't catch; strip whatever the namespace's
+              // own conditions report as remaining and wait again.
+              let gone = await waitForNamespaceDeletion(namespace, 5 * 60_000);
+              if (!gone) {
+                await forceReleaseStuckNamespaceFinalizers(namespace);
+                gone = await waitForNamespaceDeletion(namespace, 2 * 60_000);
+              }
+              if (!gone) {
+                throw new Error(`Namespace ${namespace} is stuck terminating`);
+              }
               setStatus((s) => ({ ...s, namespace: "success" }));
             } catch {
               setStatus((s) => ({ ...s, namespace: "error" }));

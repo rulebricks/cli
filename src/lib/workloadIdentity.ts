@@ -504,6 +504,52 @@ export async function ensureWorkloadIdentityFederation(
   }
 }
 
+export interface ClusterAutoscalerIdentityCheck {
+  ok: boolean;
+  skipped?: string;
+}
+
+/**
+ * Whether the chart's cluster-autoscaler (enabled on AWS) will actually get
+ * AWS credentials: either deploy can bind the conventional cluster-setup role
+ * (<cluster>-cluster-autoscaler), or an association for the fixed
+ * "cluster-autoscaler" SA already exists in the namespace (manually managed,
+ * e.g. BYO clusters). Without either, the autoscaler pod fatally crashloops
+ * on "no EC2 IMDS role found" and blocks helm --wait until the timeout, so
+ * deploy disables the autoscaler in the generated values instead. Fail-open:
+ * a failed association listing reports ok so transient IAM/API errors never
+ * flip a working deploy.
+ */
+export async function verifyClusterAutoscalerIdentity(
+  config: DeploymentConfig,
+): Promise<ClusterAutoscalerIdentityCheck> {
+  if (config.infrastructure.provider !== "aws") {
+    return { ok: true, skipped: "autoscaler identity is AWS-only" };
+  }
+  const cluster = config.infrastructure.clusterName;
+  const region = config.infrastructure.region;
+  if (!cluster || !region) {
+    // generateClusterAutoscaler disables the autoscaler in this case anyway.
+    return { ok: true, skipped: "missing EKS cluster name or region" };
+  }
+
+  const role = await deriveConventionalAwsClusterAutoscalerRole(config);
+  if (role) return { ok: true };
+
+  const namespace = getNamespace(config.name);
+  const listRes = await run(
+    `aws eks list-pod-identity-associations --cluster-name ${shq(cluster)} ` +
+      `--namespace ${shq(namespace)} --service-account cluster-autoscaler ` +
+      `--region ${shq(region)} --query "associations | length(@)" --output text`,
+    { intent: "Configure workload identity (AWS)", provider: "aws" },
+  );
+  if (listRes.code !== 0) {
+    return { ok: true, skipped: "could not list associations" };
+  }
+  const count = listRes.stdout.trim();
+  return { ok: count !== "0" && count !== "" };
+}
+
 export interface KafkaIdentityVerification {
   ok: boolean;
   missing: string[];

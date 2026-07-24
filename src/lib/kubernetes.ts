@@ -1378,6 +1378,7 @@ export async function deletePVCs(
 const FINALIZER_BLOCKING_CR_TYPES = [
   "scaledobjects.keda.sh",
   "scaledjobs.keda.sh",
+  "triggerauthentications.keda.sh",
   "challenges.acme.cert-manager.io",
   "orders.acme.cert-manager.io",
   "certificaterequests.cert-manager.io",
@@ -1507,6 +1508,152 @@ export async function namespaceExists(namespace: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** The namespace's lifecycle phase; "absent" when it does not exist. */
+export async function getNamespacePhase(
+  namespace: string,
+): Promise<"active" | "terminating" | "absent"> {
+  try {
+    const { stdout } = await execa(
+      "kubectl",
+      ["get", "namespace", namespace, "-o", "json"],
+      { timeout: 15000 },
+    );
+    const parsed = JSON.parse(stdout) as {
+      metadata?: { deletionTimestamp?: string };
+      status?: { phase?: string };
+    };
+    return parsed.metadata?.deletionTimestamp ||
+      parsed.status?.phase === "Terminating"
+      ? "terminating"
+      : "active";
+  } catch (error) {
+    const errorMsg =
+      (error as ExecaError).stderr || (error as ExecaError).message || "";
+    if (errorMsg.includes("not found")) return "absent";
+    throw new Error(`Failed to read namespace ${namespace}:\n${getErrorMessage(error)}`);
+  }
+}
+
+/**
+ * Blocks until the namespace is fully deleted (namespace deletion is
+ * asynchronous: `kubectl delete ns` returns while contents still finalize).
+ * Returns false on timeout - typically NamespaceFinalizersRemaining, see
+ * forceReleaseStuckNamespaceFinalizers.
+ */
+export async function waitForNamespaceDeletion(
+  namespace: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  try {
+    await execa(
+      "kubectl",
+      [
+        "wait",
+        "--for=delete",
+        `namespace/${namespace}`,
+        `--timeout=${Math.ceil(timeoutMs / 1000)}s`,
+      ],
+      { timeout: timeoutMs + 15000 },
+    );
+    return true;
+  } catch (error) {
+    const errorMsg =
+      (error as ExecaError).stderr || (error as ExecaError).message || "";
+    // Already gone before the wait started.
+    if (errorMsg.includes("not found")) return true;
+    return false;
+  }
+}
+
+/**
+ * Rescues a namespace wedged in Terminating by orphaned finalizers: reads the
+ * remaining resource types straight from the namespace's own status conditions
+ * (e.g. NamespaceContentRemaining: "triggerauthentications.keda.sh has 1
+ * resource instances") and strips finalizers from every remaining instance.
+ * This generalizes the fixed removeBlockingFinalizers list: the controllers
+ * that would have finalized these objects were torn down with the release, so
+ * nothing else ever will. Best-effort; returns the types it processed.
+ */
+export async function forceReleaseStuckNamespaceFinalizers(
+  namespace: string,
+): Promise<string[]> {
+  let messages: string[] = [];
+  try {
+    const { stdout } = await execa(
+      "kubectl",
+      ["get", "namespace", namespace, "-o", "json"],
+      { timeout: 15000 },
+    );
+    const parsed = JSON.parse(stdout) as {
+      status?: {
+        conditions?: Array<{ type?: string; status?: string; message?: string }>;
+      };
+    };
+    messages = (parsed.status?.conditions ?? [])
+      .filter(
+        (c) =>
+          c.status === "True" &&
+          (c.type === "NamespaceContentRemaining" ||
+            c.type === "NamespaceFinalizersRemaining"),
+      )
+      .map((c) => c.message ?? "");
+  } catch {
+    // Namespace already gone or unreadable; nothing to rescue.
+    return [];
+  }
+
+  const types = new Set<string>();
+  for (const message of messages) {
+    for (const match of message.matchAll(
+      /([a-z0-9-]+(?:\.[a-z0-9-]+)+) has \d+ resource instances/gi,
+    )) {
+      types.add(match[1]);
+    }
+  }
+
+  const processed: string[] = [];
+  for (const resourceType of types) {
+    try {
+      const { stdout } = await execa(
+        "kubectl",
+        [
+          "get",
+          resourceType,
+          "-n",
+          namespace,
+          "-o",
+          "jsonpath={.items[*].metadata.name}",
+        ],
+        { timeout: 15000 },
+      );
+      for (const name of stdout.split(" ").filter(Boolean)) {
+        try {
+          await execa(
+            "kubectl",
+            [
+              "patch",
+              resourceType,
+              name,
+              "-n",
+              namespace,
+              "-p",
+              '{"metadata":{"finalizers":null}}',
+              "--type=merge",
+            ],
+            { timeout: 15000 },
+          );
+        } catch {
+          // Object already deleted between listing and patching.
+        }
+      }
+      processed.push(resourceType);
+    } catch {
+      // CRD gone or listing failed; nothing to strip for this type.
+    }
+  }
+  return processed;
 }
 
 /**

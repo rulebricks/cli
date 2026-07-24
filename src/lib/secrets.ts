@@ -12,6 +12,11 @@ import {
   deriveRealtimeSecrets,
   deploymentSecretNames,
 } from "./helmValues.js";
+import {
+  forceReleaseStuckNamespaceFinalizers,
+  getNamespacePhase,
+  waitForNamespaceDeletion,
+} from "./kubernetes.js";
 
 export interface K8sSecretManifest {
   name: string;
@@ -149,8 +154,27 @@ function secretManifest(
  * Idempotently ensure the namespace exists so Secrets can be applied before Helm
  * runs (`helm upgrade --install --create-namespace` also creates it, but that
  * happens after this step).
+ *
+ * A namespace left Terminating by a recent destroy rejects all new content
+ * ("unable to create new content in namespace ... because it is being
+ * terminated"), so wait out the deletion first - rescuing orphaned finalizers
+ * if it wedges - and recreate fresh.
  */
 export async function ensureNamespace(namespace: string): Promise<void> {
+  if ((await getNamespacePhase(namespace)) === "terminating") {
+    let gone = await waitForNamespaceDeletion(namespace, 5 * 60_000);
+    if (!gone) {
+      await forceReleaseStuckNamespaceFinalizers(namespace);
+      gone = await waitForNamespaceDeletion(namespace, 2 * 60_000);
+    }
+    if (!gone) {
+      throw new Error(
+        `Namespace ${namespace} is stuck terminating (a previous destroy has not finished); ` +
+          `inspect 'kubectl get namespace ${namespace} -o yaml' conditions and retry.`,
+      );
+    }
+  }
+
   const manifest = {
     apiVersion: "v1",
     kind: "Namespace",
