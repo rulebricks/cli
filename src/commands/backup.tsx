@@ -18,7 +18,12 @@ import {
   isKubectlInstalled,
   waitForJobComplete,
 } from "../lib/kubernetes.js";
-import { DeploymentConfig, getNamespace, getReleaseName } from "../types/index.js";
+import {
+  DeploymentConfig,
+  getNamespace,
+  getReleaseName,
+  usesInClusterPostgres,
+} from "../types/index.js";
 
 interface BackupCommandProps {
   name: string;
@@ -84,6 +89,16 @@ function BackupCommandInner({ name }: BackupCommandProps) {
   function validateConfig(config: DeploymentConfig) {
     if (config.database.type !== "self-hosted") {
       throw new Error("Backups are only available for self-hosted Supabase.");
+    }
+    if (!usesInClusterPostgres(config)) {
+      // Without this check the command finds no <release>-db-backup CronJob
+      // (generateBackupValues disables it in external mode) and dies with a
+      // raw kubectl "not found" instead of an explanation.
+      throw new Error(
+        "This deployment uses an external managed Postgres, so chart-managed " +
+          "backups are disabled. Use your database provider's backup features " +
+          "instead (e.g. RDS automated backups / snapshots).",
+      );
     }
     if (!config.storage) {
       throw new Error("Shared object storage is required for database backups.");

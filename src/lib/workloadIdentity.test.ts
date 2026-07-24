@@ -295,6 +295,43 @@ test("AWS federation removal skips without cluster name or region", async () => 
   assert.equal(outcome.skipped, "missing EKS cluster name or region");
 });
 
+test("backup SA binding follows the chart's backup CronJob, not just backup.enabled", () => {
+  const base = {
+    name: "aws-p1",
+    infrastructure: { provider: "aws", region: "us-east-1" },
+    database: { type: "self-hosted" },
+    features: { monitoring: {} },
+    backup: { enabled: true, schedule: "0 2 * * *", retentionDays: 7 },
+    storage: {
+      provider: "s3",
+      bucket: "b",
+      awsIamRoleArn: "arn:aws:iam::123456789012:role/rulebricks-cluster-rulebricks",
+    },
+  };
+
+  // In-cluster Postgres: the chart deploys the backup CronJob, so its SA binds.
+  const inCluster = base as unknown as DeploymentConfig;
+  assert.ok(
+    plannedBindings(inCluster)
+      .map((b) => b.serviceAccount)
+      .includes("rulebricks-aws-p1-backup"),
+  );
+
+  // External managed Postgres: generateBackupValues disables the CronJob, so
+  // binding the -backup SA would be dead trust for a nonexistent SA.
+  const externalPg = {
+    ...base,
+    externalServices: {
+      postgres: { mode: "external", external: { provider: "aws", host: "h" } },
+    },
+  } as unknown as DeploymentConfig;
+  assert.ok(
+    !plannedBindings(externalPg)
+      .map((b) => b.serviceAccount)
+      .includes("rulebricks-aws-p1-backup"),
+  );
+});
+
 test("embedded kafka creates no HPS/worker kafka bindings", () => {
   const cfg = {
     name: "aws-p1",

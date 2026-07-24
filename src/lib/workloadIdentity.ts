@@ -21,6 +21,7 @@ import {
   DeploymentConfig,
   getNamespace,
   getReleaseName,
+  usesInClusterPostgres,
 } from "../types/index.js";
 import { approveCloudCommandOrThrow } from "./commandApproval.js";
 
@@ -313,7 +314,11 @@ export function plannedBindings(config: DeploymentConfig): SubjectBinding[] {
       serviceAccount: `${releaseName}-clickhouse`,
       principal: storagePrincipal,
     });
-    if (config.backup?.enabled && config.database.type === "self-hosted") {
+    // Only when the chart actually deploys the backup CronJob: with an
+    // external managed database, generateBackupValues disables backups (the
+    // provider owns them), so binding the -backup SA would create dead trust
+    // for a ServiceAccount that never exists.
+    if (config.backup?.enabled && usesInClusterPostgres(config)) {
       bindings.push({
         serviceAccount: `${releaseName}-backup`,
         principal: storagePrincipal,

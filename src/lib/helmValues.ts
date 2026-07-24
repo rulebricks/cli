@@ -4,6 +4,7 @@ import {
   isSupportedDnsProvider,
   RemoteWriteConfig,
   SecretKeyRef,
+  usesInClusterPostgres,
   validateRemoteWriteConfig,
 } from "../types/index.js";
 import {
@@ -1093,11 +1094,8 @@ const BURST_POOL_NODE_PREFERENCE: Record<string, unknown> = {
 };
 
 function generateBackupValues(config: DeploymentConfig): Record<string, unknown> {
-  const usesInClusterPostgres =
-    config.database.type === "self-hosted" &&
-    config.externalServices?.postgres?.mode !== "external";
   const enabled =
-    usesInClusterPostgres && config.backup?.enabled === true;
+    usesInClusterPostgres(config) && config.backup?.enabled === true;
 
   // The backup CronJob streams pg_dump from the running DB (using supabase.db.image)
   // and uploads it with rclone, so no backup-specific image is needed here. The

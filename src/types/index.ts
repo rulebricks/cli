@@ -1249,6 +1249,21 @@ export function getReleaseName(deploymentName: string): string {
   return `rulebricks-${deploymentName}`;
 }
 
+/**
+ * True when the chart owns the in-cluster Postgres: self-hosted Supabase
+ * WITHOUT an external managed database. Chart-managed pg_dump backups only
+ * exist in this mode - managed instances (RDS / Azure Flexible Server /
+ * Cloud SQL) own their own backups. Shared by values generation
+ * (generateBackupValues), workload-identity planning (the backup SA binding),
+ * and the backup command's preflight so the three can never drift.
+ */
+export function usesInClusterPostgres(config: DeploymentConfig): boolean {
+  return (
+    config.database.type === "self-hosted" &&
+    config.externalServices?.postgres?.mode !== "external"
+  );
+}
+
 // ============================================================================
 // Benchmark Types
 // ============================================================================
