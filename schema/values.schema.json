@@ -1246,7 +1246,8 @@
             "host": { "type": "string" },
             "port": { "type": "string", "default": "5432" },
             "existingSecret": { "type": "string" },
-            "existingSecretKey": { "type": "string", "default": "password" }
+            "existingSecretKey": { "type": "string", "default": "password" },
+            "existingSecretUserKey": { "type": "string" }
           }
         }
       }

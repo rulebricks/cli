@@ -1,6 +1,7 @@
 import { execa, ExecaError } from "execa";
 import { HELM_CHART_OCI, ChartVersion } from "../types/index.js";
 import { getHelmValuesPath } from "./config.js";
+import { deletePVCs } from "./kubernetes.js";
 
 /**
  * Extracts meaningful error message from execa error
@@ -280,6 +281,59 @@ interface HelmHistoryEntry {
 }
 
 /**
+ * Latest revision status for a release, or undefined when it has none.
+ * Used by the stranded-release recovery to pick the right cleanup: helm can
+ * uninstall failed/pending releases, but a record stuck in "uninstalling"
+ * (a previous uninstall was interrupted) makes `helm uninstall` hang forever,
+ * so that state is cleared by deleting the release-record Secrets instead.
+ */
+async function latestReleaseStatus(
+  releaseName: string,
+  namespace: string,
+): Promise<string | undefined> {
+  try {
+    const { stdout } = await execa(
+      "helm",
+      ["history", releaseName, "--namespace", namespace, "--output", "json"],
+      { timeout: 30000 },
+    );
+    const entries = JSON.parse(stdout) as HelmHistoryEntry[];
+    return Array.isArray(entries) && entries.length > 0
+      ? entries[entries.length - 1].status
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Removes the release-record Secrets (sh.helm.release.v1.<name>.vN) for a
+ * release whose uninstall was interrupted and left the record wedged in
+ * "uninstalling": helm refuses to install over it, upgrade fails with "has
+ * no deployed releases", and re-running uninstall hangs. The release's
+ * RESOURCES were already deleted by the interrupted uninstall (or will be
+ * replaced by the fresh install of the same manifests).
+ */
+async function deleteReleaseRecords(
+  releaseName: string,
+  namespace: string,
+): Promise<void> {
+  await execa(
+    "kubectl",
+    [
+      "delete",
+      "secret",
+      "--namespace",
+      namespace,
+      "--selector",
+      `owner=helm,name=${releaseName}`,
+      "--ignore-not-found",
+    ],
+    { timeout: 60000 },
+  );
+}
+
+/**
  * True when an existing release is stranded where `helm upgrade --install`
  * cannot act: no revision was ever deployed, because the FIRST install failed
  * (e.g. its --wait timed out) or a helm process died mid-install and left
@@ -314,7 +368,15 @@ async function isReleaseStrandedBeforeFirstDeploy(
     );
     if (everDeployed) return false;
     const latest = entries[entries.length - 1];
-    return latest.status === "failed" || latest.status === "pending-install";
+    // "uninstalling" appears when a previous uninstall was interrupted (e.g.
+    // process killed mid-wait): resources may be gone but the record stays,
+    // and helm can neither install over it nor upgrade it. Re-running
+    // uninstall clears it.
+    return (
+      latest.status === "failed" ||
+      latest.status === "pending-install" ||
+      latest.status === "uninstalling"
+    );
   } catch {
     return false;
   }
@@ -352,13 +414,52 @@ export async function installOrUpgradeChart(
   } = options;
 
   if (await isReleaseStrandedBeforeFirstDeploy(releaseName, namespace)) {
-    // Wait for resource deletion so the fresh install below never races
-    // still-terminating objects from the dead release.
-    await uninstallChart(releaseName, namespace, {
-      wait: true,
-      timeout: "10m",
-      processTimeoutMs: 10 * 60_000,
-    });
+    if ((await latestReleaseStatus(releaseName, namespace)) === "uninstalling") {
+      // A previous uninstall was interrupted: resources are gone but the
+      // record is wedged, and `helm uninstall` on it hangs forever. Clear
+      // the record directly.
+      await deleteReleaseRecords(releaseName, namespace);
+    } else {
+      // Wait for resource deletion so the fresh install below never races
+      // still-terminating objects from the dead release.
+      await uninstallChart(releaseName, namespace, {
+        wait: true,
+        timeout: "15m",
+        processTimeoutMs: 15 * 60_000,
+      });
+    }
+    // uninstallChart tolerates process timeouts (destroy semantics), so the
+    // uninstall may still be running here. Installing while release records
+    // exist fails with "has no deployed releases" - poll until they are gone
+    // before proceeding, and fail with a real message instead if they aren't.
+    const deadline = Date.now() + 5 * 60_000;
+    for (;;) {
+      try {
+        await execa(
+          "helm",
+          ["status", releaseName, "--namespace", namespace],
+          { timeout: 30000 },
+        );
+      } catch {
+        // Release records gone: safe to install fresh.
+        break;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(
+          `Release ${releaseName} is still uninstalling after its stranded ` +
+            `first install; wait for 'helm status ${releaseName} -n ${namespace}' ` +
+            `to report "not found", then rerun the deploy.`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+    }
+    // Stranded-before-first-deploy means the release NEVER worked, so its
+    // PVCs hold nothing worth keeping - and leaving them poisons the fresh
+    // install: StatefulSets re-adopt the old volumes, and e.g. Kafka refuses
+    // to start on data formatted with the previous install's cluster ID
+    // ("Invalid cluster.id in .../meta.properties" crashloop). The namespace
+    // is exclusively this deployment's.
+    await deletePVCs(namespace);
   }
 
   const valuesPath = getHelmValuesPath(deploymentName);

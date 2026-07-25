@@ -2464,7 +2464,16 @@ export function buildHelmValues(
                         masterUsername:
                           pgExt.bootstrap?.masterUsername ?? "postgres",
                         masterPassword: pgExt.bootstrap?.masterPassword ?? "",
-                        appRole: pgExt.bootstrap?.appRole ?? "postgres",
+                        // The migration hook authenticates as the MASTER (see
+                        // migrations.externalDb below), so the bootstrap
+                        // privilege bridge (publication ownership, auth-admin
+                        // membership, CREATE on public) must target that role.
+                        // Defaulting to masterUsername keeps them aligned on
+                        // providers whose admin is not named "postgres".
+                        appRole:
+                          pgExt.bootstrap?.appRole ??
+                          pgExt.bootstrap?.masterUsername ??
+                          "postgres",
                       },
                     },
                   }
@@ -2764,9 +2773,14 @@ export function buildHelmValues(
         // password (bootstrap.sql runs "as the master user (named postgres)").
         // So the migrate hook must authenticate with the MASTER credential, not
         // the service password in <release>-supabase-db (that would 401). Point
-        // DB_PASSWORD at the bootstrap Secret's master-password.
+        // DB_PASSWORD at the bootstrap Secret's master-password - and DB_USER
+        // at master-username from the SAME Secret: only on AWS RDS is the
+        // master literally named "postgres", so pairing the db Secret's
+        // username with the master password fails authentication on Azure
+        // Flexible Server / Cloud SQL (custom admin names).
         existingSecret: deploymentSecretNames(config).dbBootstrap,
         existingSecretKey: "master-password",
+        existingSecretUserKey: "master-username",
       },
     };
   }
