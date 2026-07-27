@@ -2749,9 +2749,12 @@ export function buildHelmValues(
               },
             },
           },
-          remoteWrite: [
-            ...(clickStackEnabled ? [] : generateRemoteWriteSpec(config)),
-          ],
+          // Remote write is independent of built-in observability: ClickStack
+          // mirrors metrics for its own dashboards via the OTel collector,
+          // while remote_write simultaneously delivers them to the customer's
+          // backend (Azure Managed Prometheus/Grafana, AMP, Grafana Cloud).
+          // generateRemoteWriteSpec returns [] when no export is configured.
+          remoteWrite: generateRemoteWriteSpec(config),
         },
       },
     },

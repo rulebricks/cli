@@ -21,16 +21,16 @@ variable "region" {
 variable "cluster_name" {
   description = <<-EOT
     Name prefix for every resource. The Rulebricks CLI wizard preselects
-    resources named <cluster>-rulebricks (service account) and <cluster>-data
+    resources named <cluster>-data-access (service account) and <cluster>-data
     (bucket), so keep the convention if you rename. Keep it short: service
-    account IDs cap at 30 chars ("<cluster>-rulebricks" must fit).
+    account IDs cap at 30 chars ("<cluster>-data-access" must fit).
   EOT
   type        = string
   default     = "rulebricks-cluster"
 
   validation {
-    condition     = length(var.cluster_name) <= 19
-    error_message = "cluster_name must be <= 19 chars so \"<cluster>-rulebricks\" fits the 30-char service account ID limit."
+    condition     = length(var.cluster_name) <= 18
+    error_message = "cluster_name must be <= 18 chars so \"<cluster>-data-access\" fits the 30-char service account ID limit."
   }
 }
 

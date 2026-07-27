@@ -370,6 +370,7 @@ export function StorageStep({
             )
           }
           initialValue={bucket || undefined}
+          preferRecommended={!state.configLoaded}
           onSelect={(value) => {
             setBucket(value);
             saveStorage({ storageBucket: value });
@@ -416,7 +417,7 @@ export function StorageStep({
       render: (flow) => (
         <DiscoveredSelect
           label="Select the Rulebricks IAM role"
-          hint={`The single role from cluster-setup (${state.clusterName || "<cluster>"}-rulebricks), used for all cloud access: ${cloudAccessPurpose}.`}
+          hint={`The single role from cluster-setup (${state.clusterName || "<cluster>"}-data-access), used for all cloud access: ${cloudAccessPurpose}.`}
           loadingLabel="Loading IAM roles..."
           emptyHint="None found. Press R to refresh or enter an ARN manually."
           load={async () => {
@@ -439,8 +440,9 @@ export function StorageStep({
               { provider: "aws", clusterName: state.clusterName },
             )
           }
-          noRecommendationNotice={`No ${state.clusterName || "<cluster>"}-rulebricks role found. If this cluster wasn't created by Rulebricks cluster-setup, create the role first (see cluster-setup/aws/README, "Bring your own cluster") or enter its ARN manually.`}
+          noRecommendationNotice={`No ${state.clusterName || "<cluster>"}-data-access role found. If this cluster wasn't created by Rulebricks cluster-setup, create the role first (see cluster-setup/aws/README, "Bring your own cluster") or enter its ARN manually.`}
           initialValue={roleArn || undefined}
+          preferRecommended={!state.configLoaded}
           onSelect={(value) => {
             setRoleArn(value);
             saveStorage({ storageAwsIamRoleArn: value });
@@ -503,8 +505,9 @@ export function StorageStep({
               { provider: "gcp", clusterName: state.clusterName },
             )
           }
-          noRecommendationNotice={`No ${state.clusterName || "<cluster>"}-rulebricks service account found. If this cluster wasn't created by Rulebricks cluster-setup, create it first (see cluster-setup/gcp/README) or enter its email manually.`}
+          noRecommendationNotice={`No ${state.clusterName || "<cluster>"}-data-access service account found. If this cluster wasn't created by Rulebricks cluster-setup, create it first (see cluster-setup/gcp/README) or enter its email manually.`}
           initialValue={gcpServiceAccount || undefined}
+          preferRecommended={!state.configLoaded}
           onSelect={(value) => {
             setGcpServiceAccount(value);
             saveStorage({ storageGcpServiceAccountEmail: value });
@@ -564,6 +567,7 @@ export function StorageStep({
             )
           }
           initialValue={azureContainer || undefined}
+          preferRecommended={!state.configLoaded}
           onSelect={(value) => {
             setAzureContainer(value);
             saveStorage({ storageAzureBlobContainer: value });
@@ -626,7 +630,7 @@ export function StorageStep({
       render: (flow) => (
         <DiscoveredSelect
           label="Select the Rulebricks workload identity"
-          hint={`The single identity from cluster-setup (${state.clusterName || "<cluster>"}-rulebricks), used for all cloud access: ${cloudAccessPurpose}.`}
+          hint={`The single identity from cluster-setup (${state.clusterName || "<cluster>"}-data-access), used for all cloud access: ${cloudAccessPurpose}.`}
           loadingLabel="Loading managed identities..."
           emptyHint="None found. Press R to refresh or enter a client ID manually."
           load={async () => {
@@ -652,8 +656,9 @@ export function StorageStep({
               { provider: "azure", clusterName: state.clusterName },
             )
           }
-          noRecommendationNotice={`No ${state.clusterName || "<cluster>"}-rulebricks identity found. If this cluster wasn't created by Rulebricks cluster-setup, create the identity first (see cluster-setup/azure/README) or enter its client ID manually.`}
+          noRecommendationNotice={`No ${state.clusterName || "<cluster>"}-data-access identity found. If this cluster wasn't created by Rulebricks cluster-setup, create the identity first (see cluster-setup/azure/README) or enter its client ID manually.`}
           initialValue={azureClientId || undefined}
+          preferRecommended={!state.configLoaded}
           onSelect={(value) => {
             setAzureClientId(value);
             saveStorage({ storageAzureBlobClientId: value });

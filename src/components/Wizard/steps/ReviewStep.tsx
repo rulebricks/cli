@@ -79,10 +79,16 @@ export function ReviewStep({
       ? `${state.storageClass} (${Math.ceil(state.totalPersistentStorageGi)} Gi reported available)`
       : `${state.storageClass} (dynamic PVC provisioning)`
     : '';
+  const metricsExportDestination =
+    state.metricsExportEnabled && state.prometheusRemoteWriteDestination
+      ? state.prometheusRemoteWriteDestination
+      : null;
   const monitoringDestination = state.clickStackEnabled
-    ? 'Prometheus + in-cluster ClickStack metrics mirror'
-    : state.metricsExportEnabled && state.prometheusRemoteWriteDestination
-      ? `Remote write: ${state.prometheusRemoteWriteDestination}`
+    ? metricsExportDestination
+      ? `Prometheus + ClickStack mirror + remote write: ${metricsExportDestination}`
+      : 'Prometheus + in-cluster ClickStack metrics mirror'
+    : metricsExportDestination
+      ? `Remote write: ${metricsExportDestination}`
       : 'In-cluster Prometheus (no remote write)';
   const storageAuthValue =
     state.storageProvider === 's3'

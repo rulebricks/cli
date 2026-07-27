@@ -63,7 +63,7 @@ resource "google_container_cluster" "main" {
   }
 
   # HARD REQUIREMENT: the Rulebricks CLI federates Kubernetes service
-  # accounts to the <cluster>-rulebricks Google service account through this
+  # accounts to the <cluster>-data-access Google service account through this
   # pool at deploy time (keyless GCS/monitoring auth).
   workload_identity_config {
     workload_pool = "${var.project_id}.svc.id.goog"

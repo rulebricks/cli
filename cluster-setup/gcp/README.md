@@ -17,7 +17,7 @@ Cluster:
 | --- | --- | --- |
 | `project_id` | — (required) | Target GCP project |
 | `region` | `us-central1` | Region for all resources |
-| `cluster_name` | `rulebricks-cluster` | Prefixes every resource name; the CLI preselects `<cluster>-rulebricks` / `<cluster>-data-*` by convention |
+| `cluster_name` | `rulebricks-cluster` | Prefixes every resource name; the CLI preselects `<cluster>-data-access` / `<cluster>-data-*` by convention |
 | `kubernetes_version` | `1.34` | GKE version prefix |
 | `cluster_deletion_protection` | `true` | Blocks `terraform destroy`; set `false` before teardown |
 
@@ -74,7 +74,7 @@ Always created:
 | Node service account | `google_service_account` | `<cluster>-nodes` + 5 least-privilege project roles (logging, monitoring, artifact registry) |
 | GKE cluster | `google_container_cluster` | `<cluster>`; private nodes, Dataplane V2, Workload Identity pool `<project>.svc.id.goog` |
 | Node pools | `google_container_node_pool` x2 | `core` (3-6 nodes), `burst` (0-N, taint `rulebricks.com/pool=burst`, when `enable_burst_pool`) |
-| Rulebricks service account | `google_service_account` | `<cluster>-rulebricks`; the single workload identity the CLI binds at deploy time |
+| Rulebricks service account | `google_service_account` | `<cluster>-data-access`; the single workload identity the CLI binds at deploy time |
 | External Secrets service account | `google_service_account` | `<cluster>-secrets` (when `enable_external_secrets`, default on); read-only on Secret Manager entries whose IDs start with `secrets_prefix` (default `rulebricks`). The CLI's secrets step seeds entries like `rulebricks-<deployment>-app` and binds the ESO reader ServiceAccount to this GSA at deploy time |
 | Data bucket | `google_storage_bucket` | `<cluster>-data-<project>`; uniform access, public access prevented; `roles/storage.objectAdmin` for the Rulebricks SA |
 
@@ -110,9 +110,9 @@ gcloud container clusters update <cluster> --location <region> \
 2. A dedicated Google service account with object access on your bucket — never the default compute SA:
 
 ```bash
-gcloud iam service-accounts create <cluster>-rulebricks --project <project>
+gcloud iam service-accounts create <cluster>-data-access --project <project>
 gcloud storage buckets add-iam-policy-binding gs://<bucket> \
-  --member "serviceAccount:<cluster>-rulebricks@<project>.iam.gserviceaccount.com" \
+  --member "serviceAccount:<cluster>-data-access@<project>.iam.gserviceaccount.com" \
   --role roles/storage.objectAdmin
 ```
 

@@ -693,7 +693,8 @@ function DeployCommandInner({
     // AWS MSK IAM without Pod Identity credentials wedges the topic-provision
     // pre-install hook until the helm timeout ("no EC2 IMDS role found"), so
     // fail in seconds here instead. Deploy covers the common case itself by
-    // deriving the cluster-setup role (<cluster>-rulebricks); this only fires
+    // deriving the cluster-setup role (<cluster>-data-access, or the earlier
+    // <cluster>-rulebricks name); this only fires
     // when that role is absent AND no manually-managed associations exist.
     const kafkaIdentity = await verifyManualKafkaAssociations(cfg);
     if (!kafkaIdentity.ok) {
@@ -706,12 +707,12 @@ function DeployCommandInner({
           kafkaIdentity.missing.map((sa) => `  - ${namespace}/${sa}`).join("\n") +
           "\nWithout them, topic provisioning and HPS cannot reach the broker " +
           "and the install hangs until the helm timeout.\n\n" +
-          `The cluster-setup role (${cluster}-rulebricks) was not found (or its ` +
+          `The cluster-setup role (${cluster}-data-access) was not found (or its ` +
           "trust policy does not allow pods.eks.amazonaws.com), and no existing " +
           "Pod Identity associations cover these service accounts.\n\n" +
           "Fix one of:\n" +
           "  - Run the Rulebricks AWS cluster-setup stack, which provisions the " +
-          `${cluster}-rulebricks role deploy binds automatically.\n` +
+          `${cluster}-data-access role deploy binds automatically.\n` +
           "  - Set externalServices.kafka.external.identity.awsRoleArn in " +
           "config.yaml to a Pod Identity-capable role with MSK access.\n" +
           "  - Create the associations yourself, e.g.:\n" +

@@ -2,8 +2,45 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   filterAzureWorkloadIdentities,
+  findClusterSetupDefault,
   isAwsInfrastructureRoleName,
 } from "./clusterSetupDefaults.js";
+
+test("prefers the -data-access identity over the legacy -rulebricks name", () => {
+  // A cluster redeployed with current templates can have both generations of
+  // the identity side by side; the new name must win.
+  const candidates = [
+    "rulebricks-cluster-external-secrets",
+    "rulebricks-cluster-rulebricks",
+    "rulebricks-cluster-data-access",
+  ];
+  for (const category of [
+    "decision-logs-identity",
+    "backups-identity",
+    "metrics-identity",
+  ] as const) {
+    assert.equal(
+      findClusterSetupDefault(candidates, category, {
+        clusterName: "rulebricks-cluster",
+      }),
+      "rulebricks-cluster-data-access",
+      category,
+    );
+  }
+});
+
+test("still resolves the legacy -rulebricks identity on existing clusters", () => {
+  const candidates = [
+    "rulebricks-cluster-external-dns",
+    "rulebricks-cluster-rulebricks",
+  ];
+  assert.equal(
+    findClusterSetupDefault(candidates, "backups-identity", {
+      clusterName: "rulebricks-cluster",
+    }),
+    "rulebricks-cluster-rulebricks",
+  );
+});
 
 test("flags EKS infrastructure roles across provisioning conventions", () => {
   const infraRoles = [

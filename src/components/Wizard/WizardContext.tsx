@@ -30,6 +30,13 @@ import { generateSecureSecret } from "../../lib/validation.js";
 export interface WizardState {
   name: string;
 
+  // True when the state was hydrated from a deployment's config (configure
+  // mode): saved values are the deployment's actual settings and outrank
+  // recommendations for preselection. False on a fresh init, where saved
+  // values are only profile memory from previous deployments and
+  // recommendations win.
+  configLoaded: boolean;
+
   // Infrastructure
   provider: CloudProvider | null;
   region: string;
@@ -472,6 +479,7 @@ type WizardAction =
 function getInitialState(profile?: ProfileConfig | null): WizardState {
   return {
     name: "",
+    configLoaded: false,
 
     // Infrastructure - pre-populate from profile
     provider: profile?.provider ?? null,
@@ -1084,7 +1092,7 @@ export function collectConfigIssues(state: WizardState): string[] {
     }
   }
 
-  if (!state.clickStackEnabled && state.metricsExportEnabled) {
+  if (state.metricsExportEnabled) {
     const remoteWrite = buildRemoteWriteFromState(state);
     if (!remoteWrite) {
       issues.push(
@@ -1143,7 +1151,7 @@ function collectCrossProviderIssues(state: WizardState): string[] {
     }
   }
 
-  if (!state.clickStackEnabled && state.metricsExportEnabled) {
+  if (state.metricsExportEnabled) {
     if (
       state.prometheusRemoteWriteDestination === "aws-amp" &&
       provider !== "aws"
@@ -1188,6 +1196,7 @@ export function configToWizardState(
 
   return {
     ...base,
+    configLoaded: true,
     name: config.name,
     provider: config.infrastructure.provider ?? base.provider,
     region: config.infrastructure.region ?? base.region,
@@ -1578,11 +1587,7 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
     case "SET_SSO_CONFIG":
       return { ...state, ...action.config };
     case "SET_METRICS_EXPORT":
-      return {
-        ...state,
-        clickStackEnabled: action.enabled ? false : state.clickStackEnabled,
-        metricsExportEnabled: action.enabled,
-      };
+      return { ...state, metricsExportEnabled: action.enabled };
     case "SET_PROMETHEUS_REMOTE_WRITE":
       return { ...state, prometheusRemoteWriteUrl: action.url };
     case "SET_PROMETHEUS_REMOTE_WRITE_CONFIG":
@@ -1604,10 +1609,13 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
     case "SET_SECRETS_CONFIG":
       return { ...state, ...action.config };
     case "SET_CLICKSTACK_ENABLED":
+      // Metrics export is NOT cleared: remote_write coexists with ClickStack
+      // (mirrored metrics in-cluster, exported metrics to the customer's own
+      // backend). BYO tracing/app-logs remain exclusive - ClickStack is the
+      // in-cluster destination for those signals.
       return {
         ...state,
         clickStackEnabled: action.enabled,
-        metricsExportEnabled: action.enabled ? false : state.metricsExportEnabled,
         tracingEnabled: action.enabled ? false : state.tracingEnabled,
         appLogsEnabled: action.enabled ? false : state.appLogsEnabled,
       };
@@ -1737,7 +1745,7 @@ export function WizardProvider({
     }
 
     const externalServices = buildExternalServices(state);
-    const remoteWrite = !state.clickStackEnabled && state.metricsExportEnabled
+    const remoteWrite = state.metricsExportEnabled
       ? buildRemoteWriteFromState(state)
       : undefined;
 
@@ -1897,7 +1905,7 @@ export function WizardProvider({
           clientSecret: state.ssoClientSecret || undefined,
         },
         monitoring: {
-          destination: !state.clickStackEnabled && state.metricsExportEnabled
+          destination: state.metricsExportEnabled
             ? state.prometheusMonitoringDestination ||
               remoteWrite?.destination ||
               undefined
@@ -1906,7 +1914,7 @@ export function WizardProvider({
               state.prometheusMonitoringDestination === "local-grafana"
               ? "local-grafana"
               : undefined,
-          remoteWriteUrl: !state.clickStackEnabled && state.metricsExportEnabled
+          remoteWriteUrl: state.metricsExportEnabled
             ? state.prometheusRemoteWriteUrl || undefined
             : undefined,
           remoteWrite,

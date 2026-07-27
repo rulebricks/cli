@@ -155,6 +155,13 @@ export interface DiscoveredSelectProps {
   /** Preselect the item with this value when present (used after recommendIndex). */
   initialValue?: string;
   /**
+   * Preselect the recommendation over initialValue when both resolve. Set on
+   * fresh-init pickers whose initialValue is only profile memory from
+   * previous deployments; configure-mode pickers keep the default (the
+   * deployment's saved value wins).
+   */
+  preferRecommended?: boolean;
+  /**
    * Shown above the list when recommendIndex finds no match and there is no
    * saved value, so the cursor landing on the first item is never mistaken
    * for a recommendation (e.g. the expected cluster-setup resource is absent).
@@ -173,6 +180,7 @@ export function DiscoveredSelect({
   manualLabel = "Enter manually…",
   recommendIndex,
   initialValue,
+  preferRecommended = false,
   noRecommendationNotice,
 }: DiscoveredSelectProps) {
   const { colors } = useTheme();
@@ -220,14 +228,12 @@ export function DiscoveredSelect({
   // Without a recommendation or saved value, pickers that declared a notice
   // land on manual entry: silently preselecting an arbitrary first item is how
   // infrastructure roles end up bound to workloads.
+  const rankedIndexes = preferRecommended
+    ? [recommended, savedIndex]
+    : [savedIndex, recommended];
   const preselect =
-    savedIndex >= 0
-      ? savedIndex
-      : recommended >= 0
-        ? recommended
-        : showNoRecommendation
-          ? items.length
-          : 0;
+    rankedIndexes.find((index) => index >= 0) ??
+    (showNoRecommendation ? items.length : 0);
   const listItems: SelectOption[] = [
     ...items.map((item, index) => ({
       label:

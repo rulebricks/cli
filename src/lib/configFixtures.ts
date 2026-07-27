@@ -23,7 +23,7 @@ function s3Storage(): StorageConfig {
   return {
     provider: "s3",
     cloudAuthMode: "workload-identity",
-    awsIamRoleArn: "arn:aws:iam::123456789012:role/rulebricks-cluster-rulebricks",
+    awsIamRoleArn: "arn:aws:iam::123456789012:role/rulebricks-cluster-data-access",
     bucket: "rulebricks-cluster-data-123456789012",
     region: "us-east-1",
     paths: { decisionLogs: "decision-logs", dbBackups: "db-backups" },
@@ -415,6 +415,21 @@ export function buildConfigMatrix(): { name: string; config: DeploymentConfig }[
         clientId: "33333333-3333-3333-3333-333333333333",
         tenantId: "22222222-2222-2222-2222-222222222222",
         clientSecretRef: { name: "azure-monitor", key: "client-secret" },
+      },
+    },
+    {
+      // Built-in ClickStack observability AND metrics export together - the
+      // common enterprise shape (Rulebricks dashboards in-cluster, metrics
+      // additionally remote-written to the ops team's Azure Managed Grafana).
+      name: "azure-clickstack-with-metrics-export",
+      provider: "azure",
+      clickStackEnabled: true,
+      remoteWrite: {
+        destination: "azure-monitor",
+        url: "https://example.eastus.metrics.ingest.monitor.azure.com/dataCollectionRules/dcr-1/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24",
+        authType: "workload-identity",
+        clientId: "33333333-3333-3333-3333-333333333333",
+        tenantId: "22222222-2222-2222-2222-222222222222",
       },
     },
     {

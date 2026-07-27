@@ -50,7 +50,7 @@ az login
 # See cluster-setup/azure/PRECHECK.md for what to confirm first
 az account set --subscription <subscription-id>
 az group create --name rulebricks-rg --location eastus
-export RB_POSTGRES_ADMIN_PASSWORD='<strong-password>'
+export POSTGRES_ADMIN_PASSWORD='<strong-password>'
 az deployment group create \
   --resource-group rulebricks-rg \
   --parameters cluster-setup/azure/parameters.bicepparam

@@ -101,9 +101,22 @@ test("feature-config appears for each enabling flag", () => {
       `expected feature-config for ${JSON.stringify(flag)}`,
     );
   }
-  // ClickStack on suppresses the BYO signal sections.
-  const suppressed = getActiveWizardSteps(
+  // Metrics export coexists with built-in ClickStack (remote_write to the
+  // customer's backend alongside the in-cluster mirror), so its
+  // feature-config section still appears.
+  const withMetrics = getActiveWizardSteps(
     stepState({ clickStackEnabled: true, metricsExportEnabled: true }),
+    "create",
+  );
+  assert.equal(withMetrics.includes("feature-config"), true);
+
+  // Tracing/app-logs remain BYO-only signals: ClickStack on suppresses them.
+  const suppressed = getActiveWizardSteps(
+    stepState({
+      clickStackEnabled: true,
+      tracingEnabled: true,
+      appLogsEnabled: true,
+    }),
     "create",
   );
   assert.equal(suppressed.includes("feature-config"), false);
@@ -299,6 +312,9 @@ function featureState(
       customEmails: false,
     },
     ssoProvider: null,
+    ssoAzureDiscovery: false,
+    ssoManualClientId: false,
+    ssoRedirectWarning: false,
     remoteWriteDestination: null,
     remoteWriteAuthType: null,
     manualRemoteWriteUrl: false,
@@ -318,6 +334,45 @@ test("google SSO skips the provider URL prompt", () => {
     featureState({ needs: { ...needsNone, sso: true }, ssoProvider: "google" }),
   );
   assert.deepEqual(order, ["sso-provider", "sso-client-id", "sso-client-secret"]);
+});
+
+test("Entra SSO on an Azure cluster offers the app registration picker", () => {
+  const azureSso = { needs: { ...needsNone, sso: true }, ssoProvider: "azure" as const };
+  const discovered = featureConfigFieldOrder(
+    featureState({ ...azureSso, ssoAzureDiscovery: true }),
+  );
+  assert.deepEqual(discovered, [
+    "sso-provider",
+    "sso-url",
+    "sso-client-id-azure",
+    "sso-client-secret",
+  ]);
+
+  // An app missing the deployment's callback inserts the warning interstitial.
+  const warned = featureConfigFieldOrder(
+    featureState({ ...azureSso, ssoAzureDiscovery: true, ssoRedirectWarning: true }),
+  );
+  assert.deepEqual(warned, [
+    "sso-provider",
+    "sso-url",
+    "sso-client-id-azure",
+    "sso-redirect-warning",
+    "sso-client-secret",
+  ]);
+
+  // Manual opt-out and non-Azure clusters keep the plain client-id field.
+  const manual = featureConfigFieldOrder(
+    featureState({ ...azureSso, ssoAzureDiscovery: true, ssoManualClientId: true }),
+  );
+  assert.deepEqual(manual, [
+    "sso-provider",
+    "sso-url",
+    "sso-client-id",
+    "sso-client-secret",
+  ]);
+  const nonAzureCluster = featureConfigFieldOrder(featureState(azureSso));
+  assert.equal(nonAzureCluster.includes("sso-client-id"), true);
+  assert.equal(nonAzureCluster.includes("sso-client-id-azure"), false);
 });
 
 test("AMP monitoring flows region, workspace discovery, then done", () => {

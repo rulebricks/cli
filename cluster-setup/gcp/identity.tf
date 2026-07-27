@@ -1,6 +1,6 @@
 # Rulebricks workload identity + object storage.
 #
-# One Google service account, <cluster>-rulebricks, holds every data-path
+# One Google service account, <cluster>-data-access, holds every data-path
 # role; all data lives in one GCS bucket under per-purpose prefixes
 # (decision-logs/ and db-backups/). The namespace-scoped Workload Identity
 # bindings (roles/iam.workloadIdentityUser for vector / <release>-backup /
@@ -9,7 +9,7 @@
 # one cluster hosts any number of deployments.
 
 resource "google_service_account" "rulebricks" {
-  account_id   = "${var.cluster_name}-rulebricks"
+  account_id   = "${var.cluster_name}-data-access"
   display_name = "Rulebricks data plane (decision logs, backups, metrics)"
 }
 

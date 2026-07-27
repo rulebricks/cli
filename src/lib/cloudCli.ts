@@ -1268,6 +1268,121 @@ export function parseAcsSmtpAppClientId(smtpUsername: string): string | null {
   return appClientId;
 }
 
+export interface AzureEntraApp {
+  name: string;
+  appId: string;
+  redirectUris: string[];
+}
+
+function parseEntraApps(json: string): AzureEntraApp[] {
+  const rows = JSON.parse(json || "[]") as Array<{
+    name?: string;
+    appId?: string;
+    web?: string[] | null;
+    spa?: string[] | null;
+  }>;
+  return rows
+    .filter((row) => row.appId)
+    .map((row) => ({
+      name: row.name || row.appId!,
+      appId: row.appId!,
+      redirectUris: [...(row.web ?? []), ...(row.spa ?? [])],
+    }));
+}
+
+const ENTRA_APP_PROJECTION =
+  '"[].{name:displayName, appId:appId, web:web.redirectUris, spa:spa.redirectUris}"';
+
+/**
+ * List Entra app registrations so the wizard can offer the SSO app as a
+ * selection instead of asking for a pasted client ID. Owned apps first (fast,
+ * needs no tenant-wide Graph read - the operator running the wizard usually
+ * created the SSO app); falls back to the tenant-wide listing with a hard
+ * timeout since large tenants can hold thousands of registrations. Empty list
+ * on any failure so callers fall back to manual entry.
+ */
+export async function listAzureEntraApps(): Promise<AzureEntraApp[]> {
+  try {
+    const mine = await execCommand(
+      `az ad app list --show-mine --query ${ENTRA_APP_PROJECTION} --output json`,
+      { intent: "Discover Entra applications", provider: "azure" },
+    );
+    const owned = parseEntraApps(mine.stdout);
+    if (owned.length > 0) return owned;
+  } catch {
+    // Fall through to the tenant-wide listing.
+  }
+  try {
+    const all = await execCommand(
+      `az ad app list --all --query ${ENTRA_APP_PROJECTION} --output json`,
+      {
+        intent: "Discover Entra applications",
+        provider: "azure",
+        timeout: 30000,
+      },
+    );
+    return parseEntraApps(all.stdout);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The redirect URI a native SSO provider's app registration must allow:
+ * GoTrue performs the OAuth exchange, so the IdP calls back into Supabase
+ * (documented in the chart's values.yaml). A mismatch breaks login with a
+ * redirect_uri error at the IdP.
+ */
+export function expectedSsoRedirectUri(domain: string): string {
+  return `https://supabase.${domain.toLowerCase()}/auth/v1/callback`;
+}
+
+/** True when one of the registered redirect URIs is the deployment's callback. */
+export function hasSsoRedirectUri(
+  redirectUris: string[],
+  domain: string,
+): boolean {
+  if (!domain) return false;
+  const expected = expectedSsoRedirectUri(domain);
+  return redirectUris.some(
+    (uri) => uri.toLowerCase().replace(/\/+$/, "") === expected,
+  );
+}
+
+/**
+ * Index of the Entra app most likely to be this deployment's SSO app: exact
+ * callback match first, then any redirect URI referencing the deployment
+ * domain. -1 when nothing matches.
+ */
+export function recommendEntraAppIndex(
+  apps: Array<Pick<AzureEntraApp, "redirectUris">>,
+  domain: string,
+): number {
+  if (!domain) return -1;
+  const exact = apps.findIndex((app) =>
+    hasSsoRedirectUri(app.redirectUris, domain),
+  );
+  if (exact >= 0) return exact;
+  const needle = domain.toLowerCase();
+  return apps.findIndex((app) =>
+    app.redirectUris.some((uri) => uri.toLowerCase().includes(needle)),
+  );
+}
+
+/**
+ * Index of the Entra app most likely to be the ACS email SMTP app. The docs
+ * tell operators to create it as "Rulebricks SMTP", so match by display name
+ * ("smtp" first, then "rulebricks") - the SMTP app has no redirect URIs to
+ * match on. -1 when nothing matches.
+ */
+export function recommendSmtpAppIndex(
+  apps: Array<Pick<AzureEntraApp, "name">>,
+): number {
+  const smtp = apps.findIndex((app) => /smtp/i.test(app.name));
+  if (smtp >= 0) return smtp;
+  return apps.findIndex((app) => /rulebricks/i.test(app.name));
+}
+
 export async function ensureAcsSmtpRoleAssignment(
   smtpUsername: string,
   resourceGroup: string,
@@ -1538,6 +1653,34 @@ export async function listAzureStorageAccounts(): Promise<string[]> {
 export async function listAzureBlobContainers(
   storageAccount: string,
 ): Promise<string[]> {
+  // Management plane FIRST. `az storage container list` is a data-plane call,
+  // so it fails from anywhere without a network path to the account - and the
+  // cluster-setup production default puts storage behind a private endpoint
+  // (publicNetworkAccess: Disabled). That made the wizard's container picker
+  // silently empty for exactly the posture we recommend. ARM listing needs
+  // only reader access on the account and is unaffected by private endpoints.
+  try {
+    const idResult = await execCommand(
+      `az storage account show --name ${storageAccount} --query id --output tsv`,
+      { intent: "Discover storage resources", provider: "azure" },
+    );
+    const accountId = idResult.stdout.trim();
+    if (accountId) {
+      const result = await execCommand(
+        `az rest --method GET --url "https://management.azure.com${accountId}/blobServices/default/containers?api-version=2023-05-01" --query "value[].name" --output json`,
+        { intent: "Discover storage resources", provider: "azure" },
+      );
+      const containers = JSON.parse(result.stdout || "[]");
+      if (Array.isArray(containers) && containers.length > 0) {
+        return containers.sort();
+      }
+    }
+  } catch {
+    // Fall through to the data plane below.
+  }
+
+  // Data-plane fallback: covers callers with blob access but no ARM read on
+  // the account.
   try {
     const result = await execCommand(
       `az storage container list --account-name ${storageAccount} --auth-mode login --query "[].name" --output json`,

@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   Rulebricks EKS cluster: 3-AZ VPC (private nodes, public load balancers),
   hardened EKS with Pod Identity, core + burst nodegroups, one S3 data bucket,
-  one IAM role (<cluster>-rulebricks), and independent off-by-default toggles
+  one IAM role (<cluster>-data-access), and independent off-by-default toggles
   for managed MSK / ElastiCache / RDS / AMP. The helm chart runs Kafka, Valkey,
   and Postgres in-cluster for whichever you leave disabled. Outputs map 1:1 to
   the Rulebricks CLI wizard fields.
@@ -100,8 +100,8 @@ Parameters:
     Default: rulebricks-cluster
     Description: >-
       Used as the name prefix for every resource in the stack. The Rulebricks
-      CLI wizard preselects resources named <cluster>-rulebricks (IAM role) and
-      <cluster>-data (S3 bucket), so keep the convention if you rename.
+      CLI wizard preselects resources named <cluster>-data-access (IAM role)
+      and <cluster>-data (S3 bucket), so keep the convention if you rename.
   KubernetesVersion:
     Type: String
     Default: "1.34"
@@ -335,7 +335,7 @@ Parameters:
       in-cluster. Pair with CLI config: kafka mode "external", preset
       "aws-msk-iam". The chart's provisioning job creates the topics
       (solution x128, solution-response x128, logs x24 partitions) at deploy
-      time using the <cluster>-rulebricks role.
+      time using the <cluster>-data-access role.
   KafkaVersion:
     Type: String
     Default: 3.9.x
@@ -1165,7 +1165,7 @@ Resources:
   RulebricksRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${ClusterName}-rulebricks"
+      RoleName: !Sub "${ClusterName}-data-access"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -1397,7 +1397,7 @@ Resources:
   # MANAGED KAFKA (Amazon MSK) - EnableManagedKafka=true
   # IAM auth + TLS only (no SASL/SCRAM, no plaintext). Clients connect on 9098.
   # The chart's HPS/worker/Vector pods authenticate through the
-  # <cluster>-rulebricks role bound by the CLI at deploy time.
+  # <cluster>-data-access role bound by the CLI at deploy time.
   # ===========================================================================
   KafkaSecurityGroup:
     Type: AWS::EC2::SecurityGroup

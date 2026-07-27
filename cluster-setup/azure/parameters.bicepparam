@@ -216,8 +216,8 @@ param allowContainerRegistryPublicAccess = false
 // REQUIRED while enableContainerRegistry is true: your Rulebricks license
 // key. It authenticates the registry's pull-through cache of Rulebricks
 // images - no seeding or scripts; images cache on first pull. Export before
-// deploying:  export RB_LICENSE_KEY='<license-key>'
-param rulebricksLicenseKey = readEnvironmentVariable('RB_LICENSE_KEY', '')
+// deploying:  export LICENSE_KEY='<license-key>'
+param rulebricksLicenseKey = readEnvironmentVariable('LICENSE_KEY', '')
 
 // ---------------------------------------------------------------------------
 // Managed Kafka (Event Hubs Premium, Kafka-compatible)
@@ -272,8 +272,8 @@ param emailCustomDomain = ''
 param enableManagedDatabase = true
 param postgresVersion = '17'
 param postgresAdminUsername = 'rbadmin'
-// REQUIRED: export RB_POSTGRES_ADMIN_PASSWORD='<strong-password>'
-param postgresAdminPassword = readEnvironmentVariable('RB_POSTGRES_ADMIN_PASSWORD', '')
+// REQUIRED: export POSTGRES_ADMIN_PASSWORD='<strong-password>'
+param postgresAdminPassword = readEnvironmentVariable('POSTGRES_ADMIN_PASSWORD', '')
 param postgresSkuName = 'Standard_D4ds_v5'
 // Burstable | GeneralPurpose | MemoryOptimized.
 param postgresSkuTier = 'GeneralPurpose'

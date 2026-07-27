@@ -183,7 +183,7 @@ function awsPodIdentityInvalidTrustMessage(input: {
   roleArn: string;
   cluster: string;
 }): string {
-  const expectedRole = `${input.cluster}-rulebricks`;
+  const expectedRole = `${input.cluster}-data-access`;
   const detail = input.stderr.trim();
   return [
     `The IAM role selected for ${input.subject} cannot be used with EKS Pod Identity.`,
@@ -393,7 +393,7 @@ function kafkaUsesAwsIamWithoutRole(config: DeploymentConfig): boolean {
 
 /**
  * The cluster-setup CloudFormation stack provisions one workload role named
- * `<cluster>-rulebricks` (RulebricksRole). When MSK IAM is configured without
+ * `<cluster>-data-access` (RulebricksRole). When MSK IAM is configured without
  * an explicit identity role, deploy binds the kafka service accounts to this
  * conventional role automatically, so the wizard never has to ask for an ARN.
  * Returns undefined (never throws) when the role is absent or its trust
@@ -403,7 +403,12 @@ function kafkaUsesAwsIamWithoutRole(config: DeploymentConfig): boolean {
 export async function deriveConventionalAwsKafkaRole(
   config: DeploymentConfig,
 ): Promise<string | undefined> {
-  return deriveConventionalAwsRole(config, "rulebricks");
+  // Current cluster-setup name first; `-rulebricks` is the name earlier
+  // template generations created, kept so existing clusters keep resolving.
+  return (
+    (await deriveConventionalAwsRole(config, "data-access")) ??
+    (await deriveConventionalAwsRole(config, "rulebricks"))
+  );
 }
 
 /**
@@ -670,8 +675,9 @@ export interface KafkaIdentityVerification {
 
 /**
  * Preflight for AWS MSK IAM deployments that configure NO kafka identity role.
- * Deploy first tries to derive the cluster-setup role (<cluster>-rulebricks)
- * and bind it; when that role doesn't exist either, credentials must already
+ * Deploy first tries to derive the cluster-setup role (<cluster>-data-access,
+ * or the earlier <cluster>-rulebricks name) and bind it; when that role
+ * doesn't exist either, credentials must already
  * be present as manually-managed associations. When neither holds, the
  * kafka-proxy sidecars fall back to EC2 IMDS ("no EC2 IMDS role found") and
  * the topic-provision pre-install hook wedges until the helm timeout. This

@@ -4,7 +4,64 @@ import {
   extractSecretCredential,
   buildAcsSmtpUsername,
   parseAcsSmtpAppClientId,
+  expectedSsoRedirectUri,
+  hasSsoRedirectUri,
+  recommendEntraAppIndex,
+  recommendSmtpAppIndex,
 } from "./cloudCli.js";
+
+test("recommends the SMTP-named Entra app for ACS email", () => {
+  const apps = [
+    { name: "Corp Intranet" },
+    { name: "Rulebricks SSO" },
+    { name: "Rulebricks SMTP" },
+  ];
+  // "smtp" in the name beats a mere "rulebricks" mention.
+  assert.equal(recommendSmtpAppIndex(apps), 2);
+  // Fallback: any Rulebricks-named app.
+  assert.equal(recommendSmtpAppIndex(apps.slice(0, 2)), 1);
+  // Nothing matches: no recommendation.
+  assert.equal(recommendSmtpAppIndex(apps.slice(0, 1)), -1);
+});
+
+test("builds the native-provider SSO callback for a deployment domain", () => {
+  assert.equal(
+    expectedSsoRedirectUri("Azpg.Rulebricks.com"),
+    "https://supabase.azpg.rulebricks.com/auth/v1/callback",
+  );
+});
+
+test("matches registered redirect URIs case- and slash-insensitively", () => {
+  assert.equal(
+    hasSsoRedirectUri(
+      ["https://Supabase.azpg.rulebricks.com/auth/v1/callback/"],
+      "azpg.rulebricks.com",
+    ),
+    true,
+  );
+  assert.equal(
+    hasSsoRedirectUri(
+      ["https://azpg.rulebricks.com/api/sso-proxy/callback"],
+      "azpg.rulebricks.com",
+    ),
+    false,
+  );
+});
+
+test("recommends the Entra app whose redirect URIs match the deployment", () => {
+  const apps = [
+    { redirectUris: ["https://other.example.com/callback"] },
+    { redirectUris: ["https://azpg.rulebricks.com/api/sso-proxy/callback"] },
+    { redirectUris: ["https://supabase.azpg.rulebricks.com/auth/v1/callback"] },
+  ];
+  // Exact callback beats a mere domain reference.
+  assert.equal(recommendEntraAppIndex(apps, "azpg.rulebricks.com"), 2);
+  // Domain reference is the fallback when no exact callback exists.
+  assert.equal(recommendEntraAppIndex(apps.slice(0, 2), "azpg.rulebricks.com"), 1);
+  // Nothing matches: no recommendation.
+  assert.equal(recommendEntraAppIndex(apps.slice(0, 1), "azpg.rulebricks.com"), -1);
+  assert.equal(recommendEntraAppIndex(apps, ""), -1);
+});
 
 test("assembles the ACS SMTP username from discovered parts", () => {
   assert.equal(

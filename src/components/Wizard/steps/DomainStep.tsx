@@ -34,12 +34,26 @@ interface DomainStepProps {
 }
 
 const DNS_PROVIDER_OPTIONS: Array<{ label: string; value: DnsProvider }> = [
-  { label: "Other / Not sure (manual DNS)", value: "other" },
   { label: "AWS Route 53", value: "route53" },
-  { label: "Cloudflare", value: "cloudflare" },
-  { label: "Google Cloud DNS", value: "google" },
   { label: "Azure DNS", value: "azure" },
+  { label: "Google Cloud DNS", value: "google" },
+  { label: "Cloudflare", value: "cloudflare" },
+  { label: "Other / Not sure (manual DNS)", value: "other" },
 ];
+
+/** The cloud's native DNS service - what enterprises overwhelmingly use. */
+function nativeDnsProviderFor(cloud: string | null): DnsProvider | null {
+  switch (cloud) {
+    case "aws":
+      return "route53";
+    case "azure":
+      return "azure";
+    case "gcp":
+      return "google";
+    default:
+      return null;
+  }
+}
 
 const AUTO_MANAGE_OPTIONS = [
   { label: "Yes, automatically manage DNS records", value: "yes" },
@@ -56,8 +70,24 @@ export function DomainStep({
 
   const [domain, setDomain] = useState(state.domain || "");
   const [adminEmail, setAdminEmail] = useState(state.adminEmail || "");
+  // Preselection: the deployment's own saved DNS provider (configure) wins;
+  // on a fresh init the cloud's native DNS service outranks a provider
+  // remembered from previous deployments (profile memory). The native option
+  // is listed first with the manual-DNS escape hatch last.
+  const nativeDnsProvider = nativeDnsProviderFor(state.provider);
   const [dnsProvider, setDnsProvider] = useState<DnsProvider>(
-    state.dnsProvider,
+    state.configLoaded
+      ? state.dnsProvider
+      : (nativeDnsProvider ?? state.dnsProvider),
+  );
+  const dnsProviderItems = DNS_PROVIDER_OPTIONS.map((option) =>
+    option.value === nativeDnsProvider
+      ? { ...option, label: `${option.label} (recommended)` }
+      : option,
+  ).sort(
+    (a, b) =>
+      Number(b.value === nativeDnsProvider) -
+      Number(a.value === nativeDnsProvider),
   );
   const [validating, setValidating] = useState(false);
 
@@ -198,7 +228,7 @@ export function DomainStep({
           <WizardSelect
             label="Where is your domain's DNS hosted?"
             hint="This determines whether we can automatically manage DNS records for you"
-            items={DNS_PROVIDER_OPTIONS}
+            items={dnsProviderItems}
             initialValue={dnsProvider}
             onSelect={(value) => {
               const provider = value as DnsProvider;

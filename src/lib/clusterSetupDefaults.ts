@@ -6,13 +6,12 @@ import { CloudProvider } from "../types/index.js";
  * can preselect them as sensible defaults. The user can always arrow to a
  * different option, and when nothing matches the behavior is unchanged.
  *
- * Naming conventions (parameterized by cluster name, default rulebricks-cluster):
- *   AWS  (CloudFormation): roles `${cluster}-metrics`, `${cluster}-decision-logs`,
- *                          `${cluster}-backups`; buckets `${cluster}-decision-logs-*`,
- *                          `${cluster}-backups-*`.
- *   Azure (Bicep):         UAMIs `${cluster}-metrics`, `${cluster}-decision-logs`,
- *                          `${cluster}-backups`; blob containers `decision-logs`, `backups`.
- *   GCP  (docs):           service account `rulebricks-vector` (decision logs only).
+ * Naming convention (parameterized by cluster name, default rulebricks-cluster):
+ * one shared data-access identity `${cluster}-data-access` (AWS IAM role,
+ * Azure UAMI, GCP service account) and one `${cluster}-data` bucket/container.
+ * Earlier template generations named the identity `${cluster}-rulebricks`, and
+ * before that provisioned split resources (`-metrics`, `-decision-logs`,
+ * `-backups`); those names remain lower-priority fallbacks below.
  */
 
 export type ClusterSetupCategory =
@@ -44,16 +43,27 @@ function patternsFor(
   cluster: string,
   provider?: CloudProvider | null,
 ): (string | RegExp)[] {
-  // The consolidated cluster-setup provisions a single `${cluster}-rulebricks`
-  // identity and a single `${cluster}-data` bucket/container. Older split
-  // resources (`-decision-logs`, `-backups`, `-metrics`) are kept as lower-
-  // priority fallbacks so the wizard still preselects sensibly on legacy infra.
+  // The consolidated cluster-setup provisions a single `${cluster}-data-access`
+  // identity and a single `${cluster}-data` bucket/container. Earlier
+  // template generations used `${cluster}-rulebricks` and before that split
+  // resources (`-decision-logs`, `-backups`, `-metrics`); all are kept as
+  // lower-priority fallbacks so the wizard still preselects sensibly on
+  // existing infra.
   switch (category) {
     case "metrics-identity":
-      return [`${cluster}-rulebricks`, `${cluster}-metrics`, "-rulebricks", "-metrics"];
+      return [
+        `${cluster}-data-access`,
+        `${cluster}-rulebricks`,
+        `${cluster}-metrics`,
+        "-data-access",
+        "-rulebricks",
+        "-metrics",
+      ];
     case "decision-logs-identity":
     case "backups-identity":
       return [
+        `${cluster}-data-access`,
+        "-data-access",
         `${cluster}-rulebricks`,
         "-rulebricks",
         `${cluster}-decision-logs`,
@@ -139,8 +149,8 @@ export function findClusterSetupDefault(
  * pods node-level credentials.
  *
  * Patterns are suffix-anchored where possible so they never swallow the
- * legitimate `<cluster>-rulebricks` role of a cluster whose name itself
- * contains "cluster" (e.g. rulebricks-cluster-rulebricks).
+ * legitimate `<cluster>-data-access` role of a cluster whose name itself
+ * contains "cluster" (e.g. rulebricks-cluster-data-access).
  */
 const AWS_INFRA_ROLE_PATTERNS: RegExp[] = [
   // Service-linked roles (AWSServiceRoleForAmazonEKS, ...).

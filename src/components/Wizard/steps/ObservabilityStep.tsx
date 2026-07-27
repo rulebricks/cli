@@ -24,7 +24,7 @@ const MODE_OPTIONS = [
     value: "built-in",
   },
   {
-    label: "Export to my own observability systems",
+    label: "Export to my own observability systems (no built-in stack)",
     value: "byo",
   },
 ];
@@ -151,6 +151,32 @@ export function ObservabilityStep({
           />
           {capacitySummary}
         </Box>
+      ),
+    },
+    {
+      // Metrics export is orthogonal to built-in observability: ClickStack
+      // mirrors metrics for its own dashboards, while Prometheus remote_write
+      // can simultaneously deliver them to the platform the customer's ops
+      // team already lives in (Azure Managed Grafana, AMP, Grafana Cloud).
+      id: "metrics-export",
+      when: () => mode === "built-in",
+      render: (flow) => (
+        <WizardSelect
+          label="Also send metrics to your own monitoring system?"
+          hint="Built-in dashboards keep working either way. Prometheus remote_write can additionally deliver metrics to Azure Managed Prometheus/Grafana, Amazon Managed Prometheus, Grafana Cloud, or any compatible endpoint. Connection details come later in Feature Settings."
+          items={[
+            { label: "No - keep metrics in-cluster", value: "no" },
+            { label: "Yes - also export metrics", value: "yes" },
+          ]}
+          initialValue={state.metricsExportEnabled ? "yes" : "no"}
+          onSelect={(value) => {
+            dispatch({
+              type: "SET_METRICS_EXPORT",
+              enabled: value === "yes",
+            });
+            flow.next();
+          }}
+        />
       ),
     },
     {

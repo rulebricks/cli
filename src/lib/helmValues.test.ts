@@ -213,6 +213,34 @@ test("built-in observability settings flow into generated Helm values", () => {
   assert.equal(values.clickstack.ferretdb.persistence.size, "10Gi");
 });
 
+test("metrics export coexists with built-in ClickStack observability", () => {
+  const config = cloneFixture("azure-clickstack-with-metrics-export");
+  const values = buildHelmValues(config) as Record<string, any>;
+
+  // Built-in stack stays fully on...
+  assert.equal(values.global.clickstack.enabled, true);
+  assert.ok(values.vector.customConfig.sinks.decision_logs_clickhouse);
+
+  // ...while Prometheus additionally remote-writes to the customer's backend.
+  const prometheus = values["kube-prometheus-stack"].prometheus;
+  const remoteWrite = prometheus.prometheusSpec.remoteWrite;
+  assert.equal(remoteWrite.length, 1);
+  assert.match(remoteWrite[0].url, /metrics\.ingest\.monitor\.azure\.com/);
+  // Workload identity uses the Azure SDK credential (tenant only); the client
+  // ID rides in via the prometheus SA annotation and pod label.
+  assert.deepEqual(remoteWrite[0].azureAd.sdk, {
+    tenantId: "22222222-2222-2222-2222-222222222222",
+  });
+  assert.equal(
+    prometheus.serviceAccount.annotations["azure.workload.identity/client-id"],
+    "33333333-3333-3333-3333-333333333333",
+  );
+  assert.equal(
+    prometheus.prometheusSpec.podMetadata.labels["azure.workload.identity/use"],
+    "true",
+  );
+});
+
 test("Azure auto-DNS wires workload identity through the external-dns block", () => {
   const config = cloneFixture("azure-external-postgres");
   config.dns = { provider: "azure", autoManage: true };

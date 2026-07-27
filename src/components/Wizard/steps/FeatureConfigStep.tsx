@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { Box, Text } from "ink";
 import { useWizard } from "../WizardContext.js";
 import { useFieldFlow, FlowField } from "../fieldFlow.js";
 import {
@@ -10,6 +11,7 @@ import {
   TextField,
   WizardSelect,
 } from "../../common/index.js";
+import { Spinner } from "../../common/Spinner.js";
 import {
   SSOProvider,
   LoggingSink,
@@ -24,6 +26,11 @@ import {
   getAzureTenantId,
   listAzurePrometheusTargets,
   listAwsPrometheusWorkspaces,
+  listAzureEntraApps,
+  recommendEntraAppIndex,
+  hasSsoRedirectUri,
+  expectedSsoRedirectUri,
+  AzureEntraApp,
 } from "../../../lib/cloudCli.js";
 import { generateHtpasswdLine } from "../../../lib/htpasswd.js";
 import { generateSecureSecret } from "../../../lib/validation.js";
@@ -37,7 +44,7 @@ interface FeatureConfigStepProps {
 }
 
 const SSO_PROVIDERS = [
-  { label: "Microsoft Azure AD", value: "azure" },
+  { label: "Microsoft Entra ID (Azure AD)", value: "azure" },
   { label: "Google Workspace", value: "google" },
   { label: "Okta", value: "okta" },
   { label: "Keycloak", value: "keycloak" },
@@ -108,10 +115,11 @@ export function FeatureConfigStep({
   const [error, setError] = useState<string | null>(null);
 
   // Metrics export (Prometheus remote_write) is opt-in via the Observability
-  // step; in-cluster Prometheus is always installed and needs no configuration.
+  // step and independent of built-in ClickStack; in-cluster Prometheus is
+  // always installed and needs no configuration.
   const needsAI = state.aiEnabled;
   const needsSSO = state.ssoEnabled;
-  const needsMonitoring = !state.clickStackEnabled && state.metricsExportEnabled;
+  const needsMonitoring = state.metricsExportEnabled;
   const needsLogging = state.loggingSink !== "console";
   const needsTracing = !state.clickStackEnabled && state.tracingEnabled;
   const needsAppLogs = !state.clickStackEnabled && state.appLogsEnabled;
@@ -137,6 +145,19 @@ export function FeatureConfigStep({
   const [ssoClientSecret, setSsoClientSecret] = useState(
     state.ssoClientSecret || "",
   );
+  // Entra auto-detection (Azure clusters): the authority URL derives from the
+  // signed-in tenant, and the client ID is picked from discovered app
+  // registrations instead of pasted.
+  const ssoAzureDiscovery = state.provider === "azure";
+  const [ssoDetecting, setSsoDetecting] = useState(false);
+  const [ssoClientIdManual, setSsoClientIdManual] = useState(false);
+  // The deployment's callback URI when the selected app doesn't allow it yet.
+  const [ssoRedirectWarning, setSsoRedirectWarning] = useState<string | null>(
+    null,
+  );
+  // Apps from the last discovery, aligned 1:1 with the select items (a ref:
+  // recommendIndex runs in the same render the load resolves in).
+  const entraAppsRef = useRef<AzureEntraApp[]>([]);
 
   // Monitoring (Prometheus remote_write)
   const [remoteWriteUrl, setRemoteWriteUrl] = useState(
@@ -362,6 +383,9 @@ export function FeatureConfigStep({
         customEmails: needsCustomEmails,
       },
       ssoProvider,
+      ssoAzureDiscovery,
+      ssoManualClientId: ssoClientIdManual,
+      ssoRedirectWarning: !!ssoRedirectWarning,
       remoteWriteDestination,
       remoteWriteAuthType,
       manualRemoteWriteUrl: rwManualUrl,
@@ -405,23 +429,48 @@ export function FeatureConfigStep({
     // ----- SSO -----
     {
       id: "sso-provider",
-      render: (flow) => (
-        <WizardSelect
-          label="SSO Provider"
-          hint="Select your identity provider"
-          items={SSO_PROVIDERS}
-          initialValue={ssoProvider ?? undefined}
-          onSelect={(value) => {
-            const provider = value as SSOProvider;
-            setSsoProvider(provider);
-            dispatch({
-              type: "SET_SSO_CONFIG",
-              config: { ssoProvider: provider },
-            });
-            flow.next();
-          }}
-        />
-      ),
+      // Tenant detection completes before flow.next() with the spinner
+      // rendered in place of the picker (the ACS-discovery pattern:
+      // flow.render() always shows the CURRENT field, so a transient spinner
+      // field would strand the wizard).
+      render: (flow) =>
+        ssoDetecting ? (
+          <Box flexDirection="column" marginY={1}>
+            <Spinner label="Detecting your Entra tenant..." />
+          </Box>
+        ) : (
+          <WizardSelect
+            label="SSO Provider"
+            hint="Select your identity provider"
+            items={SSO_PROVIDERS}
+            initialValue={ssoProvider ?? undefined}
+            onSelect={(value) => {
+              const provider = value as SSOProvider;
+              setSsoProvider(provider);
+              dispatch({
+                type: "SET_SSO_CONFIG",
+                config: { ssoProvider: provider },
+              });
+              // Entra on an Azure cluster: the authority URL is just the
+              // signed-in tenant - derive it instead of asking. Saved or
+              // already-typed values win; detection failure falls through to
+              // the manual URL field.
+              if (provider === "azure" && ssoAzureDiscovery && !ssoUrl) {
+                void (async () => {
+                  setSsoDetecting(true);
+                  const tenant = await getAzureTenantId().catch(() => null);
+                  if (tenant) {
+                    setSsoUrl(`https://login.microsoftonline.com/${tenant}`);
+                  }
+                  setSsoDetecting(false);
+                  flow.next();
+                })();
+                return;
+              }
+              flow.next();
+            }}
+          />
+        ),
     },
     {
       id: "sso-url",
@@ -430,7 +479,9 @@ export function FeatureConfigStep({
           label={`${(ssoProvider ?? "OIDC").toUpperCase()} Provider URL`}
           hint={
             ssoProvider === "azure"
-              ? "e.g., https://login.microsoftonline.com/your-tenant-id"
+              ? ssoAzureDiscovery && ssoUrl
+                ? "Prefilled from your signed-in Azure tenant - edit if SSO lives in a different tenant"
+                : "e.g., https://login.microsoftonline.com/your-tenant-id"
               : ssoProvider === "okta"
                 ? "e.g., https://your-org.okta.com"
                 : ssoProvider === "keycloak"
@@ -459,7 +510,85 @@ export function FeatureConfigStep({
       ),
     },
     {
+      // Entra on an Azure cluster: pick the SSO app registration from the
+      // tenant instead of transcribing a client ID. The app whose redirect
+      // URIs reference this deployment's domain is recommended.
+      id: "sso-client-id-azure",
+      render: (flow) => (
+        <DiscoveredSelect
+          label="SSO app registration"
+          hint="The Entra app registration for Rulebricks SSO"
+          loadingLabel="Discovering Entra app registrations..."
+          emptyHint="No app registrations found (missing Graph read access, or none exist yet)."
+          initialValue={ssoClientId || undefined}
+          preferRecommended={!state.configLoaded}
+          recommendIndex={() =>
+            recommendEntraAppIndex(entraAppsRef.current, state.domain)
+          }
+          load={async () => {
+            const apps = await listAzureEntraApps();
+            entraAppsRef.current = apps;
+            return apps.map((app) => ({
+              label: `${app.name} (${app.appId})`,
+              value: app.appId,
+            }));
+          }}
+          onSelect={(value) => {
+            setSsoClientId(value);
+            setError(null);
+            dispatch({ type: "SET_SSO_CONFIG", config: { ssoClientId: value } });
+            // Missing callback is the #1 SSO failure mode (redirect_uri
+            // mismatch at the IdP) - surface it now, while fixable.
+            const app = entraAppsRef.current.find((a) => a.appId === value);
+            setSsoRedirectWarning(
+              app && !hasSsoRedirectUri(app.redirectUris, state.domain)
+                ? expectedSsoRedirectUri(state.domain)
+                : null,
+            );
+            flow.next();
+          }}
+          onManual={() => {
+            setSsoClientIdManual(true);
+            setSsoRedirectWarning(null);
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "sso-redirect-warning",
+      render: (flow) => (
+        <Box flexDirection="column">
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor="yellow"
+            paddingX={1}
+          >
+            <Text color="yellow">
+              The selected app registration does not allow this deployment's
+              callback yet. Add this redirect URI (platform type "Web") to the
+              app before logging in, or SSO fails with a redirect_uri mismatch:
+            </Text>
+            <Text color="yellow">
+              {"  "}
+              {ssoRedirectWarning}
+            </Text>
+          </Box>
+          <Box marginTop={1}>
+            <WizardSelect
+              label=""
+              items={[{ label: "Continue", value: "continue" }]}
+              onSelect={() => flow.next()}
+            />
+          </Box>
+        </Box>
+      ),
+    },
+    {
       id: "sso-client-id",
+      // Escaping returns to the discovered app list (when it applies).
+      onEscape: () => setSsoClientIdManual(false),
       render: (flow) => (
         <TextField
           label="OAuth Client ID"
@@ -484,7 +613,11 @@ export function FeatureConfigStep({
       render: (flow) => (
         <TextField
           label="OAuth Client Secret"
-          hint="The client secret from your identity provider"
+          hint={
+            ssoProvider === "azure"
+              ? "The app's client secret (mint one with: az ad app credential reset --id <app-id>)"
+              : "The client secret from your identity provider"
+          }
           value={ssoClientSecret}
           onChange={setSsoClientSecret}
           placeholder="your-client-secret"

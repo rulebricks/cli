@@ -43,7 +43,7 @@ export function externalServicesFieldOrder(
     fields.push("kafka-brokers", "kafka-topic-prefix");
     if (s.preset === "aws-msk-iam") {
       // No identity-role field: deploy derives the cluster-setup role
-      // (<cluster>-rulebricks) or reuses existing Pod Identity associations;
+      // (<cluster>-data-access) or reuses existing Pod Identity associations;
       // config.yaml (externalServices.kafka.external.identity) overrides.
       fields.push("kafka-aws-region", "kafka-provision-topics");
     } else if (s.preset === "azure-event-hubs") {
@@ -85,6 +85,12 @@ export interface FeatureConfigFlowState {
     customEmails: boolean;
   };
   ssoProvider: SSOProvider | null;
+  /** Azure cluster: Entra app registrations are discoverable via az. */
+  ssoAzureDiscovery: boolean;
+  /** Operator opted out of the discovered app list. */
+  ssoManualClientId: boolean;
+  /** Selected app registration is missing the deployment's callback URI. */
+  ssoRedirectWarning: boolean;
   remoteWriteDestination: RemoteWriteDestination | null;
   remoteWriteAuthType: RemoteWriteAuthType | null;
   manualRemoteWriteUrl: boolean;
@@ -103,7 +109,20 @@ export function featureConfigFieldOrder(s: FeatureConfigFlowState): string[] {
   if (s.needs.sso) {
     fields.push("sso-provider");
     if (s.ssoProvider !== "google") fields.push("sso-url");
-    fields.push("sso-client-id", "sso-client-secret");
+    // Entra on an Azure cluster: offer discovered app registrations instead
+    // of a pasted client ID, plus a warning interstitial when the selected
+    // app is missing the deployment's callback redirect URI.
+    if (
+      s.ssoProvider === "azure" &&
+      s.ssoAzureDiscovery &&
+      !s.ssoManualClientId
+    ) {
+      fields.push("sso-client-id-azure");
+      if (s.ssoRedirectWarning) fields.push("sso-redirect-warning");
+    } else {
+      fields.push("sso-client-id");
+    }
+    fields.push("sso-client-secret");
   }
 
   if (s.needs.monitoring) {

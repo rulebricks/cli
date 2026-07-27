@@ -52,7 +52,10 @@ export function getActiveWizardSteps(
   if (
     state.aiEnabled ||
     state.ssoEnabled ||
-    (!state.clickStackEnabled && state.metricsExportEnabled) ||
+    // Metrics export needs its destination configured regardless of
+    // ClickStack (remote_write coexists with built-in observability);
+    // tracing/app-logs are BYO-only signals.
+    state.metricsExportEnabled ||
     (!state.clickStackEnabled && state.tracingEnabled) ||
     (!state.clickStackEnabled && state.appLogsEnabled) ||
     state.valkeyAdminEnabled ||

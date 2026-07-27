@@ -11,8 +11,11 @@ param enableExternalSecrets bool
 // Rulebricks CLI creates the federated credentials at deploy time (see
 // workloadIdentity.ts ensureAzure), exactly like AWS Pod Identity
 // associations. This module only provisions the identities themselves.
+// The shared data-access identity: the one identity the Rulebricks workloads
+// assume for every cloud data path (blob storage for decision logs and
+// backups, metrics remote write). The CLI preselects it by this name.
 resource rulebricksIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: '${clusterName}-rulebricks'
+  name: '${clusterName}-data-access'
   location: location
   tags: tags
 }

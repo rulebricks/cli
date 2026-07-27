@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Box, Text } from "ink";
 import { useWizard } from "../WizardContext.js";
 import { useFieldFlow, FlowField } from "../fieldFlow.js";
@@ -18,7 +18,11 @@ import {
   getAzureAcsResourceName,
   getAzureTenantId,
   buildAcsSmtpUsername,
+  parseAcsSmtpAppClientId,
   listAcsSenderAddresses,
+  listAzureEntraApps,
+  recommendSmtpAppIndex,
+  AzureEntraApp,
 } from "../../../lib/cloudCli.js";
 
 interface SMTPStepProps {
@@ -29,14 +33,26 @@ interface SMTPStepProps {
 
 const PROVIDER_ITEMS = [
   { label: "AWS SES", value: "aws-ses" },
+  { label: "Azure Communication Services", value: "azure-acs" },
   { label: "SendGrid", value: "sendgrid" },
   { label: "Resend", value: "resend" },
   { label: "Mailgun", value: "mailgun" },
   { label: "Postmark", value: "postmark" },
   { label: "Mailtrap (testing)", value: "mailtrap" },
-  { label: "Azure Communication Services", value: "azure-acs" },
   { label: "Custom SMTP Server", value: "custom" },
 ];
+
+/** The cloud's native email service - the usual enterprise choice. */
+function nativeEmailProviderFor(cloud: string | null): string | null {
+  switch (cloud) {
+    case "aws":
+      return "aws-ses";
+    case "azure":
+      return "azure-acs";
+    default:
+      return null;
+  }
+}
 
 // Detect which provider preset matches a given SMTP host, so saved settings
 // preselect the right provider instead of skipping the prompt.
@@ -65,7 +81,24 @@ export function SMTPStep({
   const [error, setError] = useState<string | null>(null);
 
   const detectedProvider = detectProviderFromHost(state.smtpHost);
-  const [provider, setProvider] = useState<string>(detectedProvider ?? "");
+  const nativeEmailProvider = nativeEmailProviderFor(state.provider);
+  // Preselection: the deployment's own saved provider (configure) wins;
+  // on a fresh init the cloud-native recommendation outranks a provider
+  // remembered from previous deployments (profile memory).
+  const [provider, setProvider] = useState<string>(
+    (state.configLoaded
+      ? detectedProvider
+      : (nativeEmailProvider ?? detectedProvider)) ?? "",
+  );
+  const providerItems = PROVIDER_ITEMS.map((item) =>
+    item.value === nativeEmailProvider
+      ? { ...item, label: `${item.label} (recommended)` }
+      : item,
+  ).sort(
+    (a, b) =>
+      Number(b.value === nativeEmailProvider) -
+      Number(a.value === nativeEmailProvider),
+  );
   const [host, setHost] = useState(state.smtpHost || "");
   const [port, setPort] = useState(state.smtpPort?.toString() || "587");
   const [user, setUser] = useState(state.smtpUser || "");
@@ -84,6 +117,11 @@ export function SMTPStep({
   const [acsAppId, setAcsAppId] = useState("");
   const [acsDiscovering, setAcsDiscovering] = useState(false);
   const acsAutoAssemble = !!acsResource && !!acsTenant;
+  // Set when the operator opts out of the discovered app-registration list.
+  const [acsAppIdManual, setAcsAppIdManual] = useState(false);
+  // Apps from the last discovery, aligned 1:1 with the select items (a ref:
+  // recommendIndex runs in the same render the load resolves in).
+  const entraAppsRef = useRef<AzureEntraApp[]>([]);
   // Set when the operator opts out of the discovered sender list.
   const [fromManual, setFromManual] = useState(false);
 
@@ -101,6 +139,20 @@ export function SMTPStep({
       setAcsTenant(null);
     }
     setAcsDiscovering(false);
+  };
+
+  // Shared by the discovered app picker and its manual fallback: record the
+  // app ID and assemble the ACS SMTP username from the discovered parts.
+  const submitAcsAppId = (appId: string) => {
+    setAcsAppId(appId);
+    const assembled = buildAcsSmtpUsername(
+      acsResource ?? "",
+      appId,
+      acsTenant ?? "",
+    );
+    setUser(assembled);
+    setError(null);
+    dispatch({ type: "SET_SMTP", config: { smtpUser: assembled } });
   };
 
   const completed = (): { label: string; value: string }[] => {
@@ -125,34 +177,42 @@ export function SMTPStep({
         ) : (
           <WizardSelect
             label="Select your email provider"
-            items={PROVIDER_ITEMS}
+            items={providerItems}
             initialValue={provider || undefined}
             onSelect={(value) => {
-              const changed = value !== provider;
+              // Presets apply whenever the current host belongs to a DIFFERENT
+              // provider (or is empty). Comparing against the highlighted
+              // `provider` is not enough: the recommendation can preselect one
+              // provider while a profile-remembered host still points at
+              // another, and confirming must not keep the stale host.
+              const hostMatches =
+                !!host && detectProviderFromHost(host) === value;
               setProvider(value);
               const providerConfig =
                 SMTP_PROVIDERS[value as keyof typeof SMTP_PROVIDERS];
-              // Apply preset host/port/user when switching providers or when the
-              // fields are still empty; keep saved values otherwise.
-              if (providerConfig && (changed || !host)) {
+              if (providerConfig && !hostMatches) {
                 setHost(providerConfig.host);
                 setPort(providerConfig.port.toString());
-                if (changed) {
-                  // A username saved for a DIFFERENT provider is never valid
-                  // here - reset to the preset's user even when it is empty
-                  // (e.g. profile-remembered "resend" leaking into the ACS
-                  // username field).
-                  setUser(providerConfig.user);
-                } else if (providerConfig.user && !user) {
-                  setUser(providerConfig.user);
-                }
+                // A username saved for a different provider is never valid
+                // here - reset to the preset's user even when it is empty
+                // (e.g. profile-remembered "resend" leaking into the ACS
+                // username field).
+                setUser(providerConfig.user);
                 dispatch({
                   type: "SET_SMTP",
                   config: {
                     smtpHost: providerConfig.host,
                     smtpPort: providerConfig.port,
-                    ...(changed ? { smtpUser: providerConfig.user } : {}),
+                    smtpUser: providerConfig.user,
                   },
+                });
+              } else if (providerConfig?.user && !user) {
+                // Same provider, matching host, but no username yet: fill the
+                // preset's fixed username (e.g. Resend's literal "resend").
+                setUser(providerConfig.user);
+                dispatch({
+                  type: "SET_SMTP",
+                  config: { smtpUser: providerConfig.user },
                 });
               }
               // ACS: resolve the email service and tenant before advancing so
@@ -215,11 +275,50 @@ export function SMTPStep({
       ),
     },
     {
-      // ACS with a discovered resource: ask only for the Entra app client ID
-      // and assemble the username. The client secret is entered next as the
-      // password; deploy grants the app access to the ACS resource.
+      // ACS with a discovered resource: pick the SMTP Entra app from the
+      // tenant's app registrations (the docs create it as "Rulebricks SMTP",
+      // which drives the recommendation) and assemble the username. The
+      // client secret is entered next as the password; deploy grants the app
+      // access to the ACS resource.
       id: "acs-app-id",
-      when: () => provider === "azure-acs" && acsAutoAssemble,
+      when: () =>
+        provider === "azure-acs" && acsAutoAssemble && !acsAppIdManual,
+      render: (flow) => (
+        <DiscoveredSelect
+          label="Email SMTP app (Entra app registration)"
+          hint="Deploy grants the app access automatically; its client secret is the password on the next screen."
+          loadingLabel="Discovering Entra app registrations..."
+          emptyHint="No app registrations found (missing Graph read access, or none exist yet)."
+          initialValue={
+            acsAppId || parseAcsSmtpAppClientId(user) || undefined
+          }
+          preferRecommended={!state.configLoaded}
+          recommendIndex={() => recommendSmtpAppIndex(entraAppsRef.current)}
+          load={async () => {
+            const apps = await listAzureEntraApps();
+            entraAppsRef.current = apps;
+            return apps.map((app) => ({
+              label: `${app.name} (${app.appId})`,
+              value: app.appId,
+            }));
+          }}
+          onSelect={(value) => {
+            submitAcsAppId(value);
+            flow.next();
+          }}
+          onManual={() => {
+            setAcsAppIdManual(true);
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "acs-app-id-manual",
+      when: () =>
+        provider === "azure-acs" && acsAutoAssemble && acsAppIdManual,
+      // Escaping returns to the discovered app list.
+      onEscape: () => setAcsAppIdManual(false),
       render: (flow) => (
         <TextField
           label="Email SMTP app (Entra application/client ID)"
@@ -232,14 +331,7 @@ export function SMTPStep({
               setError("The email SMTP app client ID is required");
               return;
             }
-            const assembled = buildAcsSmtpUsername(
-              acsResource ?? "",
-              acsAppId,
-              acsTenant ?? "",
-            );
-            setUser(assembled);
-            setError(null);
-            dispatch({ type: "SET_SMTP", config: { smtpUser: assembled } });
+            submitAcsAppId(acsAppId);
             flow.next();
           }}
         />
@@ -282,7 +374,9 @@ export function SMTPStep({
           label="SMTP password"
           hint={
             provider === "azure-acs"
-              ? "The Entra app registration's client secret (az ad app credential reset)"
+              ? `The Entra app registration's client secret - secrets are never listable, so mint one if needed: az ad app credential reset --id ${
+                  acsAppId || parseAcsSmtpAppClientId(user) || "<app-id>"
+                }`
               : undefined
           }
           value={pass}
@@ -313,6 +407,7 @@ export function SMTPStep({
           loadingLabel="Looking up sender addresses..."
           emptyHint="No sender domains found on the email service."
           initialValue={from || undefined}
+          preferRecommended={!state.configLoaded}
           recommendIndex={(items) =>
             items.findIndex((i) => i.label.includes("branded"))
           }

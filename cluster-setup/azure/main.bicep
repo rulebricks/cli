@@ -547,73 +547,170 @@ module postgres 'modules/postgres.bicep' = if (enableManagedDatabase) {
   }
 }
 
+// ============================================================================
+// OUTPUTS
+//
+// Everything the Rulebricks install needs from this deployment, grouped by
+// concern. No secrets are ever output (deployment history is readable by
+// anyone with reader access) - secret-bearing outputs are `az` fetch commands
+// instead. Save a copy while setting up:
+//   az deployment group show --name rulebricks -g <rg> --query properties.outputs
+// ============================================================================
+
+// ----- Cluster access -------------------------------------------------------
+
+@description('Name of the AKS cluster.')
 output clusterName string = cluster.outputs.clusterName
+
+@description('Resource group holding every resource in this deployment.')
 output resourceGroupName string = resourceGroup().name
+
+@description('Azure region of the deployment.')
 output location string = location
+
+@description('Run this to add the cluster to your kubeconfig. Entra-RBAC clusters also need kubelogin (kubelogin convert-kubeconfig -l azurecli).')
 output kubeconfigCommand string = 'az aks get-credentials --name ${clusterName} --resource-group ${resourceGroup().name}'
 
+// ----- Workload identity and object storage ---------------------------------
+
+@description('Client ID of the shared data-access identity (blob storage, backups, metrics). The Rulebricks CLI discovers and binds it automatically.')
 output rulebricksClientId string = identity.outputs.rulebricksClientId
+
+@description('Storage account holding decision logs and database backups.')
 output storageAccountName string = storage.outputs.storageAccountName
+
+@description('Blob container for all Rulebricks data (per-purpose prefixes inside).')
 output dataContainer string = storage.outputs.dataContainer
+
+// ----- DNS ------------------------------------------------------------------
+
+@description('Client ID of the external-dns identity; the CLI binds it so DNS records are managed automatically.')
 output externalDnsClientId string = identity.outputs.externalDnsClientId
+
+@description('The delegated DNS zone for this deployment (empty when external DNS is disabled).')
 output dnsZoneNameOut string = enableExternalDns ? dnsZoneName : ''
-// Hand these to whoever controls the parent domain: one NS record set for
-// dnsZoneName delegating to them, and DNS is done forever.
+
+@description('Hand these to whoever controls the parent domain: one NS record set for the zone delegating to them, and DNS is done forever - records and TLS certificates are automatic afterward.')
 output dnsZoneNameServers array = enableExternalDns && createDnsZone ? dnsZone!.outputs.nameServers : []
+
+// ----- Secrets (Key Vault) --------------------------------------------------
+
+@description('Client ID of the external-secrets identity that reads Key Vault from the cluster.')
 output externalSecretsClientId string = enableKeyVaultIntegration ? identity.outputs.externalSecretsClientId : ''
+
+@description('Entra tenant ID for the external-secrets workload identity federation.')
 output externalSecretsTenantId string = enableKeyVaultIntegration ? tenant().tenantId : ''
+
+@description('Kubernetes ServiceAccount name the external-secrets binding targets.')
 output externalSecretsServiceAccountName string = enableKeyVaultIntegration ? esoServiceAccountName : ''
+
+@description('Key Vault that is the source of truth for deployment secrets.')
 output keyVaultName string = enableKeyVaultIntegration ? keyVaultName : ''
+
+@description('URI of the deployment Key Vault.')
 output keyVaultUri string = enableKeyVaultIntegration
   ? (createKeyVault ? keyVault!.outputs.vaultUri : keyVaultRoleByo!.outputs.vaultUri)
   : ''
 
+// ----- Container registry ---------------------------------------------------
+
+@description('ACR that caches Rulebricks images via pull-through (license-key authenticated).')
 output containerRegistryName string = enableContainerRegistry ? acr!.outputs.registryName : ''
+
+@description('Login server for the registry; nodes pull Rulebricks images through it.')
 output containerRegistryLoginServer string = enableContainerRegistry ? acr!.outputs.loginServer : ''
 
+// ----- Monitoring (Managed Prometheus + Grafana) -----------------------------
+
+@description('Prometheus remote-write ingestion endpoint (Azure Monitor data collection endpoint).')
 output dceMetricsIngestionEndpoint string = enableMetricsRemoteWrite && createMonitorWorkspace
   ? monitoring!.outputs.dceMetricsIngestionEndpoint
   : ''
+
+@description('Immutable ID of the Prometheus data collection rule (part of the remote-write URL).')
 output dcrImmutableId string = enableMetricsRemoteWrite && createMonitorWorkspace
   ? monitoring!.outputs.dcrImmutableId
   : ''
+
+@description('Resource ID of the data collection rule; the CLI discovers remote-write targets from it.')
 output dataCollectionRuleId string = enableMetricsRemoteWrite
   ? (createMonitorWorkspace ? monitoring!.outputs.dataCollectionRuleId : monitoringRoleByo!.outputs.dataCollectionRuleId)
   : ''
+
+@description('Azure Managed Grafana endpoint, pre-wired to the Prometheus workspace.')
 output grafanaEndpoint string = enableMetricsRemoteWrite && createMonitorWorkspace
   ? monitoring!.outputs.grafanaEndpoint
   : ''
 
+// ----- Kafka (Event Hubs, when managed) --------------------------------------
+
+@description('Kafka bootstrap servers for the Event Hubs namespace.')
 output kafkaBootstrapServers string = enableManagedKafka ? kafka!.outputs.bootstrapServers : ''
+
+@description('Pre-created Kafka topics (Event Hubs).')
 output kafkaTopics array = enableManagedKafka ? kafka!.outputs.topicNames : []
+
+@description('Run this to fetch the Kafka SASL connection string (never stored in outputs).')
 output kafkaConnectionStringCommand string = enableManagedKafka ? kafka!.outputs.connectionStringCommand : ''
+
+@description('Partition count of the solution topic; the CLI mirrors it in worker settings.')
 output kafkaSolutionPartitions int = enableManagedKafka ? solutionPartitions : 0
 
+// ----- Redis (when managed) ---------------------------------------------------
+
+@description('Managed Redis hostname.')
 output redisHost string = enableManagedRedis ? redis!.outputs.hostName : ''
+
+@description('Managed Redis port.')
 output redisPort int = enableManagedRedis ? redis!.outputs.port : 0
+
+@description('True when the managed Redis endpoint requires TLS.')
 output redisTlsEnabled bool = enableManagedRedis
+
+@description('Run this to fetch the Redis access key (never stored in outputs).')
 output redisAccessKeyCommand string = enableManagedRedis ? redis!.outputs.accessKeyCommand : ''
 
-// ACS Email: the CLI's email step consumes these (provider "Azure
-// Communication Services"). It assembles the SMTP username from
-// emailAcsResourceName plus the Entra app the operator supplies; the password
-// is that app's client secret - never an output.
+// ----- Email (Azure Communication Services) ----------------------------------
+// The CLI's email step consumes these (provider "Azure Communication
+// Services"). It assembles the SMTP username from emailAcsResourceName plus
+// the Entra app the operator supplies; the password is that app's client
+// secret - never an output.
+
+@description('Ready-to-use sender address (DoNotReply@... on the Azure-managed domain, or the branded domain once verified).')
 output emailSenderAddress string = enableManagedEmail ? email!.outputs.senderAddress : ''
+
+@description('SMTP host for ACS email (smtp.azurecomm.net).')
 output emailSmtpHost string = enableManagedEmail ? email!.outputs.smtpHost : ''
+
+@description('SMTP port for ACS email.')
 output emailSmtpPort int = enableManagedEmail ? email!.outputs.smtpPort : 0
+
+@description('ACS communication service name; the CLI uses it to assemble the SMTP username.')
 output emailAcsResourceName string = enableManagedEmail ? email!.outputs.acsResourceName : ''
-// Branded custom sender domain: run these once, then rerun the same
-// deployment - it reads the verification state and links the domain.
+
+@description('Branded sender domain only: run these once, wait for Verified, then rerun this same deployment - it reads the verification state and links the domain automatically.')
 output emailInitiateVerificationCommands array = enableManagedEmail
   ? email!.outputs.initiateVerificationCommands
   : []
-// Verification records for custom domains hosted OUTSIDE the delegated zone.
+
+@description('Verification DNS records to publish manually when the branded domain is hosted OUTSIDE the delegated zone.')
 output emailCustomDomainVerificationRecords object = enableManagedEmail
   ? email!.outputs.customDomainVerificationRecords
   : {}
 
+// ----- Database (PostgreSQL Flexible Server, when managed) -------------------
+
+@description('Managed Postgres server FQDN (the CLI database step discovers it too).')
 output postgresHost string = enableManagedDatabase ? postgres!.outputs.fqdn : ''
+
+@description('Managed Postgres port.')
 output postgresPort int = enableManagedDatabase ? postgres!.outputs.port : 0
+
+@description('Initial database name.')
 output postgresDatabase string = enableManagedDatabase ? postgres!.outputs.databaseName : ''
+
+@description('Admin username; pair it with the POSTGRES_ADMIN_PASSWORD you exported when deploying.')
 output postgresAdminUsernameOut string = enableManagedDatabase ? postgres!.outputs.administratorLogin : ''
+
+@description('Run this to restart the server (needed only if wal_level changes are pending; the CLI does it automatically).')
 output postgresRestartCommand string = enableManagedDatabase ? postgres!.outputs.restartCommand : ''

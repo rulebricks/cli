@@ -31,7 +31,7 @@ Cluster:
 
 | Parameter | Default | Purpose |
 | --- | --- | --- |
-| `ClusterName` | `rulebricks-cluster` | Prefixes every resource name; the CLI preselects `<cluster>-rulebricks` / `<cluster>-data` by convention |
+| `ClusterName` | `rulebricks-cluster` | Prefixes every resource name; the CLI preselects `<cluster>-data-access` / `<cluster>-data` by convention |
 | `KubernetesVersion` | `1.34` | EKS version |
 | `ClusterEndpointAccess` | `PublicAndPrivate` | `PrivateOnly` restricts the API to the VPC (needs VPN/bastion) |
 | `AdminPrincipalArn` | `""` | Optional second cluster-admin IAM principal (stack creator gets admin automatically) |
@@ -125,7 +125,7 @@ Always created:
 | Node IAM role | `AWS::IAM::Role` | Kubelet/CNI/ECR only (no CSI policy) |
 | EBS CSI IAM role | `AWS::IAM::Role` | `<cluster>-ebs-csi`; Pod Identity-trusted, scoped to the CSI driver |
 | Cluster-autoscaler IAM role | `AWS::IAM::Role` | `<cluster>-cluster-autoscaler`; Pod Identity-trusted; ASG writes conditioned on this cluster's autoscaler discovery tags. The chart deploys the autoscaler itself on AWS |
-| Rulebricks IAM role | `AWS::IAM::Role` | `<cluster>-rulebricks`; trusts `pods.eks.amazonaws.com`; S3 data policy + conditional AMP/MSK policies |
+| Rulebricks IAM role | `AWS::IAM::Role` | `<cluster>-data-access`; trusts `pods.eks.amazonaws.com`; S3 data policy + conditional AMP/MSK policies |
 | Add-ons | `AWS::EKS::Addon` x3 | `eks-pod-identity-agent`, `aws-ebs-csi-driver`, `metrics-server` |
 | Core nodegroup | `AWS::EKS::Nodegroup` | `standard-nodes` |
 | Data bucket | `AWS::S3::Bucket` + `AWS::S3::BucketPolicy` | `<cluster>-data-<account>`; encrypted, public access blocked, TLS-only policy |
@@ -164,10 +164,10 @@ aws eks create-addon --cluster-name <cluster> \
   --addon-name eks-pod-identity-agent --region <region>
 ```
 
-2. A dedicated workload role named `<cluster>-rulebricks` trusted by `pods.eks.amazonaws.com` — never the cluster or node roles (Pod Identity rejects their trust policies; legacy IRSA/OIDC roles fail the same way):
+2. A dedicated workload role named `<cluster>-data-access` trusted by `pods.eks.amazonaws.com` — never the cluster or node roles (Pod Identity rejects their trust policies; legacy IRSA/OIDC roles fail the same way):
 
 ```bash
-aws iam create-role --role-name <cluster>-rulebricks \
+aws iam create-role --role-name <cluster>-data-access \
   --assume-role-policy-document '{
     "Version": "2012-10-17",
     "Statement": [{
@@ -177,7 +177,7 @@ aws iam create-role --role-name <cluster>-rulebricks \
     }]
   }'
 
-aws iam put-role-policy --role-name <cluster>-rulebricks \
+aws iam put-role-policy --role-name <cluster>-data-access \
   --policy-name rulebricks-s3-data \
   --policy-document '{
     "Version": "2012-10-17",
@@ -255,7 +255,7 @@ aws cloudformation create-stack \
   --capabilities CAPABILITY_NAMED_IAM
 ```
 
-- `CAPABILITY_NAMED_IAM` is required (named roles `<cluster>-rulebricks`, `<cluster>-ebs-csi`, `<cluster>-cluster-autoscaler`, `<cluster>-external-secrets`, `<cluster>-external-dns`).
+- `CAPABILITY_NAMED_IAM` is required (named roles `<cluster>-data-access`, `<cluster>-ebs-csi`, `<cluster>-cluster-autoscaler`, `<cluster>-external-secrets`, `<cluster>-external-dns`).
 - The production profile's `PrivateOnly` API endpoint means all later kubectl/helm/CLI work must run from inside the VPC or a peered network.
 - With `EnableRegistryMirror`, set the deployment's `imageRegistry` to the `RegistryMirrorUri` output; first pulls populate the cache. For air-gapped clusters seed images with `mirror-to-ecr.sh` instead.
 - Timing: ~20-25 min base; `EnableManagedKafka` adds ~30 min, `EnableManagedDatabase` (Multi-AZ) ~15-20 min (parallel).

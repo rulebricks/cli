@@ -82,7 +82,7 @@ resource "google_managed_kafka_topic" "logs" {
 }
 
 # Dedicated client identity for SASL/PLAIN. Kept separate from
-# <cluster>-rulebricks so the static key credential carries Kafka access only.
+# <cluster>-data-access so the static key credential carries Kafka access only.
 resource "google_service_account" "kafka_client" {
   count = var.enable_managed_kafka ? 1 : 0
 
