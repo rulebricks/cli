@@ -18,6 +18,8 @@
   { "ParameterKey": "RegistryMirrorAccessToken", "ParameterValue": "" },
 
   { "ParameterKey": "EnableExternalDns", "ParameterValue": "false" },
+  { "ParameterKey": "CreateDnsZone", "ParameterValue": "true" },
+  { "ParameterKey": "DnsZoneName", "ParameterValue": "" },
   { "ParameterKey": "DnsZoneId", "ParameterValue": "" },
 
   { "ParameterKey": "EnableDataBucketProtection", "ParameterValue": "true" },

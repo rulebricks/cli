@@ -5,8 +5,6 @@ param tags object
 param createStorage bool
 param existingStorageAccountName string
 param dataContainerName string
-param enableDecisionLogExport bool
-param enableBackupExport bool
 
 param storageSkuName string
 param allowSharedKeyAccess bool
@@ -26,7 +24,11 @@ var storageBlobDataContributorRoleId = subscriptionResourceId(
 )
 var generatedStorageAccountName = take('rb${uniqueString(resourceGroup().id, clusterName)}', 24)
 var effectiveStorageAccountName = createStorage ? generatedStorageAccountName : existingStorageAccountName
-var enableBlobAccess = enableDecisionLogExport || enableBackupExport
+
+// Blob access is unconditional: decision-log export is required by ClickHouse
+// and the in-app log UI, and database backups share the same container (as the
+// db-backups/ prefix) whenever the database is in-cluster. There is no
+// supported deployment without it.
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (createStorage) {
   name: generatedStorageAccountName
@@ -63,7 +65,7 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01'
   }
 }
 
-resource dataContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = if (createStorage && enableBlobAccess) {
+resource dataContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = if (createStorage) {
   parent: blobService
   name: dataContainerName
   properties: {
@@ -71,7 +73,7 @@ resource dataContainer 'Microsoft.Storage/storageAccounts/blobServices/container
   }
 }
 
-resource blobRoleCreated 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableBlobAccess && createStorage) {
+resource blobRoleCreated 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createStorage) {
   name: guid(storageAccount.id, rulebricksIdentityId, 'Storage Blob Data Contributor')
   scope: storageAccount
   properties: {
@@ -146,4 +148,4 @@ resource storageDeleteLock 'Microsoft.Authorization/locks@2020-05-01' = if (crea
 }
 
 output storageAccountName string = effectiveStorageAccountName
-output dataContainer string = enableBlobAccess ? dataContainerName : ''
+output dataContainer string = dataContainerName

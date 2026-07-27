@@ -420,6 +420,94 @@ export async function deriveConventionalAwsClusterAutoscalerRole(
   return deriveConventionalAwsRole(config, "cluster-autoscaler");
 }
 
+/**
+ * Same convention for the cluster-setup external-dns role
+ * (`<cluster>-external-dns`, ExternalDnsRole): deploy binds the chart's fixed
+ * "external-dns" ServiceAccount to it so record automation works out of the
+ * box when dns.autoManage targets Route53.
+ */
+export async function deriveConventionalAwsExternalDnsRole(
+  config: DeploymentConfig,
+): Promise<string | undefined> {
+  return deriveConventionalAwsRole(config, "external-dns");
+}
+
+/**
+ * Azure counterpart: the cluster-setup Bicep provisions the
+ * `<cluster>-external-dns` user-assigned identity (already granted DNS Zone
+ * Contributor on the deployment's zone); deploy federates the chart's fixed
+ * "external-dns" ServiceAccount to it. Undefined when the identity does not
+ * exist (external-dns disabled at cluster-setup, or BYO cluster).
+ */
+export async function deriveConventionalAzureExternalDnsClientId(
+  config: DeploymentConfig,
+): Promise<string | undefined> {
+  return deriveConventionalAzureIdentityClientId(config, "external-dns");
+}
+
+/**
+ * Azure counterpart of deriveConventionalAwsRole: resolve the client ID of a
+ * cluster-setup user-assigned identity by its `<cluster>-<suffix>` naming
+ * convention. Undefined when the identity does not exist.
+ */
+export async function deriveConventionalAzureIdentityClientId(
+  config: DeploymentConfig,
+  suffix: string,
+): Promise<string | undefined> {
+  const cluster = config.infrastructure.clusterName;
+  const rg = config.infrastructure.azureResourceGroup;
+  if (!cluster || !rg) return undefined;
+  const res = await run(
+    `az identity show --name ${shq(`${cluster}-${suffix}`)} ` +
+      `--resource-group ${shq(rg)} --query clientId --output tsv`,
+    { intent: "Configure workload identity (Azure)", provider: "azure" },
+  );
+  if (res.code !== 0) return undefined;
+  const clientId = res.stdout.trim();
+  return clientId || undefined;
+}
+
+/**
+ * Cluster-setup provisions a dedicated secrets backend (Azure: Key Vault +
+ * `<cluster>-external-secrets` reader identity; AWS: `<cluster>-external-secrets`
+ * Secrets Manager role) when its Key Vault / external-secrets toggle is on.
+ * Detecting that identity lets deploy warn when a config runs in plain
+ * cluster-secrets mode against a cluster whose setup clearly intended a
+ * managed secrets backend.
+ */
+export async function detectProvisionedSecretsBackend(
+  config: DeploymentConfig,
+): Promise<string | undefined> {
+  const provider = config.infrastructure.provider;
+  if (provider === "azure") {
+    const clientId = await deriveConventionalAzureIdentityClientId(
+      config,
+      "external-secrets",
+    );
+    return clientId
+      ? "Azure Key Vault (cluster-setup enableKeyVaultIntegration)"
+      : undefined;
+  }
+  if (provider === "aws") {
+    const role = await deriveConventionalAwsRole(config, "external-secrets");
+    return role
+      ? "AWS Secrets Manager (cluster-setup EnableExternalSecrets)"
+      : undefined;
+  }
+  return undefined;
+}
+
+/** True when this deployment expects automatic DNS on the given cloud. */
+export function wantsManagedDns(
+  config: DeploymentConfig,
+  cloud: "aws" | "azure",
+): boolean {
+  if (!config.dns?.autoManage) return false;
+  return cloud === "aws"
+    ? config.dns.provider === "route53"
+    : config.dns.provider === "azure";
+}
+
 async function deriveConventionalAwsRole(
   config: DeploymentConfig,
   roleSuffix: string,
@@ -489,6 +577,25 @@ export async function ensureWorkloadIdentityFederation(
         serviceAccount: "cluster-autoscaler",
         principal: autoscalerRole,
       });
+    }
+  }
+
+  // Automatic DNS: bind the chart's fixed "external-dns" SA to the
+  // cluster-setup DNS identity (<cluster>-external-dns IAM role on AWS, UAMI
+  // on Azure - both already scoped to the deployment's zone). Without this
+  // trust, external-dns deploys but cannot write records; the templates
+  // provision the identities, and this namespace-scoped binding is deploy's
+  // job. Skipped silently when the identity doesn't exist.
+  if (provider === "aws" && wantsManagedDns(config, "aws")) {
+    const dnsRole = await deriveConventionalAwsExternalDnsRole(config);
+    if (dnsRole) {
+      bindings.push({ serviceAccount: "external-dns", principal: dnsRole });
+    }
+  }
+  if (provider === "azure" && wantsManagedDns(config, "azure")) {
+    const dnsClientId = await deriveConventionalAzureExternalDnsClientId(config);
+    if (dnsClientId) {
+      bindings.push({ serviceAccount: "external-dns", principal: dnsClientId });
     }
   }
 

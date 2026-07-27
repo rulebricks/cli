@@ -32,18 +32,30 @@ import {
 import {
   updateKubeconfig,
   checkAuroraLogicalReplication,
+  checkAzureKeyVaultDataPlaneAccess,
+  ensureAcsCustomEmailDomainLinked,
+  ensureAzurePostgresLogicalReplication,
+  getAzureSubscriptionId,
+  getAzureTenantId,
 } from "../lib/cloudCli.js";
 import {
+  deriveConventionalAzureExternalDnsClientId,
+  detectProvisionedSecretsBackend,
   ensureWorkloadIdentityFederation,
   verifyClusterAutoscalerIdentity,
   verifyManualKafkaAssociations,
+  wantsManagedDns,
 } from "../lib/workloadIdentity.js";
 import {
   generateHelmValuesPreservingEdits,
   updateHelmValuesForTLS,
 } from "../lib/helmValues.js";
 import { resolveImageCatalog } from "../lib/imageCatalog.js";
-import { ensureNamespace, applyDeploymentSecrets } from "../lib/secrets.js";
+import {
+  ensureNamespace,
+  applyDeploymentSecrets,
+  applyExternalDnsAzureConfig,
+} from "../lib/secrets.js";
 import { setupExternalSecrets } from "../lib/eso.js";
 import {
   runInstallSequence,
@@ -120,6 +132,8 @@ function DeployCommandInner({
   const [tlsWarning, setTlsWarning] = useState<string | null>(null);
   const [federationWarning, setFederationWarning] = useState<string | null>(null);
   const [autoscalerWarning, setAutoscalerWarning] = useState<string | null>(null);
+  const [dnsWarning, setDnsWarning] = useState<string | null>(null);
+  const [secretsWarning, setSecretsWarning] = useState<string | null>(null);
   const [status, setStatus] = useState<StepStatus>({
     preflight: "pending",
     federation: "pending",
@@ -264,6 +278,75 @@ function DeployCommandInner({
         ? "inline"
         : secretModeForConfig(cfg);
 
+      // Cluster-setup provisions a managed secrets backend (Key Vault /
+      // Secrets Manager + a reader identity) when its secrets toggle is on.
+      // Running in plain cluster-secrets mode against such a cluster is
+      // almost always a config gap (hand-written or exported configs skip
+      // the wizard's recommendation), so say it out loud - without blocking,
+      // since cluster secrets are still a supported mode.
+      if (secretMode === "k8s") {
+        try {
+          const provisionedBackend = await detectProvisionedSecretsBackend(cfg);
+          if (provisionedBackend) {
+            setSecretsWarning(
+              `This deploy stores secrets as plain Kubernetes Secrets, but the cluster was provisioned with ${provisionedBackend}. ` +
+                `To use it, set secrets.backend in the deployment config (rulebricks configure ${name}) and redeploy.`,
+            );
+          }
+        } catch (secretsProbeError) {
+          if (!(secretsProbeError instanceof CommandDeniedError)) {
+            throw secretsProbeError;
+          }
+        }
+      }
+
+      // Secret seeding runs FROM THIS MACHINE via `az keyvault secret set`,
+      // and enterprise vaults commonly disable public network access
+      // (allowKeyVaultPublicAccess=false + private endpoint, the
+      // cluster-setup production default). Probe the vault's data plane now
+      // so the deploy stops with guidance instead of failing midway through
+      // the install with a raw Azure error.
+      if (
+        secretMode === "eso" &&
+        cfg.secrets?.backend === "azure-key-vault" &&
+        cfg.secrets.azure?.vaultName
+      ) {
+        try {
+          const probe = await checkAzureKeyVaultDataPlaneAccess(
+            cfg.secrets.azure.vaultName,
+          );
+          if (!probe.ok) {
+            const vault = cfg.secrets.azure.vaultName;
+            if (probe.reason === "network") {
+              throw new Error(
+                [
+                  `Key Vault "${vault}" rejected data-plane access from this machine - it appears to be network-restricted (public access disabled / private endpoint only).`,
+                  "Secret seeding runs from the machine executing this deploy, so either:",
+                  "  • Run the deploy from a network that can reach the vault's private endpoint (VPN, peering, or a jump host in the VNet), or",
+                  "  • Temporarily allow this machine's IP on the vault firewall (az keyvault network-rule add), or",
+                  "  • Pre-seed the secret entries from a trusted network, then re-run the deploy.",
+                  probe.detail ? `\nAzure said: ${probe.detail}` : "",
+                ].join("\n"),
+              );
+            }
+            throw new Error(
+              [
+                `Key Vault "${vault}" denied this principal's data-plane access (RBAC).`,
+                "Seeding secrets requires the Key Vault Secrets Officer role on the vault.",
+                "  • cluster-setup grants it to keyVaultWriterPrincipalIds - add your object ID there, or",
+                "  • Assign it directly: az role assignment create --role \"Key Vault Secrets Officer\" --assignee <your-object-id> --scope <vault-resource-id>",
+                probe.detail ? `\nAzure said: ${probe.detail}` : "",
+              ].join("\n"),
+            );
+          }
+        } catch (probeError) {
+          if (!(probeError instanceof CommandDeniedError)) {
+            throw probeError;
+          }
+          // Denied probe: assume access and let seeding surface any issue.
+        }
+      }
+
       // Never ship a known-crashlooping autoscaler: when neither the
       // conventional cluster-setup role nor an existing association backs the
       // fixed "cluster-autoscaler" SA, disable it in the generated values and
@@ -287,6 +370,39 @@ function DeployCommandInner({
         // manually-managed credentials, matching the federation fallback.
       }
 
+      // Azure automatic DNS: external-dns's provider needs the workload
+      // identity's client ID (values annotations) and an azure.json Secret
+      // (subscription + zone resource group). All three are derivable from
+      // the cluster-setup conventions; fail-open so a missing identity only
+      // means external-dns can't write records (the deploy still proceeds).
+      let externalDnsAzureClientId: string | undefined;
+      let externalDnsAzureConfig:
+        | { tenantId: string; subscriptionId: string; resourceGroup: string }
+        | undefined;
+      if (externalDnsEnabled && wantsManagedDns(cfg, "azure")) {
+        try {
+          const [clientId, subscriptionId, tenantId] = await Promise.all([
+            deriveConventionalAzureExternalDnsClientId(cfg),
+            getAzureSubscriptionId(),
+            getAzureTenantId(),
+          ]);
+          const resourceGroup = cfg.infrastructure.azureResourceGroup;
+          if (clientId && subscriptionId && tenantId && resourceGroup) {
+            externalDnsAzureClientId = clientId;
+            externalDnsAzureConfig = { tenantId, subscriptionId, resourceGroup };
+          } else {
+            setDnsWarning(
+              `Automatic DNS may not work: the ${cfg.infrastructure.clusterName}-external-dns identity ` +
+                `was not found (enable external-dns in cluster-setup, or manage records manually).`,
+            );
+          }
+        } catch (dnsError) {
+          if (!(dnsError instanceof CommandDeniedError)) {
+            throw dnsError;
+          }
+        }
+      }
+
       await runInstallSequence(
         {
           regenerateValues,
@@ -302,11 +418,15 @@ function DeployCommandInner({
               secretMode: mode,
               images: imageCatalog,
               clusterAutoscalerIdentityMissing,
+              externalDnsAzureClientId,
             }),
           validateValues: ensureGeneratedValuesValid,
           ensureNamespace: () => ensureNamespace(namespace),
           applySecrets: async () => {
             await applyDeploymentSecrets(cfg, namespace);
+            if (externalDnsAzureConfig) {
+              await applyExternalDnsAzureConfig(namespace, externalDnsAzureConfig);
+            }
           },
           setupExternalSecrets: async () => {
             await setupExternalSecrets(cfg, { overwriteSecrets: syncSecrets });
@@ -496,6 +616,58 @@ function DeployCommandInner({
       }
     }
 
+    // Azure Flexible Server: cluster-setup configures wal_level=logical, but
+    // static parameters only apply after a server restart that ARM cannot
+    // perform. Self-heal instead of documenting a manual step: restart when
+    // the change is pending (the database is idle on a first deploy; no-op on
+    // every later one). Only a definitively wrong value blocks the deploy.
+    if (
+      pg?.mode === "external" &&
+      pg.external?.provider === "azure" &&
+      pg.external.host &&
+      cfg.infrastructure.azureResourceGroup
+    ) {
+      const serverName = pg.external.host.split(".")[0];
+      const wal = await ensureAzurePostgresLogicalReplication(
+        pg.external.host,
+        cfg.infrastructure.azureResourceGroup,
+      );
+      if (wal.status === "wrong-value") {
+        throw new Error(
+          `External Azure Postgres has wal_level=${wal.value}; Supabase Realtime requires "logical". ` +
+            "Set it and restart the server before deploying:\n" +
+            `  az postgres flexible-server parameter set --resource-group ${cfg.infrastructure.azureResourceGroup} --server-name ${serverName} --name wal_level --value logical\n` +
+            `  az postgres flexible-server restart --resource-group ${cfg.infrastructure.azureResourceGroup} --name ${serverName}`,
+        );
+      }
+    }
+
+    // ACS branded email sender: verification and linking are control-plane
+    // actions ARM cannot sequence, so self-heal here (same pattern as the
+    // wal_level restart). Emails from an unlinked domain fail at send time
+    // with no obvious cause, so a domain that cannot be verified blocks the
+    // deploy with the fix instead.
+    if (
+      cfg.infrastructure.provider === "azure" &&
+      cfg.smtp?.host === "smtp.azurecomm.net" &&
+      cfg.smtp.from &&
+      cfg.infrastructure.azureResourceGroup
+    ) {
+      const acs = await ensureAcsCustomEmailDomainLinked(
+        cfg.smtp.from,
+        cfg.infrastructure.azureResourceGroup,
+      );
+      if (acs.status === "not-verified") {
+        throw new Error(
+          `The email sender domain "${acs.domain}" is not verified with Azure Communication Services (pending: ${acs.detail}). ` +
+            "Verification was initiated and usually completes within minutes of the DNS records resolving.\n" +
+            "  • If the domain is under the deployment's delegated zone, wait a few minutes and re-run this deploy.\n" +
+            "  • Otherwise, publish the emailCustomDomainVerificationRecords deployment output at your DNS provider first.\n" +
+            "  • Or set smtp.from back to the Azure-managed sender (the emailSenderAddress output) to send immediately.",
+        );
+      }
+    }
+
     // AWS MSK IAM without Pod Identity credentials wedges the topic-provision
     // pre-install hook until the helm timeout ("no EC2 IMDS role found"), so
     // fail in seconds here instead. Deploy covers the common case itself by
@@ -667,6 +839,16 @@ function DeployCommandInner({
                 <Text color={colors.warning}>⚠ {autoscalerWarning}</Text>
               </Box>
             )}
+            {dnsWarning && (
+              <Box marginTop={1}>
+                <Text color={colors.warning}>⚠ {dnsWarning}</Text>
+              </Box>
+            )}
+            {secretsWarning && (
+              <Box marginTop={1}>
+                <Text color={colors.warning}>⚠ {secretsWarning}</Text>
+              </Box>
+            )}
           </Box>
 
           <Box marginTop={1} flexDirection="column">
@@ -730,6 +912,16 @@ function DeployCommandInner({
         {autoscalerWarning && (
           <Box marginLeft={2}>
             <Text color={colors.warning}>{autoscalerWarning}</Text>
+          </Box>
+        )}
+        {dnsWarning && (
+          <Box marginLeft={2}>
+            <Text color={colors.warning}>{dnsWarning}</Text>
+          </Box>
+        )}
+        {secretsWarning && (
+          <Box marginLeft={2}>
+            <Text color={colors.warning}>{secretsWarning}</Text>
           </Box>
         )}
         <StatusLine status={status.helmInstall} label={helmInstallLabel} />

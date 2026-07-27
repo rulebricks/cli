@@ -916,6 +916,20 @@ export function collectConfigIssues(state: WizardState): string[] {
       "SSO is enabled but the provider, client ID, or client secret is missing.",
     );
   }
+  // Every provider except Google needs the IdP authority URL (for Entra:
+  // https://login.microsoftonline.com/<tenant-id>). The wizard flow collects
+  // it, but config-file edits can drop it - and GoTrue then omits
+  // GOTRUE_EXTERNAL_<PROVIDER>_URL, breaking single-tenant enterprise logins.
+  if (
+    state.ssoEnabled &&
+    state.ssoProvider &&
+    state.ssoProvider !== "google" &&
+    !state.ssoUrl
+  ) {
+    issues.push(
+      "SSO is enabled but the provider URL is missing (for Entra: https://login.microsoftonline.com/<tenant-id>).",
+    );
+  }
 
   if (
     state.loggingSink !== "console" &&

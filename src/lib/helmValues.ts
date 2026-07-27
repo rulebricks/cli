@@ -17,6 +17,7 @@ import {
   SOLUTION_TOPIC_PARTITIONS,
   LOGS_TOPIC_PARTITIONS,
   TOPIC_REPLICATION_FACTOR,
+  DECISION_LOG_ACCELERATION_SINK,
   DECISION_LOG_BATCH,
   PROMETHEUS_RETENTION,
   PROMETHEUS_STORAGE_SIZE,
@@ -67,6 +68,12 @@ interface GenerateOptions {
   // resolve it automatically for RDS hosts (resolveExternalDbSslRootCert);
   // pass explicitly to override.
   dbSslRootCert?: string;
+  // Client ID of the <cluster>-external-dns Azure user-assigned identity,
+  // resolved by deploy when dns.autoManage targets Azure DNS. Drives the
+  // workload-identity annotations + azure.json mount on the external-dns
+  // subchart. Absent on AWS (EKS Pod Identity injects credentials without
+  // values changes) and when auto-DNS is off.
+  externalDnsAzureClientId?: string;
 }
 
 // Names of the Kubernetes Secrets the CLI creates in k8s secret mode. Shared by
@@ -175,13 +182,16 @@ function generateVectorSinks(
           bucket: storage.bucket,
           region: storage.region,
           key_prefix: decisionLogPathPrefix(config),
-          // Extension MUST end in .gz: the ClickHouse decision_logs named
-          // collection globs year=*/month=*/day=*/hour=*/*.gz and relies on
-          // the extension for compression auto-detection. A bare "ndjson"
-          // extension (gzip content) is invisible to the view - decision logs
-          // upload fine but never appear in the app.
-          filename_extension: "ndjson.gz",
-          compression: "gzip",
+          // Extension MUST end in .zst: the ClickHouse decision_logs named
+          // collection globs year=*/month=*/day=*/hour=*/*.{gz,zst} and relies
+          // on the extension for compression auto-detection. A bare "ndjson"
+          // extension (compressed content) is invisible to the view - decision
+          // logs upload fine but never appear in the app. zstd (not gzip):
+          // decompression is the dominant per-thread cost when ClickHouse
+          // scans the archive, and zstd decodes 2-3x faster; the {gz,zst}
+          // glob keeps pre-existing gzip history readable.
+          filename_extension: "ndjson.zst",
+          compression: "zstd",
           encoding: { codec: "json" },
           framing: { method: "newline_delimited" },
           batch: { ...DECISION_LOG_BATCH },
@@ -194,9 +204,12 @@ function generateVectorSinks(
           account_name: storage.bucket,
           container_name: storage.azureBlobContainer || "rulebricks",
           blob_prefix: decisionLogPathPrefix(config),
-          // azure_blob has no filename_extension (unlike aws_s3/gcs); it always
-          // writes ".log" (".log.gz" when compressed). ClickHouse globs on *.gz.
-          compression: "gzip",
+          // azure_blob has no filename_extension (unlike aws_s3/gcs); the blob
+          // suffix comes from Compression::extension() - ".log.zst" for zstd
+          // (verified against the pinned Vector 0.57 source). ClickHouse globs
+          // on *.{gz,zst}, so both new zstd blobs and pre-existing gzip
+          // history stay visible.
+          compression: "zstd",
           encoding: { codec: "json" },
           framing: { method: "newline_delimited" },
           batch: { ...DECISION_LOG_BATCH },
@@ -220,15 +233,46 @@ function generateVectorSinks(
           inputs: ["normalize_logs"],
           bucket: storage.bucket,
           key_prefix: decisionLogPathPrefix(config),
-          // Must end in .gz - see the aws_s3 sink note above.
-          filename_extension: "ndjson.gz",
-          compression: "gzip",
+          // Must end in .zst - see the aws_s3 sink note above.
+          filename_extension: "ndjson.zst",
+          compression: "zstd",
           encoding: { codec: "json" },
           framing: { method: "newline_delimited" },
           batch: { ...DECISION_LOG_BATCH },
         };
         break;
     }
+  }
+
+  // ClickStack mode only: best-effort dual-write into the decision_logs_recent
+  // MergeTree hot tier (created by the chart's decisionLogsViewSql, evicted by
+  // its disk-pressure retention CronJob). The object-storage decision_logs sink
+  // above remains the durable system of record; drop_newest on the bounded
+  // buffer guarantees a ClickHouse outage can never stall the archive path.
+  if (isClickStackEnabled(config)) {
+    sinks.decision_logs_clickhouse = {
+      type: "clickhouse",
+      inputs: ["normalize_logs"],
+      endpoint: `http://${getReleaseName(config.name)}-clickhouse:8123`,
+      database: "rulebricks",
+      table: "decision_logs_recent",
+      format: "json_each_row",
+      skip_unknown_fields: true,
+      auth: {
+        strategy: "basic",
+        user: "rulebricks",
+        password: "${CLICKHOUSE_PASSWORD}",
+      },
+      batch: {
+        max_bytes: DECISION_LOG_ACCELERATION_SINK.batchMaxBytes,
+        timeout_secs: DECISION_LOG_ACCELERATION_SINK.batchTimeoutSecs,
+      },
+      buffer: {
+        type: "disk",
+        max_size: DECISION_LOG_ACCELERATION_SINK.bufferMaxSize,
+        when_full: "drop_newest",
+      },
+    };
   }
 
   // Add external logging-platform sink if configured. Decision logs always go
@@ -442,6 +486,20 @@ function generateVectorEnv(config: DeploymentConfig): Array<Record<string, unkno
       name: "AZURE_STORAGE_CONNECTION_STRING",
       valueFrom: {
         secretKeyRef: secretKeySelector(azureBlobSecretRef),
+      },
+    });
+  }
+
+  // Interpolated into the decision_logs_clickhouse sink's basic-auth block
+  // (see generateVectorSinks); only exists while ClickStack is on.
+  if (isClickStackEnabled(config)) {
+    env.push({
+      name: "CLICKHOUSE_PASSWORD",
+      valueFrom: {
+        secretKeyRef: {
+          name: `${getReleaseName(config.name)}-clickhouse-credentials`,
+          key: "admin-password",
+        },
       },
     });
   }
@@ -1084,6 +1142,19 @@ const BURST_POOL_TOLERATION: Record<string, string> = {
   effect: "NoSchedule",
 };
 
+/**
+ * AKS dedicated system pools carry CriticalAddonsOnly=true:NoSchedule (the
+ * cluster-setup production parameters enable one). Per-node observability
+ * daemonsets (node exporter, log/telemetry collectors, image prepull) should
+ * still cover those nodes, so they tolerate the taint. Inert on EKS/GKE and
+ * on shared-pool AKS clusters where the taint never appears.
+ */
+const CRITICAL_ADDONS_TOLERATION: Record<string, string> = {
+  key: "CriticalAddonsOnly",
+  operator: "Exists",
+  effect: "NoSchedule",
+};
+
 const BURST_POOL_NODE_PREFERENCE: Record<string, unknown> = {
   weight: 100,
   preference: {
@@ -1672,7 +1743,12 @@ export function buildHelmValues(
     ...(architectureTolerations ?? []),
     BURST_POOL_TOLERATION,
   ];
-  const operationalDaemonSetTolerations = workerTolerations;
+  // Per-node daemonsets additionally cover AKS dedicated system-pool nodes
+  // (see CRITICAL_ADDONS_TOLERATION); workers themselves never need that.
+  const operationalDaemonSetTolerations = [
+    ...workerTolerations,
+    CRITICAL_ADDONS_TOLERATION,
+  ];
   const workerScheduling = generateScheduling(workerTolerations, {
     ...generateWorkerPodAntiAffinity(),
     nodeAffinity: {
@@ -2614,6 +2690,9 @@ export function buildHelmValues(
           registry: reg,
           repository: IMAGE_REPOSITORIES.nodeExporter,
         },
+        // No tolerations override: the subchart's default is a blanket
+        // NoSchedule/Exists toleration, which already covers AKS dedicated
+        // system-pool (CriticalAddonsOnly) and burst-pool nodes.
       },
       grafana: {
         enabled: useLocalGrafana,
@@ -2723,6 +2802,44 @@ export function buildHelmValues(
           domainFilters: [config.domain],
           sources: ["ingress", "service"],
           policy: "upsert-only",
+          // Fixed SA name so the cloud identity binding the CLI's
+          // workload-identity step creates (EKS Pod Identity association /
+          // Azure federated credential to <cluster>-external-dns) is stable
+          // across releases. The subchart default would be release-prefixed.
+          serviceAccount: {
+            name: "external-dns",
+            ...(options.externalDnsAzureClientId
+              ? {
+                  annotations: {
+                    "azure.workload.identity/client-id":
+                      options.externalDnsAzureClientId,
+                  },
+                }
+              : {}),
+          },
+          ...(options.externalDnsAzureClientId
+            ? {
+                // Azure provider: workload-identity token exchange requires
+                // the pod label, and the provider reads its subscription/zone
+                // resource group from azure.json - a Secret deploy creates
+                // alongside the other deployment secrets (see
+                // applyExternalDnsAzureConfig in secrets.ts).
+                podLabels: { "azure.workload.identity/use": "true" },
+                extraVolumes: [
+                  {
+                    name: "azure-config",
+                    secret: { secretName: "external-dns-azure-config" },
+                  },
+                ],
+                extraVolumeMounts: [
+                  {
+                    name: "azure-config",
+                    mountPath: "/etc/kubernetes",
+                    readOnly: true,
+                  },
+                ],
+              }
+            : {}),
         }
       : {
           enabled: false,

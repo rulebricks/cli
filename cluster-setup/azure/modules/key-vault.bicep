@@ -34,7 +34,10 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
       name: 'standard'
     }
     enableRbacAuthorization: true
-    enablePurgeProtection: enablePurgeProtection
+    // The ARM API rejects an explicit false ("cannot be set to false" -
+    // enabling purge protection is irreversible, so false must be expressed
+    // by OMITTING the property). null omits it.
+    enablePurgeProtection: enablePurgeProtection ? true : null
     softDeleteRetentionInDays: softDeleteRetentionDays
     publicNetworkAccess: allowPublicNetworkAccess ? 'Enabled' : 'Disabled'
     networkAcls: {

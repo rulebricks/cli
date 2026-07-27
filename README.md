@@ -27,6 +27,9 @@ Finally, you will need to have the following tools installed and ready on your m
 - **kubectl** - Kubernetes CLI
 - **Helm** >= 3.0
 - Cloud CLI (`aws`, `gcloud`, or `az`) configured for your provider if you want the wizard to discover clusters or refresh kubeconfig
+- **kubelogin** (Azure only, when the cluster uses Entra ID RBAC - the cluster-setup production default): `brew install Azure/kubelogin/kubelogin`
+
+Enterprise network posture note: with the cluster-setup production defaults, the AKS API server is **private** and the Key Vault allows **no public access**. Run the CLI from a network that can reach the cluster's VNet (VPN, peering, or a jump host) - the deploy preflight checks both and tells you exactly what is unreachable.
 
 ## Cluster Setup
 
@@ -44,15 +47,13 @@ aws cloudformation create-stack \
 
 # Azure: optional access check, then deploy AKS with Bicep
 az login
+# See cluster-setup/azure/PRECHECK.md for what to confirm first
 az account set --subscription <subscription-id>
 az group create --name rulebricks-rg --location eastus
-bash cluster-setup/azure/check-aks-prereqs.sh \
-  --parameters cluster-setup/azure/parameters.test.json \
-  --resource-group rulebricks-rg
+export RB_POSTGRES_ADMIN_PASSWORD='<strong-password>'
 az deployment group create \
   --resource-group rulebricks-rg \
-  --template-file cluster-setup/azure/main.bicep \
-  --parameters @cluster-setup/azure/parameters.test.json
+  --parameters cluster-setup/azure/parameters.bicepparam
 
 # GCP: optional access check, then create GKE with Terraform
 GCP_REGION=us-central1 bash cluster-setup/gcp/check-gke-prereqs.sh

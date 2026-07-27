@@ -247,6 +247,12 @@ export const SMTP_PROVIDERS = {
   mailgun: { host: "smtp.mailgun.org", port: 587, user: "" },
   postmark: { host: "smtp.postmarkapp.com", port: 587, user: "" },
   mailtrap: { host: "smtp.mailtrap.io", port: 2525, user: "" },
+  // Azure Communication Services Email: Microsoft's replacement for retired
+  // Exchange Online basic-auth SMTP. Username is
+  // <acs-resource>.<entra-app-client-id>.<tenant-id>; password is the Entra
+  // app's client secret. Provision via cluster-setup enableManagedEmail (the
+  // emailSmtp* deployment outputs carry these values).
+  "azure-acs": { host: "smtp.azurecomm.net", port: 587, user: "" },
   custom: { host: "", port: 587, user: "" },
 };
 

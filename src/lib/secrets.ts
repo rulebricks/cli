@@ -186,6 +186,33 @@ export async function ensureNamespace(namespace: string): Promise<void> {
 }
 
 /**
+ * external-dns's Azure provider reads its target subscription and DNS-zone
+ * resource group from an azure.json file; with useWorkloadIdentityExtension it
+ * authenticates via the federated ServiceAccount instead of static
+ * credentials. Deploy creates this Secret when dns.autoManage targets Azure
+ * DNS; the external-dns values mount it at /etc/kubernetes (the provider's
+ * default config path).
+ */
+export async function applyExternalDnsAzureConfig(
+  namespace: string,
+  input: { tenantId: string; subscriptionId: string; resourceGroup: string },
+): Promise<void> {
+  const azureJson = {
+    tenantId: input.tenantId,
+    subscriptionId: input.subscriptionId,
+    resourceGroup: input.resourceGroup,
+    useWorkloadIdentityExtension: true,
+  };
+  await execa("kubectl", ["apply", "-f", "-"], {
+    input: JSON.stringify(
+      secretManifest("external-dns-azure-config", namespace, {
+        "azure.json": JSON.stringify(azureJson),
+      }),
+    ),
+  });
+}
+
+/**
  * Create/update the deployment's Kubernetes Secrets. `kubectl apply` is an
  * upsert, so upgrades and redeploys never wipe or churn the Secrets. Returns the
  * names applied.

@@ -26,6 +26,7 @@ const PROVIDER_ITEMS = [
   { label: "Mailgun", value: "mailgun" },
   { label: "Postmark", value: "postmark" },
   { label: "Mailtrap (testing)", value: "mailtrap" },
+  { label: "Azure Communication Services", value: "azure-acs" },
   { label: "Custom SMTP Server", value: "custom" },
 ];
 
@@ -42,6 +43,7 @@ function detectProviderFromHost(host: string): string | null {
   if (hostLower.includes("mailgun")) return "mailgun";
   if (hostLower.includes("postmark")) return "postmark";
   if (hostLower.includes("mailtrap")) return "mailtrap";
+  if (hostLower.includes("azurecomm")) return "azure-acs";
 
   return "custom";
 }
@@ -149,9 +151,18 @@ export function SMTPStep({ onComplete, onBack, entryDirection }: SMTPStepProps) 
       render: (flow) => (
         <TextField
           label="SMTP username"
+          hint={
+            provider === "azure-acs"
+              ? "Format: <acs-resource>.<entra-app-client-id>.<tenant-id> - the emailSmtpUsername output of the cluster-setup deployment"
+              : undefined
+          }
           value={user}
           onChange={setUser}
-          placeholder="smtp_username"
+          placeholder={
+            provider === "azure-acs"
+              ? "rbcommxxxx.<app-id>.<tenant-id>"
+              : "smtp_username"
+          }
           onSubmit={() => {
             if (!user) {
               setError("SMTP username is required");
@@ -169,6 +180,11 @@ export function SMTPStep({ onComplete, onBack, entryDirection }: SMTPStepProps) 
       render: (flow) => (
         <TextField
           label="SMTP password"
+          hint={
+            provider === "azure-acs"
+              ? "The Entra app registration's client secret (az ad app credential reset)"
+              : undefined
+          }
           value={pass}
           onChange={setPass}
           mask
@@ -189,10 +205,18 @@ export function SMTPStep({ onComplete, onBack, entryDirection }: SMTPStepProps) 
       render: (flow) => (
         <TextField
           label="Sender email address"
-          hint="This must be verified with your email provider"
+          hint={
+            provider === "azure-acs"
+              ? "The emailSenderAddress output: DoNotReply@<...>.azurecomm.net, or notifications@<domain> once a custom sender domain is verified"
+              : "This must be verified with your email provider"
+          }
           value={from}
           onChange={setFrom}
-          placeholder="no-reply@yourdomain.com"
+          placeholder={
+            provider === "azure-acs"
+              ? "DoNotReply@xxxx.azurecomm.net"
+              : "no-reply@yourdomain.com"
+          }
           onSubmit={() => {
             if (!from) {
               setError("From address is required");

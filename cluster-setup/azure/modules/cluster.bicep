@@ -21,6 +21,7 @@ param systemNodeVmSize string
 
 param enableBurstPool bool
 param burstVmSize string
+param burstMinCount int
 param burstMaxCount int
 
 param serviceCidr string
@@ -151,9 +152,11 @@ var coreUserPool = union(
 var burstPool = union(
   {
     name: 'burst'
-    count: 0
+    // Warm pool: burstMinCount (default 1) keeps capacity ready so workers
+    // never fall back onto core nodes waiting for a cold scale-up.
+    count: burstMinCount
     enableAutoScaling: true
-    minCount: 0
+    minCount: burstMinCount
     maxCount: burstMaxCount
     vmSize: burstVmSize
     maxPods: maxPods

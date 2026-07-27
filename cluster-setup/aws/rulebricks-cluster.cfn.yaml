@@ -3,14 +3,11 @@ Description: >-
   Rulebricks EKS cluster: 3-AZ VPC (private nodes, public load balancers),
   hardened EKS with Pod Identity, core + burst nodegroups, one S3 data bucket,
   one IAM role (<cluster>-rulebricks), and independent off-by-default toggles
-  for managed MSK / ElastiCache / RDS / AMP - the chart runs Kafka, Valkey,
+  for managed MSK / ElastiCache / RDS / AMP. The helm chart runs Kafka, Valkey,
   and Postgres in-cluster for whichever you leave disabled. Outputs map 1:1 to
   the Rulebricks CLI wizard fields.
 
 # =============================================================================
-# See README.md for the full resource inventory, parameters, deploy, and
-# take-down commands. Every resource here is deployment-independent: nothing
-# needs a Rulebricks deployment name, so one cluster hosts many deployments.
 # The Rulebricks CLI creates the namespace-scoped Pod Identity associations
 # (vector / backup / prometheus / hps / hps-worker) at deploy time.
 # =============================================================================
@@ -43,6 +40,8 @@ Metadata:
       - Label: { default: "DNS (external-dns)" }
         Parameters:
           - EnableExternalDns
+          - CreateDnsZone
+          - DnsZoneName
           - DnsZoneId
       - Label: { default: Object storage }
         Parameters:
@@ -227,13 +226,29 @@ Parameters:
     Description: >-
       Create the <cluster>-external-dns Pod Identity role scoped to one Route53
       hosted zone so the chart's external-dns can manage DNS records
-      automatically (Azure dns-role parity). Requires DnsZoneId.
+      automatically (Azure dns-role parity). Provide DnsZoneName (zone created
+      here, delegated-subdomain model) or DnsZoneId (pre-existing zone).
+  CreateDnsZone:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: >-
+      Delegated-subdomain model: create the Route53 hosted zone named
+      DnsZoneName and output its NS records for a one-time delegation at the
+      parent domain. Set "false" to target a pre-existing zone via DnsZoneId.
+      Ignored when EnableExternalDns=false.
+  DnsZoneName:
+    Type: String
+    Default: ""
+    Description: >-
+      DNS zone for the deployment, e.g. rb.corp.com. Required when
+      EnableExternalDns=true and CreateDnsZone=true.
   DnsZoneId:
     Type: String
     Default: ""
     Description: >-
-      Route53 hosted zone ID (e.g. Z0123456789ABC) external-dns may write to.
-      Required when EnableExternalDns=true.
+      Pre-existing Route53 hosted zone ID (e.g. Z0123456789ABC) external-dns
+      may write to. Required when EnableExternalDns=true and CreateDnsZone=false.
 
   # ---------------------------------------------------------------------------
   # Object storage hardening
@@ -441,6 +456,9 @@ Conditions:
     ]
   RegistryMirrorEnabled: !Equals [!Ref EnableRegistryMirror, "true"]
   ExternalDnsEnabled: !Equals [!Ref EnableExternalDns, "true"]
+  DnsZoneCreated: !And
+    - !Condition ExternalDnsEnabled
+    - !Equals [!Ref CreateDnsZone, "true"]
   DataBucketProtectionEnabled: !Equals [!Ref EnableDataBucketProtection, "true"]
   ManagedKafkaEnabled: !Equals [!Ref EnableManagedKafka, "true"]
   ManagedRedisEnabled: !Equals [!Ref EnableManagedRedis, "true"]
@@ -1329,6 +1347,19 @@ Resources:
   # Route53 hosted zone so the chart's external-dns manages records
   # automatically (single-phase install with TLS from the start).
   # ===========================================================================
+  # Delegated-subdomain model: the zone (e.g. rb.corp.com) is created with the
+  # cluster; the DnsZoneNameServers output feeds a ONE-TIME NS delegation at
+  # the parent domain, after which external-dns manages every record and the
+  # chart's Let's Encrypt HTTP-01 issuer handles certificates - no per-record
+  # DNS access ever needed.
+  DnsZone:
+    Type: AWS::Route53::HostedZone
+    Condition: DnsZoneCreated
+    Properties:
+      Name: !Ref DnsZoneName
+      HostedZoneConfig:
+        Comment: !Sub "Rulebricks delegated zone for ${ClusterName}"
+
   ExternalDnsRole:
     Type: AWS::IAM::Role
     Condition: ExternalDnsEnabled
@@ -1351,7 +1382,10 @@ Resources:
                 Action:
                   - route53:ChangeResourceRecordSets
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:route53:::hostedzone/${DnsZoneId}"
+                  - !If
+                    - DnsZoneCreated
+                    - !Sub "arn:${AWS::Partition}:route53:::hostedzone/${DnsZone}"
+                    - !Sub "arn:${AWS::Partition}:route53:::hostedzone/${DnsZoneId}"
               - Effect: Allow
                 Action:
                   - route53:ListHostedZones
@@ -1626,8 +1660,18 @@ Outputs:
     Condition: ExternalDnsEnabled
     Description: >-
       Pod Identity role for the chart's external-dns ServiceAccount, scoped to
-      the DnsZoneId hosted zone.
+      the deployment's hosted zone.
     Value: !GetAtt ExternalDnsRole.Arn
+  DnsZoneNameServers:
+    Condition: DnsZoneCreated
+    Description: >-
+      Hand these to whoever controls the parent domain: one NS record set for
+      DnsZoneName delegating to them, and DNS is fully automated from then on.
+    Value: !Join [", ", !GetAtt DnsZone.NameServers]
+  DnsZoneIdOut:
+    Condition: DnsZoneCreated
+    Description: Route53 hosted zone ID of the created delegated zone.
+    Value: !Ref DnsZone
 
   # --- Metrics (CLI monitoring step) ------------------------------------------
   PrometheusWorkspaceId:

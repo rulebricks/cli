@@ -1,18 +1,15 @@
 targetScope = 'resourceGroup'
 
-@allowed([
-  'test'
-  'production'
-])
-@description('Selects low-cost test defaults or hardened production defaults. Every derived setting can still be overridden.')
-param deploymentProfile string = 'test'
-
+// There is no profile switch: parameters.test.bicepparam and
+// parameters.production.bicepparam enumerate every tunable value and ARE the
+// profiles. The defaults below exist only so a bare
+// `az deployment group create --template-file main.bicep` produces a small,
+// low-cost cluster; file-driven deploys override all of them explicitly.
 param clusterName string = 'rulebricks-cluster'
 param location string = resourceGroup().location
-param environmentName string = deploymentProfile
+param environmentName string = 'test'
 param resourceTags object = {
   environment: environmentName
-  managedBy: 'bicep'
   workload: 'rulebricks'
 }
 
@@ -23,15 +20,15 @@ param kubernetesVersion string = '1.34'
   'Standard'
   'Premium'
 ])
-param aksSkuTier string = deploymentProfile == 'production' ? 'Standard' : 'Free'
+param aksSkuTier string = 'Free'
 
-param enablePrivateCluster bool = deploymentProfile == 'production'
+param enablePrivateCluster bool = false
 param apiServerAuthorizedIpRanges array = []
-param enableEntraRbac bool = deploymentProfile == 'production'
+param enableEntraRbac bool = false
 
 @description('Entra group or user object IDs granted AKS RBAC Cluster Admin.')
 param aksAdminPrincipalIds array = []
-param availabilityZones array = deploymentProfile == 'production' ? ['1', '2', '3'] : []
+param availabilityZones array = []
 
 @allowed([
   'none'
@@ -39,7 +36,7 @@ param availabilityZones array = deploymentProfile == 'production' ? ['1', '2', '
   'rapid'
   'stable'
 ])
-param kubernetesUpgradeChannel string = deploymentProfile == 'production' ? 'stable' : 'none'
+param kubernetesUpgradeChannel string = 'none'
 
 @allowed([
   'None'
@@ -47,9 +44,9 @@ param kubernetesUpgradeChannel string = deploymentProfile == 'production' ? 'sta
   'SecurityPatch'
   'Unmanaged'
 ])
-param nodeOsUpgradeChannel string = deploymentProfile == 'production' ? 'NodeImage' : 'None'
+param nodeOsUpgradeChannel string = 'None'
 
-param enableMaintenanceWindow bool = deploymentProfile == 'production'
+param enableMaintenanceWindow bool = false
 
 @allowed([
   'Monday'
@@ -63,7 +60,7 @@ param enableMaintenanceWindow bool = deploymentProfile == 'production'
 param maintenanceDay string = 'Sunday'
 param maintenanceStartTime string = '02:00'
 param maintenanceUtcOffset string = '+00:00'
-param enableAzurePolicy bool = deploymentProfile == 'production'
+param enableAzurePolicy bool = false
 param enableKeyVaultSecretsProvider bool = false
 @description('Send AKS control-plane logs (kube-apiserver, kube-audit-admin, guard) to an existing Log Analytics workspace - EKS control-plane logging parity. Requires controlPlaneLogAnalyticsWorkspaceId.')
 param enableControlPlaneLogs bool = false
@@ -76,11 +73,15 @@ param postgresSubnetPrefix string = '10.240.5.0/24'
 param serviceCidr string = '172.16.0.0/16'
 param dnsServiceIP string = '172.16.0.10'
 param podCidr string = '192.168.0.0/16'
-param enableDataServicePrivateEndpoints bool = deploymentProfile == 'production'
+param enableDataServicePrivateEndpoints bool = false
 
 param nodeCount int = 3
-param maxNodeCount int = deploymentProfile == 'production' ? 5 : 4
-param nodeVmSize string = 'Standard_F4as_v6'
+param maxNodeCount int = 4
+// D-series v6 (AMD): current-generation general purpose, available across
+// zones in the mainstream regions and overlapping PostgreSQL Flexible Server
+// availability. v5 remains a drop-in substitute where a subscription has
+// quota there instead.
+param nodeVmSize string = 'Standard_D4as_v6'
 
 @minValue(10)
 @maxValue(250)
@@ -96,21 +97,28 @@ param osDiskSizeGB int = 64
 ])
 param osDiskType string = 'Managed'
 
-param separateSystemPool bool = deploymentProfile == 'production'
+param separateSystemPool bool = false
 param systemNodeCount int = 3
 param systemMaxNodeCount int = 3
-param systemNodeVmSize string = 'Standard_D2as_v4'
+param systemNodeVmSize string = 'Standard_D2as_v6'
 
-param enableBurstPool bool = deploymentProfile == 'production'
-param burstVmSize string = 'Standard_F16as_v6'
-param burstMaxCount int = 1
+param enableBurstPool bool = false
+param burstVmSize string = 'Standard_D16as_v6'
+// WARM burst pool: at least one burst node stays available so the KEDA-scaled
+// worker fleet lands there immediately instead of being absorbed into the
+// core pool while a cold node provisions. Set 0 only if you accept that
+// scale-up latency.
+param burstMinCount int = 1
+param burstMaxCount int = 4
 
 param createStorage bool = true
 param existingStorageAccountName string = ''
 param existingStorageAccountResourceGroup string = ''
-param dataContainerName string = '${clusterName}-data'
-param enableDecisionLogExport bool = true
-param enableBackupExport bool = true
+// Fixed convention the CLI detects (clusterSetupDefaults.ts): one container
+// holding the decision-logs/ and db-backups/ prefixes. Not parameterized -
+// decision-log export is required by ClickHouse and the in-app log UI, so
+// there is no deployment without this container.
+var dataContainerName = '${clusterName}-data'
 
 @allowed([
   'Standard_LRS'
@@ -119,17 +127,17 @@ param enableBackupExport bool = true
   'Standard_GZRS'
   'Standard_RAGZRS'
 ])
-param storageSkuName string = deploymentProfile == 'production' ? 'Standard_ZRS' : 'Standard_LRS'
+param storageSkuName string = 'Standard_LRS'
 
-param allowStorageSharedKeyAccess bool = deploymentProfile == 'test'
-param enableStorageVersioning bool = deploymentProfile == 'production'
+param allowStorageSharedKeyAccess bool = true
+param enableStorageVersioning bool = false
 
 @minValue(0)
 @maxValue(365)
-param storageSoftDeleteDays int = deploymentProfile == 'production' ? 30 : 7
+param storageSoftDeleteDays int = 7
 
-param enableStoragePrivateEndpoint bool = deploymentProfile == 'production'
-param enableStorageDeleteLock bool = deploymentProfile == 'production'
+param enableStoragePrivateEndpoint bool = false
+param enableStorageDeleteLock bool = false
 
 param enableMetricsRemoteWrite bool = false
 param createMonitorWorkspace bool = true
@@ -139,28 +147,35 @@ param enableManagedGrafana bool = false
 param grafanaName string = take('rbgraf${take(uniqueString(resourceGroup().id), 6)}', 23)
 
 param enableExternalDns bool = false
+@description('DNS zone for the deployment, e.g. rb.corp.com. With createDnsZone the template creates it and outputs the NS records for a one-time parent-domain delegation; otherwise it must already exist (see dnsZoneResourceGroup).')
 param dnsZoneName string = ''
+// Create the zone here (delegated-subdomain model) instead of requiring a
+// pre-existing zone. Ignored when enableExternalDns is false.
+param createDnsZone bool = true
+// Resource group of a PRE-EXISTING zone (createDnsZone=false only).
 param dnsZoneResourceGroup string = ''
-param rulebricksNamespace string = 'rulebricks'
 
-param enableKeyVaultIntegration bool = deploymentProfile == 'production'
+param enableKeyVaultIntegration bool = false
 param createKeyVault bool = true
 param keyVaultName string = take('rbkv${uniqueString(resourceGroup().id, clusterName)}', 24)
 param existingKeyVaultResourceGroup string = ''
-param allowKeyVaultPublicAccess bool = deploymentProfile == 'test'
-param enableKeyVaultPrivateEndpoint bool = deploymentProfile == 'production'
-param enableKeyVaultPurgeProtection bool = deploymentProfile == 'production'
+param allowKeyVaultPublicAccess bool = true
+param enableKeyVaultPrivateEndpoint bool = false
+param enableKeyVaultPurgeProtection bool = false
 
 @minValue(7)
 @maxValue(90)
-param keyVaultSoftDeleteRetentionDays int = deploymentProfile == 'production' ? 90 : 7
+param keyVaultSoftDeleteRetentionDays int = 7
 
 @description('Object IDs allowed to create and rotate secrets in a newly created vault.')
 param keyVaultWriterPrincipalIds array = []
 
-param esoServiceAccountName string = 'rulebricks-key-vault-reader'
+// Fixed convention: the ServiceAccount name the CLI's ESO manifests create
+// (ESO_READER_SERVICE_ACCOUNT in the CLI). The CLI creates the
+// namespace-scoped federated credential for it at deploy time.
+var esoServiceAccountName = 'rulebricks-secrets-reader'
 
-param enableContainerRegistry bool = deploymentProfile == 'production'
+param enableContainerRegistry bool = false
 param containerRegistryName string = take(
   '${replace(toLower(clusterName), '-', '')}acr${uniqueString(resourceGroup().id)}',
   50
@@ -173,7 +188,15 @@ param containerRegistryName string = take(
 ])
 param containerRegistrySku string = 'Premium'
 
-param allowContainerRegistryPublicAccess bool = deploymentProfile == 'test'
+// Rulebricks license key: a read-only Docker Hub access-token suffix (the
+// full token is dckr_pat_<license-key>, assembled below). Powers the
+// registry's pull-through cache of docker.io/rulebricks/*. Required for the
+// mirror to function when enableContainerRegistry is true; the value is
+// stored in the deployment's Key Vault, never in outputs.
+@secure()
+param rulebricksLicenseKey string = ''
+
+param allowContainerRegistryPublicAccess bool = true
 
 param enableManagedKafka bool = false
 param eventHubsNamespaceName string = '${toLower(clusterName)}-kafka-${take(uniqueString(resourceGroup().id), 6)}'
@@ -188,7 +211,9 @@ param eventHubsNamespaceName string = '${toLower(clusterName)}-kafka-${take(uniq
 ])
 param eventHubsCapacityUnits int = 1
 
-param kafkaTopicPrefix string = 'com.rulebricks.'
+// Fixed convention: must equal the Helm chart's topic prefix, so it is not an
+// operator knob.
+var kafkaTopicPrefix = 'com.rulebricks.'
 
 @minValue(1)
 @maxValue(100)
@@ -203,6 +228,24 @@ param kafkaRetentionHours int = 168
 param enableManagedRedis bool = false
 param redisName string = '${toLower(clusterName)}-redis-${take(uniqueString(resourceGroup().id), 6)}'
 param redisSkuName string = 'Balanced_B1'
+
+// Azure Communication Services Email: SMTP-compatible email for tenants where
+// Exchange Online basic-auth SMTP is retired (the app keeps plain SMTP config;
+// credentials come from an Entra app registration).
+param enableManagedEmail bool = false
+// ACS data-at-rest region; independent of `location`.
+param emailDataLocation string = 'United States'
+// Service principal OBJECT ID + client ID of the Entra app used for SMTP auth
+// (created with az ad app create - see modules/email.bicep header). Optional:
+// leave empty to provision email only and grant the role later.
+param emailSmtpAppPrincipalId string = ''
+param emailSmtpAppClientId string = ''
+// Branded sender domain (e.g. rb.corp.com), normally the delegated DNS zone
+// or a subdomain of it - the verification records are then created in that
+// zone automatically. Empty = the Azure-managed azurecomm.net sender. After
+// the first deploy, run the emailInitiateVerificationCommands outputs, wait
+// for Verified, then rerun the same deployment - it links automatically.
+param emailCustomDomain string = ''
 
 param enableManagedDatabase bool = false
 param postgresServerName string = '${toLower(clusterName)}-pg-${take(uniqueString(resourceGroup().id), 6)}'
@@ -274,6 +317,7 @@ module cluster 'modules/cluster.bicep' = {
     systemNodeVmSize: systemNodeVmSize
     enableBurstPool: enableBurstPool
     burstVmSize: burstVmSize
+    burstMinCount: burstMinCount
     burstMaxCount: burstMaxCount
     serviceCidr: serviceCidr
     dnsServiceIP: dnsServiceIP
@@ -302,15 +346,25 @@ module identity 'modules/identity.bicep' = {
     clusterName: clusterName
     location: location
     tags: resourceTags
-    oidcIssuerUrl: cluster.outputs.oidcIssuerUrl
     enableExternalDns: enableExternalDns
     enableExternalSecrets: enableKeyVaultIntegration
-    rulebricksNamespace: rulebricksNamespace
-    esoServiceAccountName: esoServiceAccountName
   }
 }
 
-module externalDnsRole 'modules/dns-role.bicep' = if (enableExternalDns) {
+// Delegated-subdomain model: create the zone alongside the cluster and grant
+// the external-dns identity on it. The dnsZoneNameServers output feeds the
+// one-time NS delegation at the parent domain.
+module dnsZone 'modules/dns-zone.bicep' = if (enableExternalDns && createDnsZone) {
+  name: '${clusterName}-dns-zone'
+  params: {
+    dnsZoneName: dnsZoneName
+    tags: resourceTags
+    principalId: identity.outputs.externalDnsPrincipalId
+  }
+}
+
+// Pre-existing zone (customer-owned): grant only.
+module externalDnsRole 'modules/dns-role.bicep' = if (enableExternalDns && !createDnsZone) {
   name: '${clusterName}-external-dns-role'
   scope: resourceGroup(effectiveDnsZoneResourceGroup)
   params: {
@@ -357,8 +411,6 @@ module storage 'modules/storage.bicep' = {
     createStorage: createStorage
     existingStorageAccountName: existingStorageAccountName
     dataContainerName: dataContainerName
-    enableDecisionLogExport: enableDecisionLogExport
-    enableBackupExport: enableBackupExport
     storageSkuName: storageSkuName
     allowSharedKeyAccess: allowStorageSharedKeyAccess
     enableBlobVersioning: enableStorageVersioning
@@ -372,7 +424,7 @@ module storage 'modules/storage.bicep' = {
   }
 }
 
-module storageRoleByo 'modules/storage-role.bicep' = if (!createStorage && (enableDecisionLogExport || enableBackupExport)) {
+module storageRoleByo 'modules/storage-role.bicep' = if (!createStorage) {
   name: '${clusterName}-storage-role'
   scope: resourceGroup(effectiveStorageResourceGroup)
   params: {
@@ -419,7 +471,14 @@ module acr 'modules/acr.bicep' = if (enableContainerRegistry) {
     allowPublicNetworkAccess: allowContainerRegistryPublicAccess
     privateEndpointsSubnetId: network.outputs.privateEndpointsSubnetId
     vnetId: network.outputs.vnetId
+    // Pull-through cache credentials live in the deployment's Key Vault;
+    // the cache is skipped (registry only) without a created vault or key.
+    vaultName: (enableKeyVaultIntegration && createKeyVault) ? keyVaultName : ''
+    dockerHubToken: rulebricksLicenseKey == '' ? '' : 'dckr_pat_${rulebricksLicenseKey}'
   }
+  dependsOn: [
+    keyVault
+  ]
 }
 
 module kafka 'modules/kafka.bicep' = if (enableManagedKafka) {
@@ -454,6 +513,24 @@ module redis 'modules/redis.bicep' = if (enableManagedRedis) {
   }
 }
 
+module email 'modules/email.bicep' = if (enableManagedEmail) {
+  name: '${clusterName}-email'
+  params: {
+    clusterName: clusterName
+    tags: resourceTags
+    dataLocation: emailDataLocation
+    smtpAppPrincipalId: emailSmtpAppPrincipalId
+    smtpAppClientId: emailSmtpAppClientId
+    customDomain: emailCustomDomain
+    // Verification records can only be created here when this deployment
+    // owns the zone; BYO zones get the records via output instead.
+    dnsZoneName: (enableExternalDns && createDnsZone) ? dnsZoneName : ''
+  }
+  dependsOn: [
+    dnsZone
+  ]
+}
+
 module postgres 'modules/postgres.bicep' = if (enableManagedDatabase) {
   name: '${clusterName}-postgres'
   params: {
@@ -474,7 +551,6 @@ module postgres 'modules/postgres.bicep' = if (enableManagedDatabase) {
   }
 }
 
-output deploymentProfile string = deploymentProfile
 output clusterName string = cluster.outputs.clusterName
 output resourceGroupName string = resourceGroup().name
 output location string = location
@@ -484,9 +560,12 @@ output rulebricksClientId string = identity.outputs.rulebricksClientId
 output storageAccountName string = storage.outputs.storageAccountName
 output dataContainer string = storage.outputs.dataContainer
 output externalDnsClientId string = identity.outputs.externalDnsClientId
+output dnsZoneNameOut string = enableExternalDns ? dnsZoneName : ''
+// Hand these to whoever controls the parent domain: one NS record set for
+// dnsZoneName delegating to them, and DNS is done forever.
+output dnsZoneNameServers array = enableExternalDns && createDnsZone ? dnsZone!.outputs.nameServers : []
 output externalSecretsClientId string = enableKeyVaultIntegration ? identity.outputs.externalSecretsClientId : ''
 output externalSecretsTenantId string = enableKeyVaultIntegration ? tenant().tenantId : ''
-output externalSecretsNamespace string = enableKeyVaultIntegration ? rulebricksNamespace : ''
 output externalSecretsServiceAccountName string = enableKeyVaultIntegration ? esoServiceAccountName : ''
 output keyVaultName string = enableKeyVaultIntegration ? keyVaultName : ''
 output keyVaultUri string = enableKeyVaultIntegration
@@ -518,6 +597,23 @@ output redisHost string = enableManagedRedis ? redis!.outputs.hostName : ''
 output redisPort int = enableManagedRedis ? redis!.outputs.port : 0
 output redisTlsEnabled bool = enableManagedRedis
 output redisAccessKeyCommand string = enableManagedRedis ? redis!.outputs.accessKeyCommand : ''
+
+// ACS Email: feed these into the Rulebricks CLI's SMTP step (provider
+// "Azure Communication Services"). The SMTP password is the Entra app's
+// client secret - never an output.
+output emailSenderAddress string = enableManagedEmail ? email!.outputs.senderAddress : ''
+output emailSmtpHost string = enableManagedEmail ? email!.outputs.smtpHost : ''
+output emailSmtpPort int = enableManagedEmail ? email!.outputs.smtpPort : 0
+output emailSmtpUsername string = enableManagedEmail ? email!.outputs.smtpUsername : ''
+// Custom sender domain phase-2 handoff: run these once, wait for Verified,
+// redeploy with emailCustomDomainReady=true.
+output emailInitiateVerificationCommands array = enableManagedEmail
+  ? email!.outputs.initiateVerificationCommands
+  : []
+// Verification records for custom domains hosted OUTSIDE the delegated zone.
+output emailCustomDomainVerificationRecords object = enableManagedEmail
+  ? email!.outputs.customDomainVerificationRecords
+  : {}
 
 output postgresHost string = enableManagedDatabase ? postgres!.outputs.fqdn : ''
 output postgresPort int = enableManagedDatabase ? postgres!.outputs.port : 0

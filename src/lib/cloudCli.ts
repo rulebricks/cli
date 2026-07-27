@@ -887,6 +887,216 @@ export async function checkAzureCli(): Promise<CloudCliStatus> {
 }
 
 /**
+ * Azure Flexible Server counterpart of checkAuroraLogicalReplication - but
+ * self-healing. cluster-setup sets wal_level=logical declaratively, yet it is
+ * a STATIC parameter that only takes effect after a server restart, which ARM
+ * cannot perform. Detect the pending state and perform the restart here: the
+ * database is idle on a first deploy, and this is a no-op on every subsequent
+ * one. Fail-open ("unknown") on any ambiguity, including denied approvals.
+ */
+export async function ensureAzurePostgresLogicalReplication(
+  host: string,
+  resourceGroup: string,
+): Promise<{
+  status: "ok" | "restarted" | "wrong-value" | "unknown";
+  value?: string;
+}> {
+  const serverName = host.split(".")[0];
+  if (!serverName || !resourceGroup) return { status: "unknown" };
+  try {
+    const res = await execCommand(
+      `az postgres flexible-server parameter show --resource-group ${resourceGroup} --server-name ${serverName} --name wal_level --output json`,
+      {
+        intent: "Verify database configuration",
+        provider: "azure",
+        timeout: 60000,
+      },
+    );
+    const parsed = JSON.parse(res.stdout || "{}") as {
+      value?: string;
+      isConfigPendingRestart?: boolean | string;
+    };
+    if (!parsed.value) return { status: "unknown" };
+    if (parsed.value.toLowerCase() !== "logical") {
+      return { status: "wrong-value", value: parsed.value };
+    }
+    const pendingRestart =
+      parsed.isConfigPendingRestart === true ||
+      String(parsed.isConfigPendingRestart).toLowerCase() === "true";
+    if (!pendingRestart) return { status: "ok" };
+    await execCommand(
+      `az postgres flexible-server restart --resource-group ${resourceGroup} --name ${serverName}`,
+      {
+        intent: "Restart managed database",
+        provider: "azure",
+        mutating: true,
+        // HA servers take a few minutes to fail over and come back.
+        timeout: 600000,
+      },
+    );
+    return { status: "restarted" };
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
+/**
+ * ACS branded email sender: when the configured sender address uses a custom
+ * domain, that domain must be VERIFIED (a POST action ARM cannot perform)
+ * and then LINKED to the communication service (only possible once
+ * verified). Both are plain control-plane calls, so self-heal here instead
+ * of asking the operator to run commands or redeploy infrastructure: kick
+ * off verification for any pending check, poll until Verified (the
+ * cluster-setup template already created the DNS records), and link. A
+ * no-op when the sender is the Azure-managed azurecomm.net domain or
+ * everything is already linked. Fail-open ("unknown") on ambiguity.
+ */
+export async function ensureAcsCustomEmailDomainLinked(
+  fromAddress: string,
+  resourceGroup: string,
+): Promise<{
+  status: "ok" | "linked" | "not-verified" | "unknown";
+  domain?: string;
+  detail?: string;
+}> {
+  const domain = fromAddress.split("@")[1]?.toLowerCase();
+  if (!domain || domain.endsWith(".azurecomm.net")) return { status: "ok" };
+  try {
+    const svcRes = await execCommand(
+      `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/emailServices --query "[0].name" --output tsv`,
+      { intent: "Verify email domain", provider: "azure" },
+    );
+    const emailService = svcRes.stdout.trim();
+    if (!emailService) return { status: "unknown" };
+
+    const showDomain = async (): Promise<{
+      id?: string;
+      verificationStates?: Record<string, { status?: string }>;
+    } | null> => {
+      const res = await execCommand(
+        `az communication email domain show --domain-name ${domain} --email-service-name ${emailService} --resource-group ${resourceGroup} --output json`,
+        { intent: "Verify email domain", provider: "azure" },
+      );
+      try {
+        return JSON.parse(res.stdout || "null");
+      } catch {
+        return null;
+      }
+    };
+    // The four states that gate linking (dmarc is reported but not required).
+    const REQUIRED_CHECKS = ["domain", "spf", "dkim", "dkim2"];
+    const unverified = (info: {
+      verificationStates?: Record<string, { status?: string }>;
+    }) =>
+      REQUIRED_CHECKS.filter(
+        (k) => info.verificationStates?.[k]?.status !== "Verified",
+      );
+
+    let info = await showDomain();
+    if (!info?.id) return { status: "unknown" };
+
+    if (unverified(info).length > 0) {
+      // initiate-verification is idempotent for InProgress checks; the
+      // verification-type argument uses the API's capitalized names.
+      const typeName: Record<string, string> = {
+        domain: "Domain",
+        spf: "SPF",
+        dkim: "DKIM",
+        dkim2: "DKIM2",
+      };
+      for (const check of unverified(info)) {
+        await execCommand(
+          `az communication email domain initiate-verification --domain-name ${domain} --email-service-name ${emailService} --resource-group ${resourceGroup} --verification-type ${typeName[check]}`,
+          { intent: "Verify email domain", provider: "azure", mutating: true, timeout: 120000 },
+        );
+      }
+      // DNS records were created with the zone in the same deployment, so
+      // verification normally lands within a couple of minutes.
+      const deadline = Date.now() + 6 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 15000));
+        info = await showDomain();
+        if (info?.id && unverified(info).length === 0) break;
+      }
+      if (!info?.id || unverified(info).length > 0) {
+        return {
+          status: "not-verified",
+          domain,
+          detail: info?.id ? unverified(info).join(", ") : "domain not found",
+        };
+      }
+    }
+
+    const commRes = await execCommand(
+      `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/communicationServices --query "[0].name" --output tsv`,
+      { intent: "Verify email domain", provider: "azure" },
+    );
+    const commService = commRes.stdout.trim();
+    if (!commService) return { status: "unknown" };
+    const linkedRes = await execCommand(
+      `az communication show --name ${commService} --resource-group ${resourceGroup} --query linkedDomains --output json`,
+      { intent: "Verify email domain", provider: "azure" },
+    );
+    let linked: string[] = [];
+    try {
+      linked = JSON.parse(linkedRes.stdout || "[]");
+    } catch {
+      return { status: "unknown" };
+    }
+    const alreadyLinked = linked.some(
+      (id) => id.toLowerCase() === info!.id!.toLowerCase(),
+    );
+    if (alreadyLinked) return { status: "ok", domain };
+    const allDomains = [...linked, info.id]
+      .map((id) => `"${id}"`)
+      .join(" ");
+    await execCommand(
+      `az communication update --name ${commService} --resource-group ${resourceGroup} --linked-domains ${allDomains}`,
+      { intent: "Link email domain", provider: "azure", mutating: true, timeout: 120000 },
+    );
+    return { status: "linked", domain };
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
+/**
+ * Probe Key Vault DATA-PLANE access from this machine. Secret seeding runs
+ * here via `az keyvault secret set`, and enterprise vaults commonly disable
+ * public network access (allowKeyVaultPublicAccess=false + private endpoint,
+ * the cluster-setup production default). In that posture the deploy would
+ * otherwise fail midway through the install with a raw Azure error; this
+ * classifies the failure up front so preflight can stop with real guidance.
+ * Ambiguous failures return ok so a probe quirk never blocks a deploy that
+ * would have succeeded.
+ */
+export async function checkAzureKeyVaultDataPlaneAccess(
+  vaultName: string,
+): Promise<{ ok: boolean; reason?: "network" | "rbac"; detail?: string }> {
+  const result = await execCommand(
+    `az keyvault secret list --vault-name ${vaultName} --maxresults 1 --output none`,
+    { intent: "Verify Key Vault access", provider: "azure", timeout: 45000 },
+  );
+  const stderr = result.stderr || "";
+  // az writes nothing on success (--output none); classify failures.
+  if (
+    /public network access is disabled|not authorized.*(trusted service|ip address)|Connection was closed|ConnectionError|getaddrinfo|connection (refused|timed out)|Firewall/i.test(
+      stderr,
+    )
+  ) {
+    return { ok: false, reason: "network", detail: stderr.trim() };
+  }
+  if (
+    /ForbiddenByRbac|AuthorizationFailed|does not have secrets (list|get|set) permission|Caller is not authorized/i.test(
+      stderr,
+    )
+  ) {
+    return { ok: false, reason: "rbac", detail: stderr.trim() };
+  }
+  return { ok: true };
+}
+
+/**
  * Get the active Azure subscription ID
  */
 export async function getAzureSubscriptionId(): Promise<string | null> {
@@ -1502,6 +1712,47 @@ export async function updateKubeconfig(
           },
         );
         if (result.stderr && !result.stdout) throw new Error(result.stderr);
+        // Entra-RBAC clusters (enableEntraRbac in cluster-setup, the
+        // production default): get-credentials writes a kubelogin exec block
+        // that defaults to INTERACTIVE device-code login, which hangs every
+        // kubectl call this CLI makes. Detect that kubeconfig shape, REQUIRE
+        // kubelogin, and convert the exec block to reuse the
+        // already-authenticated Azure CLI session. Local-account clusters
+        // write plain client-cert kubeconfigs and skip all of this.
+        let execPlugin = "";
+        try {
+          const view = await execa("kubectl", [
+            "config",
+            "view",
+            "--minify",
+            "--output",
+            "jsonpath={.users[0].user.exec.command}",
+          ]);
+          execPlugin = view.stdout.trim();
+        } catch {
+          // Unreadable kubeconfig/context: the cluster access check that
+          // follows every refresh will surface it with its own guidance.
+        }
+        if (execPlugin.includes("kubelogin")) {
+          try {
+            await execa("kubelogin", ["--version"]);
+          } catch {
+            throw new Error(
+              [
+                `Cluster ${clusterName} uses Entra ID RBAC (enableEntraRbac), so kubectl authentication requires kubelogin - which is not installed on this machine.`,
+                "  • Install it: brew install Azure/kubelogin/kubelogin (macOS)",
+                "  • Other platforms: https://azure.github.io/kubelogin/install.html",
+                "  • Then re-run this command.",
+              ].join("\n"),
+            );
+          }
+          try {
+            await execa("kubelogin", ["convert-kubeconfig", "-l", "azurecli"]);
+          } catch {
+            // Conversion is best-effort once the binary exists; kubectl will
+            // surface any residual auth problem with kubelogin's own hints.
+          }
+        }
       }
       return;
   }
@@ -1780,6 +2031,7 @@ export async function listElastiCacheInstances(
 export async function listAzureRedisInstances(): Promise<
   DiscoveredRedisInstance[]
 > {
+  const instances: DiscoveredRedisInstance[] = [];
   try {
     const result = await execCommand(
       'az redis list --query "[].{name:name,host:hostName,port:port,sslPort:sslPort,rg:resourceGroup}" --output json',
@@ -1792,20 +2044,50 @@ export async function listAzureRedisInstances(): Promise<
       sslPort?: number;
       rg?: string;
     }>;
-    return caches
-      .filter((cache) => cache.host)
-      .map((cache) => ({
+    for (const cache of caches) {
+      if (!cache.host) continue;
+      instances.push({
         name: cache.name,
         host: cache.host,
         port: cache.sslPort ?? cache.port ?? 6380,
         tls: !!cache.sslPort,
         authEnabled: true,
         resourceGroup: cache.rg,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      });
+    }
   } catch {
-    return [];
+    // Classic-tier listing failed; Enterprise listing below may still work.
   }
+  try {
+    // Azure Managed Redis (the cluster-setup template's redis.bicep) is
+    // Microsoft.Cache/redisEnterprise - a DIFFERENT resource type that
+    // `az redis list` never returns. Databases listen with TLS on 10000.
+    // Requires the `redisenterprise` az extension; when absent this fails
+    // and the instance can still be entered manually.
+    const result = await execCommand(
+      'az redisenterprise list --query "[].{name:name,host:hostName,rg:resourceGroup}" --output json',
+      { intent: "Discover managed Redis", provider: "azure" },
+    );
+    const clusters = JSON.parse(result.stdout || "[]") as Array<{
+      name: string;
+      host: string;
+      rg?: string;
+    }>;
+    for (const cluster of clusters) {
+      if (!cluster.host) continue;
+      instances.push({
+        name: cluster.name,
+        host: cluster.host,
+        port: 10000,
+        tls: true,
+        authEnabled: true,
+        resourceGroup: cluster.rg,
+      });
+    }
+  } catch {
+    // Extension missing or listing failed; classic results (if any) stand.
+  }
+  return instances.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
@@ -2205,6 +2487,18 @@ export async function getAzureRedisKey(
   try {
     const result = await execCommand(
       `az redis list-keys --name ${name} --resource-group ${resourceGroup} --query primaryKey --output tsv`,
+      { intent: "Fetch service credential", provider: "azure" },
+    );
+    const key = result.stdout.trim();
+    if (key) return key;
+  } catch {
+    // Fall through to the Enterprise-tier lookup.
+  }
+  try {
+    // Azure Managed Redis (redisEnterprise) keys live on the database
+    // resource, under a different command group than classic caches.
+    const result = await execCommand(
+      `az redisenterprise database list-keys --cluster-name ${name} --resource-group ${resourceGroup} --query primaryKey --output tsv`,
       { intent: "Fetch service credential", provider: "azure" },
     );
     return result.stdout.trim() || null;

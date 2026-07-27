@@ -20,7 +20,7 @@ export const LOGS_TOPIC_PARTITIONS = 24;
 // ISR replication); the in-cluster broker is single-replica by default.
 export const TOPIC_REPLICATION_FACTOR = 1;
 
-// Decision-log archive batching: flush a gzipped NDJSON file at ~64 MiB
+// Decision-log archive batching: flush a zstd-compressed NDJSON file at ~64 MiB
 // (uncompressed) or after 5 minutes, whichever comes first.
 //
 // max_bytes MUST stay well below the Vector pod's memory limit
@@ -33,6 +33,20 @@ export const TOPIC_REPLICATION_FACTOR = 1;
 export const DECISION_LOG_BATCH = {
   max_bytes: 67108864,
   timeout_secs: 300,
+} as const;
+
+// Vector -> ClickHouse dual-write into the decision_logs_recent hot tier
+// (ClickStack mode only). Small, frequent batches keep recent decisions
+// queryable within seconds. The buffer is a bounded 1 GiB disk buffer with
+// when_full: drop_newest - the hot tier is a CACHE over the durable
+// object-storage archive, so when ClickHouse is down or its disk guard
+// rejects inserts, Vector must drop hot-tier events rather than backpressure
+// the Kafka source and stall the archive sink (the system of record).
+// Internal tuning constants, deliberately NOT user-facing config.
+export const DECISION_LOG_ACCELERATION_SINK = {
+  batchMaxBytes: 10485760,
+  batchTimeoutSecs: 5,
+  bufferMaxSize: 1073741824,
 } as const;
 
 // In-cluster Prometheus sizing (always installed; the wizard only configures

@@ -125,6 +125,26 @@ resource maxWalSenders 'Microsoft.DBforPostgreSQL/flexibleServers/configurations
   ]
 }
 
+// Azure blocks CREATE EXTENSION unless the extension is allow-listed here
+// (unlike RDS, where these ship enabled). Without uuid-ossp/pgcrypto the
+// chart's init migration fails on every UUID-default column, so the app
+// schema silently never materializes. pg_cron and pg_stat_statements are in
+// Azure's default shared_preload_libraries, so no restart is needed for any
+// of these. Supabase-only extensions (pgsodium, pgjwt, pg_graphql, pg_net,
+// supabase_vault) do not exist on Flexible Server; the chart tolerates their
+// absence, as it does on RDS.
+resource allowedExtensions 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2024-08-01' = {
+  parent: server
+  name: 'azure.extensions'
+  properties: {
+    value: 'uuid-ossp,pgcrypto,pg_stat_statements,pg_cron'
+    source: 'user-override'
+  }
+  dependsOn: [
+    maxWalSenders
+  ]
+}
+
 output fqdn string = server.properties.fullyQualifiedDomainName
 output port int = 5432
 output databaseName string = 'postgres'

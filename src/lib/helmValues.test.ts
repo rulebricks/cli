@@ -42,6 +42,14 @@ const BURST_POOL_TOLERATION: Toleration = {
   effect: "NoSchedule",
 };
 
+// Per-node daemonsets also cover AKS dedicated system-pool nodes (keyed
+// toleration - never a bare Exists).
+const CRITICAL_ADDONS_TOLERATION: Toleration = {
+  key: "CriticalAddonsOnly",
+  operator: "Exists",
+  effect: "NoSchedule",
+};
+
 function cloneFixture(name: string): DeploymentConfig {
   const entry = matrix.find((c) => c.name === name);
   assert.ok(entry, `missing matrix fixture ${name}`);
@@ -163,11 +171,20 @@ test("ClickStack is the default in-cluster observability backend", () => {
     limits: { cpu: "1000m", memory: "1Gi" },
   });
   assert.equal(values["vector-agent"].enabled, false);
-  assert.equal(values.vector.customConfig.sinks.decision_logs_clickhouse, undefined);
+  // ClickStack mode dual-writes the decision_logs_recent hot tier: a bounded
+  // best-effort cache sink alongside the durable object-storage archive sink.
+  const chSink = values.vector.customConfig.sinks.decision_logs_clickhouse;
+  assert.ok(chSink, "expected the decision_logs_clickhouse hot-tier sink");
+  assert.equal(chSink.type, "clickhouse");
+  assert.equal(chSink.table, "decision_logs_recent");
+  assert.equal(chSink.database, "rulebricks");
+  // drop_newest is load-bearing: a ClickHouse outage or full disk must drop
+  // hot-tier events instead of backpressuring Kafka and stalling the archive.
+  assert.equal(chSink.buffer.when_full, "drop_newest");
   assert.ok(values.vector.customConfig.sinks.decision_logs);
   assert.equal(
     values.vector.env.some((entry: { name?: string }) => entry.name === "CLICKHOUSE_PASSWORD"),
-    false,
+    true,
   );
   assert.equal(values.global.tracing, undefined);
   assert.equal(values.traefik.tracing.otlp.enabled, true);
@@ -194,6 +211,53 @@ test("built-in observability settings flow into generated Helm values", () => {
   assert.equal(values.global.clickstack.clickhouse, undefined);
   assert.equal(values.clickhouse.persistence.size, "250Gi");
   assert.equal(values.clickstack.ferretdb.persistence.size, "10Gi");
+});
+
+test("Azure auto-DNS wires workload identity through the external-dns block", () => {
+  const config = cloneFixture("azure-external-postgres");
+  config.dns = { provider: "azure", autoManage: true };
+
+  const values = buildHelmValues(config, {
+    tlsEnabled: true,
+    externalDnsAzureClientId: "11111111-2222-3333-4444-555555555555",
+  }) as Record<string, any>;
+
+  const extDns = values["external-dns"];
+  assert.equal(extDns.enabled, true);
+  assert.equal(extDns.provider.name, "azure");
+  // Fixed SA name: the federated credential the CLI creates targets it.
+  assert.equal(extDns.serviceAccount.name, "external-dns");
+  assert.equal(
+    extDns.serviceAccount.annotations["azure.workload.identity/client-id"],
+    "11111111-2222-3333-4444-555555555555",
+  );
+  assert.equal(extDns.podLabels["azure.workload.identity/use"], "true");
+  // azure.json comes from the Secret deploy applies (applyExternalDnsAzureConfig).
+  assert.equal(
+    extDns.extraVolumes[0].secret.secretName,
+    "external-dns-azure-config",
+  );
+  assert.equal(extDns.extraVolumeMounts[0].mountPath, "/etc/kubernetes");
+
+  assert.equal(validateHelmValues(values).valid, true);
+});
+
+test("AWS auto-DNS pins the external-dns ServiceAccount name without Azure extras", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  config.dns = { provider: "route53", autoManage: true };
+
+  const values = buildHelmValues(config, {
+    tlsEnabled: true,
+  }) as Record<string, any>;
+
+  const extDns = values["external-dns"];
+  assert.equal(extDns.enabled, true);
+  assert.equal(extDns.provider.name, "aws");
+  // Pod Identity association targets this fixed name; credentials are
+  // injected by EKS, so no annotations/volumes are needed.
+  assert.deepEqual(extDns.serviceAccount, { name: "external-dns" });
+  assert.equal(extDns.podLabels, undefined);
+  assert.equal(extDns.extraVolumes, undefined);
 });
 
 test("buildHelmValues rejects self-hosted Supabase without a JWT secret early", () => {
@@ -366,7 +430,7 @@ test("Valkey Admin ingress emits public hostname and BasicAuth users", () => {
   assert.deepEqual(valkeyAdmin.ingress.allowedIPs, ["203.0.113.0/24"]);
 });
 
-test("ClickHouse decision-log bootstrap reads only the object-storage archive", (t) => {
+test("ClickHouse bootstrap ships a disk-pressure-bounded hot tier over the archive", (t) => {
   const candidates = [
     process.env.RULEBRICKS_CHART_DIR,
     path.resolve(process.cwd(), "../private/helm"),
@@ -388,7 +452,19 @@ test("ClickHouse decision-log bootstrap reads only the object-storage archive", 
 
   assert.match(defaults, /rulebricks\.decision_logs_archive/);
   assert.match(defaults, /CREATE OR REPLACE VIEW rulebricks\.decision_logs AS SELECT/);
-  assert.doesNotMatch(defaults, /rulebricks\.decision_logs_recent/);
+  // ClickStack mode creates the decision_logs_recent hot tier: daily
+  // partitions (fine-grained eviction units for the retention CronJob), an
+  // insert guard so a broken CronJob can't fill the volume, and a dynamic
+  // hot/cold boundary read from system.parts so an evicted partition is
+  // transparently served by the archive instead of leaving a hole.
+  assert.match(defaults, /CREATE TABLE IF NOT EXISTS rulebricks\.decision_logs_recent/);
+  assert.match(defaults, /PARTITION BY toYYYYMMDD\(timestamp\)/);
+  assert.match(defaults, /min_free_disk_ratio_to_perform_insert/);
+  assert.match(defaults, /minOrNull\(toUInt32\(partition\)\)/);
+  assert.match(defaults, /FROM system\.parts/);
+  // The hot tier is bounded by disk pressure, NEVER by a time TTL: an
+  // unbounded burst must evict by size, and a fixed retention window would
+  // reintroduce the fill-the-PVC failure mode that got the tier removed.
   assert.doesNotMatch(defaults, /TTL toDateTime\(timestamp\)/);
 });
 
@@ -399,8 +475,16 @@ test("BYO observability opt-out disables ClickStack and keeps export paths", () 
   assert.equal(values.global.clickstack.enabled, false);
   assert.equal(values.global.clickstack.clickhouse, undefined);
   assert.equal(values.clickstack.enabled, undefined);
+  // BYO mode stays fully stateless and archive-only: no hot-tier dual-write,
+  // no ClickHouse credentials in Vector, decision logs served straight from
+  // the object-storage archive view.
   assert.equal(values.clickhouse.persistence.enabled, false);
   assert.equal(values.vector.customConfig.sinks.decision_logs_clickhouse, undefined);
+  assert.ok(values.vector.customConfig.sinks.decision_logs);
+  assert.equal(
+    values.vector.env.some((entry: { name?: string }) => entry.name === "CLICKHOUSE_PASSWORD"),
+    false,
+  );
   assert.equal(values.global.tracing.destination, "elastic");
   assert.deepEqual(
     values["kube-prometheus-stack"].prometheus.prometheusSpec.remoteWrite,
@@ -1084,7 +1168,10 @@ test("appLogs enabled produces a vector-agent with an elasticsearch sink", () =>
   assert.equal(agent.enabled, true);
   assert.equal(agent.role, "Agent");
   assertNoBareExistsToleration("vector-agent", agent.tolerations);
-  assert.deepEqual(agent.tolerations, [BURST_POOL_TOLERATION]);
+  assert.deepEqual(agent.tolerations, [
+    BURST_POOL_TOLERATION,
+    CRITICAL_ADDONS_TOLERATION,
+  ]);
   assert.equal(
     agent.customConfig.sources.kubernetes_logs.type,
     "kubernetes_logs",
@@ -1112,7 +1199,10 @@ test("operational DaemonSets use explicit safe tolerations", () => {
   const prepullTolerations = values.rulebricks.hps.imagePrepull
     .tolerations as Toleration[];
   assertNoBareExistsToleration("imagePrepull", prepullTolerations);
-  assert.deepEqual(prepullTolerations, [BURST_POOL_TOLERATION]);
+  assert.deepEqual(prepullTolerations, [
+    BURST_POOL_TOLERATION,
+    CRITICAL_ADDONS_TOLERATION,
+  ]);
 });
 
 test("operational DaemonSet tolerations include ARM and burst pools explicitly", () => {

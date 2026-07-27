@@ -2,14 +2,15 @@ param clusterName string
 param location string
 param tags object
 
-@description('AKS OIDC issuer URL.')
-param oidcIssuerUrl string
-
 param enableExternalDns bool
 param enableExternalSecrets bool
-param rulebricksNamespace string
-param esoServiceAccountName string
 
+// NO federated credentials here: the trust between an identity and a
+// Kubernetes ServiceAccount is namespace-scoped, and deployment namespaces are
+// per-deployment (rulebricks-<name>), unknowable at cluster-setup time. The
+// Rulebricks CLI creates the federated credentials at deploy time (see
+// workloadIdentity.ts ensureAzure), exactly like AWS Pod Identity
+// associations. This module only provisions the identities themselves.
 resource rulebricksIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: '${clusterName}-rulebricks'
   location: location
@@ -22,34 +23,10 @@ resource externalDnsIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2
   tags: tags
 }
 
-resource externalDnsFederatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = if (enableExternalDns) {
-  parent: externalDnsIdentity
-  name: 'external-dns'
-  properties: {
-    issuer: oidcIssuerUrl
-    subject: 'system:serviceaccount:${rulebricksNamespace}:external-dns'
-    audiences: [
-      'api://AzureADTokenExchange'
-    ]
-  }
-}
-
 resource externalSecretsIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (enableExternalSecrets) {
   name: '${clusterName}-external-secrets'
   location: location
   tags: tags
-}
-
-resource externalSecretsFederatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = if (enableExternalSecrets) {
-  parent: externalSecretsIdentity
-  name: 'external-secrets'
-  properties: {
-    issuer: oidcIssuerUrl
-    subject: 'system:serviceaccount:${rulebricksNamespace}:${esoServiceAccountName}'
-    audiences: [
-      'api://AzureADTokenExchange'
-    ]
-  }
 }
 
 output rulebricksClientId string = rulebricksIdentity.properties.clientId

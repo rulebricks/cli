@@ -159,11 +159,19 @@ export async function checkClusterAccessible(): Promise<string | null> {
       parts.push(
         "  • Refresh credentials: az aks get-credentials --name <cluster> --resource-group <rg>",
       );
+      parts.push(
+        "  • Entra-RBAC clusters (enableEntraRbac) need kubelogin: brew install Azure/kubelogin/kubelogin, then kubelogin convert-kubeconfig -l azurecli",
+      );
     } else if (isConnectionError) {
       // Connection/network issues
       parts.push("  • Check if the cluster is running and accessible");
       parts.push("  • Verify network connectivity to the cluster endpoint");
-      parts.push("  • Check if VPN connection is required");
+      parts.push(
+        "  • Private API servers (AKS enablePrivateCluster / EKS PrivateOnly) are only reachable from the cluster network: connect via VPN, peering, or a jump host",
+      );
+      parts.push(
+        "  • If the API server uses an IP allowlist (authorized IP ranges), ensure this machine's IP is included",
+      );
     } else {
       // Generic suggestions
       parts.push("  • Verify your kubeconfig is correct: kubectl config view");
@@ -374,14 +382,44 @@ export async function inferClusterCapabilities(): Promise<ClusterCapabilities | 
     const schedulableNodes =
       data.items?.filter((node) => !node.spec?.unschedulable) ?? [];
 
+    // A node only counts toward the stack's usable capacity when its
+    // NoSchedule/NoExecute taints are ones the chart tolerates (arch taints -
+    // the chart adds arm64 tolerations when needed) or transient kubelet
+    // lifecycle taints (node.kubernetes.io/not-ready etc.). Everything else
+    // keeps core workloads off the node: AKS dedicated system pools
+    // (CriticalAddonsOnly=true:NoSchedule), the chart's own burst pool taint
+    // (rulebricks.com/pool=burst - worker-only capacity, irrelevant to the
+    // steady-state floor), or any BYO taint. Counting those nodes inflated
+    // eligibleCpuCores/eligibleMemoryGi and let undersized clusters pass the
+    // wizard's sizing gate.
+    const stackSchedulable = (node: (typeof schedulableNodes)[number]) =>
+      (node.spec?.taints ?? []).every(
+        (taint) =>
+          (taint.effect !== "NoSchedule" && taint.effect !== "NoExecute") ||
+          taint.key === "kubernetes.io/arch" ||
+          (taint.key ?? "").startsWith("node.kubernetes.io/"),
+      );
+
     let totalCpu = 0;
     let totalMemoryGi = 0;
+    let eligibleCpu = 0;
+    let eligibleMemoryGi = 0;
+    let eligibleNodeCount = 0;
     let arm64TolerationRequired = false;
     const architectures = new Set<"amd64" | "arm64">();
 
     for (const node of schedulableNodes) {
-      totalCpu += parseCpuToCores(node.status?.allocatable?.cpu || "0");
-      totalMemoryGi += parseMemoryToGi(node.status?.allocatable?.memory || "0");
+      const nodeCpu = parseCpuToCores(node.status?.allocatable?.cpu || "0");
+      const nodeMemoryGi = parseMemoryToGi(
+        node.status?.allocatable?.memory || "0",
+      );
+      totalCpu += nodeCpu;
+      totalMemoryGi += nodeMemoryGi;
+      if (stackSchedulable(node)) {
+        eligibleCpu += nodeCpu;
+        eligibleMemoryGi += nodeMemoryGi;
+        eligibleNodeCount += 1;
+      }
 
       const architecture = normalizeNodeArchitecture(
         node.status?.nodeInfo?.architecture ||
@@ -416,11 +454,13 @@ export async function inferClusterCapabilities(): Promise<ClusterCapabilities | 
     return {
       nodeArchitecture: summarizeNodeArchitecture(architectures),
       arm64TolerationRequired,
-      schedulableNodeCount: schedulableNodes.length,
+      // Nodes the STACK can schedule on (untolerated-taint nodes excluded);
+      // total* keeps the cluster-wide (non-cordoned) view for display.
+      schedulableNodeCount: eligibleNodeCount,
       totalCpuCores: totalCpu,
       totalMemoryGi,
-      eligibleCpuCores: roundUpForEligibility(totalCpu),
-      eligibleMemoryGi: roundUpForEligibility(totalMemoryGi),
+      eligibleCpuCores: roundUpForEligibility(eligibleCpu),
+      eligibleMemoryGi: roundUpForEligibility(eligibleMemoryGi),
       totalPersistentStorageGi,
       storageClasses,
       defaultStorageClass,

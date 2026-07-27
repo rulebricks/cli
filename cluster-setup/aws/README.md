@@ -66,7 +66,16 @@ DNS:
 | Parameter | Default | Purpose |
 | --- | --- | --- |
 | `EnableExternalDns` | `"false"` | `<cluster>-external-dns` Pod Identity role for the chart's external-dns |
-| `DnsZoneId` | `""` | Route53 hosted zone the role may write to (required when enabled) |
+| `CreateDnsZone` | `"true"` | Create the `DnsZoneName` hosted zone here (delegated-subdomain model) |
+| `DnsZoneName` | `""` | Zone to create, e.g. `rb.corp.com` (required when creating) |
+| `DnsZoneId` | `""` | Pre-existing hosted zone instead (`CreateDnsZone=false`) |
+
+With `EnableExternalDns=true` and `CreateDnsZone=true`, the stack creates the
+hosted zone and outputs `DnsZoneNameServers`. Hand those NS records to whoever
+controls the parent domain for a one-time delegation; afterwards the chart's
+external-dns (bound to the role by `rulebricks deploy`) manages every record
+and Let's Encrypt HTTP-01 handles certificates - no per-record DNS access
+needed.
 
 Object storage:
 
@@ -130,7 +139,8 @@ Conditionally created:
 | Interface endpoints + SG | `AWS::EC2::VPCEndpoint` x7, `AWS::EC2::SecurityGroup` | `EnableVpcInterfaceEndpoints` |
 | External Secrets IAM role | `AWS::IAM::Role` (`<cluster>-external-secrets`; read-only on `SecretsPrefix/*`) | `EnableExternalSecrets` |
 | Registry mirror | `AWS::ECR::PullThroughCacheRule` + credential secret (`ecr-pullthroughcache/<cluster>-dockerhub`) + repository creation template | `EnableRegistryMirror` |
-| external-dns IAM role | `AWS::IAM::Role` (`<cluster>-external-dns`; scoped to `DnsZoneId`) | `EnableExternalDns` |
+| Route53 hosted zone | `AWS::Route53::HostedZone` (`DnsZoneName`; NS records in `DnsZoneNameServers` output) | `EnableExternalDns` + `CreateDnsZone` |
+| external-dns IAM role | `AWS::IAM::Role` (`<cluster>-external-dns`; scoped to the created or provided zone) | `EnableExternalDns` |
 | AMP workspace | `AWS::APS::Workspace` (`<cluster>-amp`) | `EnableManagedPrometheus` |
 | MSK cluster + SG | `AWS::MSK::Cluster` (`<cluster>-kafka`), `AWS::EC2::SecurityGroup` (9098 from nodes only) | `EnableManagedKafka` |
 | ElastiCache Valkey + SG + subnet group + AUTH secret | `AWS::ElastiCache::ReplicationGroup` (`<cluster>-redis`), `AWS::SecretsManager::Secret` (`<cluster>/redis-auth`) | `EnableManagedRedis` |
