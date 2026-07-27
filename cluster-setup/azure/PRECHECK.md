@@ -43,14 +43,21 @@ Confirm the defaults are what you want; each flips with one parameter:
 
 ## 5. Values to have on hand
 
+For the parameter file:
+
 - [ ] aksAdminPrincipalIds - Entra object IDs of the cluster admins
 - [ ] keyVaultWriterPrincipalIds - object IDs allowed to seed secrets
       (include whoever runs the Rulebricks deploy)
 - [ ] dnsZoneName - the subdomain from step 2
-- [ ] The Entra app for email: emailSmtpAppPrincipalId and
-      emailSmtpAppClientId go in the parameter file; its client secret is
-      entered later as the SMTP password in the Rulebricks CLI (secrets are
-      never parameter values). Can be created after the first deploy.
+
+For the Rulebricks CLI (not the parameter file - the CLI wires these up at
+deploy time, like SSO):
+
+- [ ] An Entra app for email: `az ad app create --display-name "Rulebricks SMTP"`
+      then `az ad sp create --id <appId>` and `az ad app credential reset`.
+      The CLI takes the app's client ID (into the SMTP username) and its
+      client secret (the SMTP password), and grants the app access to the
+      email service during deploy.
 
 ## 6. Exports
 

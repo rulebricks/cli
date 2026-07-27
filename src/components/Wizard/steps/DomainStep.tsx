@@ -21,6 +21,11 @@ import {
   DNS_PROVIDER_NAMES,
   isSupportedDnsProvider,
 } from "../../../types/index.js";
+import {
+  findAzureDnsZone,
+  azureManagedIdentityExists,
+  AzureDnsZoneInfo,
+} from "../../../lib/cloudCli.js";
 
 interface DomainStepProps {
   onComplete: () => void;
@@ -56,6 +61,47 @@ export function DomainStep({
   );
   const [validating, setValidating] = useState(false);
 
+  // Azure DNS auto-detection. When the cluster-setup zone AND the
+  // external-dns identity already exist, auto-manage is unambiguously the
+  // right answer, so we skip the auto/manual question and instead show the
+  // delegation status (the one thing the operator may still need to act on).
+  const [azureDetecting, setAzureDetecting] = useState(false);
+  const [azureZone, setAzureZone] = useState<AzureDnsZoneInfo | null>(null);
+  const [azureAutoDetected, setAzureAutoDetected] = useState(false);
+
+  const detectAzureDns = async () => {
+    setAzureDetecting(true);
+    try {
+      // Hard cap: detection is a convenience, never a reason for the wizard
+      // to sit still. On timeout we fall through to the manual question.
+      const zone = await Promise.race([
+        findAzureDnsZone(domain.toLowerCase()),
+        new Promise<null>((resolve) =>
+          setTimeout(() => resolve(null), 30000).unref?.(),
+        ),
+      ]);
+      let identityPresent = false;
+      if (zone && state.clusterName && state.azureResourceGroup) {
+        identityPresent = await azureManagedIdentityExists(
+          `${state.clusterName}-external-dns`,
+          state.azureResourceGroup,
+        );
+      }
+      if (zone && identityPresent) {
+        setAzureZone(zone);
+        setAzureAutoDetected(true);
+        dispatch({ type: "SET_DNS_AUTO_MANAGE", autoManage: true });
+      } else {
+        setAzureZone(null);
+        setAzureAutoDetected(false);
+      }
+    } catch {
+      setAzureZone(null);
+      setAzureAutoDetected(false);
+    }
+    setAzureDetecting(false);
+  };
+
   const fields: FlowField[] = [
     {
       id: "domain",
@@ -85,7 +131,9 @@ export function DomainStep({
                 return;
               }
               if (!isValidDomainFormat(domain)) {
-                setError("Invalid domain format (e.g., rulebricks.example.com)");
+                setError(
+                  "Invalid domain format (e.g., rulebricks.example.com)",
+                );
                 return;
               }
               setError(null);
@@ -136,27 +184,94 @@ export function DomainStep({
     },
     {
       id: "dns-provider",
+      // The Azure detection spinner renders in place of the picker rather than
+      // as its own field: flow.render() always renders the CURRENT field
+      // regardless of its `when`, so a field that goes invisible mid-flight
+      // would stay on screen forever. Detection therefore completes before
+      // flow.next() is called, exactly like the domain field's validation.
+      render: (flow) =>
+        azureDetecting ? (
+          <Box flexDirection="column" marginY={1}>
+            <Spinner label="Checking your Azure DNS zone..." />
+          </Box>
+        ) : (
+          <WizardSelect
+            label="Where is your domain's DNS hosted?"
+            hint="This determines whether we can automatically manage DNS records for you"
+            items={DNS_PROVIDER_OPTIONS}
+            initialValue={dnsProvider}
+            onSelect={(value) => {
+              const provider = value as DnsProvider;
+              setDnsProvider(provider);
+              dispatch({ type: "SET_DNS_PROVIDER", provider });
+              if (!isSupportedDnsProvider(provider)) {
+                dispatch({ type: "SET_DNS_AUTO_MANAGE", autoManage: false });
+              }
+              // Azure DNS: detect the cluster-setup zone + identity so the
+              // auto/manual question can be skipped when auto-manage is viable.
+              if (provider === "azure") {
+                void (async () => {
+                  await detectAzureDns();
+                  flow.next();
+                })();
+                return;
+              }
+              flow.next();
+            }}
+          />
+        ),
+    },
+    {
+      // Detected Azure zone + identity: auto-manage is set; show delegation
+      // status instead of asking the auto/manual question.
+      id: "dns-azure-detected",
+      when: () => dnsProvider === "azure" && azureAutoDetected,
       render: (flow) => (
-        <WizardSelect
-          label="Where is your domain's DNS hosted?"
-          hint="This determines whether we can automatically manage DNS records for you"
-          items={DNS_PROVIDER_OPTIONS}
-          initialValue={dnsProvider}
-          onSelect={(value) => {
-            const provider = value as DnsProvider;
-            setDnsProvider(provider);
-            dispatch({ type: "SET_DNS_PROVIDER", provider });
-            if (!isSupportedDnsProvider(provider)) {
-              dispatch({ type: "SET_DNS_AUTO_MANAGE", autoManage: false });
-            }
-            flow.next();
-          }}
-        />
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="green">
+            Detected Azure DNS zone {azureZone?.name}
+          </Text>
+          {azureZone?.delegated ? (
+            <Box borderStyle="round" borderColor="green" paddingX={1}>
+              <Text color="green">
+                Delegation is live. TLS certificates are issued automatically.
+              </Text>
+            </Box>
+          ) : (
+            <Box
+              flexDirection="column"
+              borderStyle="round"
+              borderColor="yellow"
+              paddingX={1}
+            >
+              <Text color="yellow">
+                Delegate the zone by adding these NS records for{" "}
+                {azureZone?.name} at your parent domain, then certificates issue
+                automatically:
+              </Text>
+              {(azureZone?.nameServers ?? []).map((ns) => (
+                <Text key={ns} color="yellow">
+                  {"  "}
+                  {ns}
+                </Text>
+              ))}
+            </Box>
+          )}
+          <Box marginTop={1}>
+            <WizardSelect
+              label=""
+              items={[{ label: "Continue", value: "continue" }]}
+              onSelect={() => flow.next()}
+            />
+          </Box>
+        </Box>
       ),
     },
     {
       id: "dns-auto-manage",
-      when: () => isSupportedDnsProvider(dnsProvider),
+      when: () =>
+        isSupportedDnsProvider(dnsProvider) &&
+        !(dnsProvider === "azure" && azureAutoDetected),
       render: (flow) => (
         <Box flexDirection="column">
           <WizardSelect
@@ -174,8 +289,11 @@ export function DomainStep({
           />
           <Box borderStyle="round" borderColor="yellow" paddingX={1}>
             <Text color="yellow">
-              Note: Auto-DNS requires external-dns with proper IAM credentials
-              in your cluster.
+              {dnsProvider === "azure"
+                ? "Note: Auto-DNS uses the <cluster>-external-dns managed identity from cluster-setup; deploy binds it automatically."
+                : dnsProvider === "route53"
+                  ? "Note: Auto-DNS uses the <cluster>-external-dns IAM role from cluster-setup; deploy binds it automatically."
+                  : "Note: Auto-DNS requires external-dns credentials for your DNS provider in the cluster."}
             </Text>
           </Box>
         </Box>

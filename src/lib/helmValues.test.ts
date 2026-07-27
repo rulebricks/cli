@@ -466,6 +466,18 @@ test("ClickHouse bootstrap ships a disk-pressure-bounded hot tier over the archi
   // unbounded burst must evict by size, and a fixed retention window would
   // reintroduce the fill-the-PVC failure mode that got the tier removed.
   assert.doesNotMatch(defaults, /TTL toDateTime\(timestamp\)/);
+  // The archive itself is two object-storage tiers behind one view: raw
+  // NDJSON (the recent tail) UNION ALL compacted per-hour Parquet, rewritten
+  // by the compaction CronJob. Parquet is written by ClickHouse, never by
+  // Vector (whose azure_blob/gcs sinks have no parquet encoder).
+  assert.match(defaults, /decision_logs_parquet_s3/);
+  assert.match(defaults, /decision_logs_parquet_azure/);
+  assert.match(defaults, /decision_logs_parquet_gcs/);
+  assert.match(defaults, /<format>Parquet<\/format>/);
+  assert.match(
+    defaults,
+    /decision_logs_archive AS SELECT [\s\S]*? UNION ALL SELECT/,
+  );
 });
 
 test("BYO observability opt-out disables ClickStack and keeps export paths", () => {
@@ -969,9 +981,12 @@ function vectorSinks(
   return values.vector?.customConfig?.sinks ?? {};
 }
 
-test("decision_logs sink writes gzipped NDJSON (never parquet) for every cloud", () => {
+test("decision_logs sink writes zstd NDJSON (never parquet) for every cloud", () => {
   // Vector's azure_blob/gcs sinks have no parquet encoder and `parquet` is not a
-  // valid encoding.codec; ClickHouse reads these blobs as JSONEachRow.
+  // valid encoding.codec; ClickHouse reads these blobs as JSONEachRow. zstd (not
+  // gzip): decompression dominates ClickHouse's archive-scan cost and zstd
+  // decodes 2-3x faster; the chart's *.{gz,zst} glob keeps old gzip archives
+  // readable, so this is not a migration.
   for (const name of [
     "aws-self-hosted-minimal", // s3
     "gcp-self-hosted", // gcs
@@ -988,12 +1003,14 @@ test("decision_logs sink writes gzipped NDJSON (never parquet) for every cloud",
       "newline_delimited",
       `${name}: framing.method`,
     );
-    assert.equal(sink.compression, "gzip", `${name}: compression`);
-    // azure_blob has no filename_extension field (always writes .log/.log.gz);
-    // aws_s3 and gcs support it. The extension MUST end in .gz because the
-    // ClickHouse decision_logs named collection globs *.gz and relies on the
-    // extension for compression auto-detection - files without it upload fine
-    // but never show up in the app.
+    assert.equal(sink.compression, "zstd", `${name}: compression`);
+    // azure_blob has no filename_extension field; its blob suffix comes from
+    // Vector's Compression::extension() (".log.zst" for zstd - verified
+    // against the pinned 0.57 source). aws_s3 and gcs support it. The
+    // extension MUST end in .zst because the ClickHouse decision_logs named
+    // collection globs *.{gz,zst} and relies on the extension for compression
+    // auto-detection - files without it upload fine but never show up in the
+    // app.
     if (sink.type === "azure_blob") {
       assert.equal(
         sink.filename_extension,
@@ -1003,7 +1020,7 @@ test("decision_logs sink writes gzipped NDJSON (never parquet) for every cloud",
     } else {
       assert.equal(
         sink.filename_extension,
-        "ndjson.gz",
+        "ndjson.zst",
         `${name}: filename_extension`,
       );
     }

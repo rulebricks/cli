@@ -5,13 +5,21 @@ import { useFieldFlow, FlowField } from "../fieldFlow.js";
 import {
   BorderBox,
   CheckRows,
+  DiscoveredSelect,
   FieldError,
   StepFooter,
   TextField,
   WizardSelect,
 } from "../../common/index.js";
+import { Spinner } from "../../common/Spinner.js";
 import { SMTP_PROVIDERS } from "../../../types/index.js";
 import { isValidEmail } from "../../../lib/validation.js";
+import {
+  getAzureAcsResourceName,
+  getAzureTenantId,
+  buildAcsSmtpUsername,
+  listAcsSenderAddresses,
+} from "../../../lib/cloudCli.js";
 
 interface SMTPStepProps {
   onComplete: () => void;
@@ -48,7 +56,11 @@ function detectProviderFromHost(host: string): string | null {
   return "custom";
 }
 
-export function SMTPStep({ onComplete, onBack, entryDirection }: SMTPStepProps) {
+export function SMTPStep({
+  onComplete,
+  onBack,
+  entryDirection,
+}: SMTPStepProps) {
   const { state, dispatch } = useWizard();
   const [error, setError] = useState<string | null>(null);
 
@@ -61,6 +73,36 @@ export function SMTPStep({ onComplete, onBack, entryDirection }: SMTPStepProps) 
   const [from, setFrom] = useState(state.smtpFrom || "");
   const [fromName, setFromName] = useState(state.smtpFromName || "Rulebricks");
 
+  // Azure Communication Services username assembly. The username is
+  // <acs-resource>.<entra-app-client-id>.<tenant-id>: only the app client ID
+  // is operator-supplied, so discover the other two from the deployment and
+  // ask for just the app ID. acsAutoAssemble stays false when discovery finds
+  // nothing (BYO ACS in another resource group) - then the plain username
+  // field is shown instead.
+  const [acsResource, setAcsResource] = useState<string | null>(null);
+  const [acsTenant, setAcsTenant] = useState<string | null>(null);
+  const [acsAppId, setAcsAppId] = useState("");
+  const [acsDiscovering, setAcsDiscovering] = useState(false);
+  const acsAutoAssemble = !!acsResource && !!acsTenant;
+  // Set when the operator opts out of the discovered sender list.
+  const [fromManual, setFromManual] = useState(false);
+
+  const discoverAcs = async () => {
+    setAcsDiscovering(true);
+    try {
+      const [resource, tenant] = await Promise.all([
+        getAzureAcsResourceName(state.azureResourceGroup),
+        getAzureTenantId(),
+      ]);
+      setAcsResource(resource);
+      setAcsTenant(tenant);
+    } catch {
+      setAcsResource(null);
+      setAcsTenant(null);
+    }
+    setAcsDiscovering(false);
+  };
+
   const completed = (): { label: string; value: string }[] => {
     const rows: { label: string; value: string }[] = [];
     if (host) rows.push({ label: "Host", value: `${host}:${port}` });
@@ -71,36 +113,62 @@ export function SMTPStep({ onComplete, onBack, entryDirection }: SMTPStepProps) 
   const fields: FlowField[] = [
     {
       id: "provider",
-      render: (flow) => (
-        <WizardSelect
-          label="Select your email provider"
-          items={PROVIDER_ITEMS}
-          initialValue={provider || undefined}
-          onSelect={(value) => {
-            const changed = value !== provider;
-            setProvider(value);
-            const providerConfig =
-              SMTP_PROVIDERS[value as keyof typeof SMTP_PROVIDERS];
-            // Apply preset host/port/user when switching providers or when the
-            // fields are still empty; keep saved values otherwise.
-            if (providerConfig && (changed || !host)) {
-              setHost(providerConfig.host);
-              setPort(providerConfig.port.toString());
-              if (providerConfig.user && (changed || !user)) {
-                setUser(providerConfig.user);
+      // Discovery runs to completion before advancing (and renders its spinner
+      // here, not as its own field): flow.render() always renders the current
+      // field even after its `when` goes false, so a transient spinner field
+      // would strand the wizard when discovery finds nothing.
+      render: (flow) =>
+        acsDiscovering ? (
+          <Box flexDirection="column" marginY={1}>
+            <Spinner label="Discovering the email service..." />
+          </Box>
+        ) : (
+          <WizardSelect
+            label="Select your email provider"
+            items={PROVIDER_ITEMS}
+            initialValue={provider || undefined}
+            onSelect={(value) => {
+              const changed = value !== provider;
+              setProvider(value);
+              const providerConfig =
+                SMTP_PROVIDERS[value as keyof typeof SMTP_PROVIDERS];
+              // Apply preset host/port/user when switching providers or when the
+              // fields are still empty; keep saved values otherwise.
+              if (providerConfig && (changed || !host)) {
+                setHost(providerConfig.host);
+                setPort(providerConfig.port.toString());
+                if (changed) {
+                  // A username saved for a DIFFERENT provider is never valid
+                  // here - reset to the preset's user even when it is empty
+                  // (e.g. profile-remembered "resend" leaking into the ACS
+                  // username field).
+                  setUser(providerConfig.user);
+                } else if (providerConfig.user && !user) {
+                  setUser(providerConfig.user);
+                }
+                dispatch({
+                  type: "SET_SMTP",
+                  config: {
+                    smtpHost: providerConfig.host,
+                    smtpPort: providerConfig.port,
+                    ...(changed ? { smtpUser: providerConfig.user } : {}),
+                  },
+                });
               }
-              dispatch({
-                type: "SET_SMTP",
-                config: {
-                  smtpHost: providerConfig.host,
-                  smtpPort: providerConfig.port,
-                },
-              });
-            }
-            flow.next();
-          }}
-        />
-      ),
+              // ACS: resolve the email service and tenant before advancing so
+              // the next field is either the app-ID prompt (discovered) or the
+              // plain username field (not discovered).
+              if (value === "azure-acs") {
+                void (async () => {
+                  await discoverAcs();
+                  flow.next();
+                })();
+                return;
+              }
+              flow.next();
+            }}
+          />
+        ),
     },
     {
       id: "host",
@@ -147,13 +215,45 @@ export function SMTPStep({ onComplete, onBack, entryDirection }: SMTPStepProps) 
       ),
     },
     {
+      // ACS with a discovered resource: ask only for the Entra app client ID
+      // and assemble the username. The client secret is entered next as the
+      // password; deploy grants the app access to the ACS resource.
+      id: "acs-app-id",
+      when: () => provider === "azure-acs" && acsAutoAssemble,
+      render: (flow) => (
+        <TextField
+          label="Email SMTP app (Entra application/client ID)"
+          hint="The app ID from `az ad app create` for the Rulebricks SMTP app. Deploy grants it access automatically; its client secret is the password on the next screen."
+          value={acsAppId}
+          onChange={setAcsAppId}
+          placeholder="00000000-0000-0000-0000-000000000000"
+          onSubmit={() => {
+            if (!acsAppId) {
+              setError("The email SMTP app client ID is required");
+              return;
+            }
+            const assembled = buildAcsSmtpUsername(
+              acsResource ?? "",
+              acsAppId,
+              acsTenant ?? "",
+            );
+            setUser(assembled);
+            setError(null);
+            dispatch({ type: "SET_SMTP", config: { smtpUser: assembled } });
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
       id: "user",
+      when: () => !(provider === "azure-acs" && acsAutoAssemble),
       render: (flow) => (
         <TextField
           label="SMTP username"
           hint={
             provider === "azure-acs"
-              ? "Format: <acs-resource>.<entra-app-client-id>.<tenant-id> - the emailSmtpUsername output of the cluster-setup deployment"
+              ? "Format: <acs-resource>.<entra-app-client-id>.<tenant-id> - the emailSmtpUsername value for your ACS resource"
               : undefined
           }
           value={user}
@@ -201,13 +301,53 @@ export function SMTPStep({ onComplete, onBack, entryDirection }: SMTPStepProps) 
       ),
     },
     {
+      // ACS: every provisioned domain has a DoNotReply MailFrom, so offer the
+      // real addresses (branded first when emailCustomDomain was set) instead
+      // of asking the operator to transcribe one.
+      id: "from-acs",
+      when: () => provider === "azure-acs" && !fromManual,
+      render: (flow) => (
+        <DiscoveredSelect
+          label="Sender email address"
+          hint="Discovered from your Azure Communication Services email service"
+          loadingLabel="Looking up sender addresses..."
+          emptyHint="No sender domains found on the email service."
+          initialValue={from || undefined}
+          recommendIndex={(items) =>
+            items.findIndex((i) => i.label.includes("branded"))
+          }
+          load={async () => {
+            const senders = await listAcsSenderAddresses(
+              state.azureResourceGroup,
+            );
+            return senders.map((s) => ({
+              label: s.branded ? `${s.address}` : s.address,
+              value: s.address,
+            }));
+          }}
+          onSelect={(value) => {
+            setFrom(value);
+            setError(null);
+            dispatch({ type: "SET_SMTP", config: { smtpFrom: value } });
+            flow.next();
+          }}
+          onManual={() => {
+            setFromManual(true);
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
       id: "from",
+      when: () => !(provider === "azure-acs" && !fromManual),
+      onEscape: () => setFromManual(false),
       render: (flow) => (
         <TextField
           label="Sender email address"
           hint={
             provider === "azure-acs"
-              ? "The emailSenderAddress output: DoNotReply@<...>.azurecomm.net, or notifications@<domain> once a custom sender domain is verified"
+              ? "Must be a DoNotReply address on a domain attached to your ACS email service"
               : "This must be verified with your email provider"
           }
           value={from}
@@ -274,10 +414,10 @@ export function SMTPStep({ onComplete, onBack, entryDirection }: SMTPStepProps) 
   });
 
   return (
-    <BorderBox title="Email (SMTP)">
+    <BorderBox title="Email">
       <Box flexDirection="column" marginY={1}>
         <Text color="gray" dimColor>
-          Configure SMTP for user invitations, password resets, and
+          Configure email delivery for user invitations, password resets, and
           notifications
         </Text>
       </Box>

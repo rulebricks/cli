@@ -245,19 +245,14 @@ param redisSkuName = 'Balanced_B1'
 // and most Microsoft-centric enterprises can no longer hand out basic-auth
 // SMTP credentials (retired in Exchange Online). ACS is Microsoft's
 // replacement: plain SMTP (smtp.azurecomm.net:587) authenticated with an
-// Entra app registration. Create the SMTP app (see modules/email.bicep
-// header), fill the two params below, and feed the emailSmtp* outputs into
-// the Rulebricks CLI's SMTP step ("Azure Communication Services" preset).
-// Set false if you already have an SMTP provider (Resend, SES, ...).
+// Entra app registration. The Rulebricks CLI wires that app up at deploy time
+// (it grants the app access to this service, assembles the SMTP username, and
+// takes the client secret as the password) - the same model as SSO, so no app
+// IDs are needed here. Set false if you already have an SMTP provider
+// (Resend, SES, ...).
 
 param enableManagedEmail = true
 param emailDataLocation = 'United States'
-// REQUIRED (deferrable): SP object ID + client ID of the Entra app used for
-// SMTP auth (see modules/email.bicep). May stay empty on the first pass and
-// be granted once the app exists (redeploy or manual role assignment) - the
-// email service itself deploys without them.
-param emailSmtpAppPrincipalId = ''
-param emailSmtpAppClientId = ''
 // Optional branded sender: a domain under dnsZoneName (or the zone itself),
 // e.g. 'rb.corp.com' -> DoNotReply@rb.corp.com. Verification DNS records are
 // created in the delegated zone automatically; after the first deploy, run

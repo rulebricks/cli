@@ -235,11 +235,9 @@ param redisSkuName string = 'Balanced_B1'
 param enableManagedEmail bool = false
 // ACS data-at-rest region; independent of `location`.
 param emailDataLocation string = 'United States'
-// Service principal OBJECT ID + client ID of the Entra app used for SMTP auth
-// (created with az ad app create - see modules/email.bicep header). Optional:
-// leave empty to provision email only and grant the role later.
-param emailSmtpAppPrincipalId string = ''
-param emailSmtpAppClientId string = ''
+// SMTP authentication uses an Entra app the Rulebricks CLI wires up at deploy
+// time (it grants the app Contributor on the communication service) - the
+// same model as SSO. No app IDs are needed here.
 // Branded sender domain (e.g. rb.corp.com), normally the delegated DNS zone
 // or a subdomain of it - the verification records are then created in that
 // zone automatically. Empty = the Azure-managed azurecomm.net sender. After
@@ -519,8 +517,6 @@ module email 'modules/email.bicep' = if (enableManagedEmail) {
     clusterName: clusterName
     tags: resourceTags
     dataLocation: emailDataLocation
-    smtpAppPrincipalId: emailSmtpAppPrincipalId
-    smtpAppClientId: emailSmtpAppClientId
     customDomain: emailCustomDomain
     // Verification records can only be created here when this deployment
     // owns the zone; BYO zones get the records via output instead.
@@ -598,15 +594,16 @@ output redisPort int = enableManagedRedis ? redis!.outputs.port : 0
 output redisTlsEnabled bool = enableManagedRedis
 output redisAccessKeyCommand string = enableManagedRedis ? redis!.outputs.accessKeyCommand : ''
 
-// ACS Email: feed these into the Rulebricks CLI's SMTP step (provider
-// "Azure Communication Services"). The SMTP password is the Entra app's
-// client secret - never an output.
+// ACS Email: the CLI's email step consumes these (provider "Azure
+// Communication Services"). It assembles the SMTP username from
+// emailAcsResourceName plus the Entra app the operator supplies; the password
+// is that app's client secret - never an output.
 output emailSenderAddress string = enableManagedEmail ? email!.outputs.senderAddress : ''
 output emailSmtpHost string = enableManagedEmail ? email!.outputs.smtpHost : ''
 output emailSmtpPort int = enableManagedEmail ? email!.outputs.smtpPort : 0
-output emailSmtpUsername string = enableManagedEmail ? email!.outputs.smtpUsername : ''
-// Custom sender domain phase-2 handoff: run these once, wait for Verified,
-// redeploy with emailCustomDomainReady=true.
+output emailAcsResourceName string = enableManagedEmail ? email!.outputs.acsResourceName : ''
+// Branded custom sender domain: run these once, then rerun the same
+// deployment - it reads the verification state and links the domain.
 output emailInitiateVerificationCommands array = enableManagedEmail
   ? email!.outputs.initiateVerificationCommands
   : []

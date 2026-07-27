@@ -79,7 +79,7 @@ const CONFIGURE_STEP_CHAIN: Partial<Record<StepId, StepId>> = {
 const STEP_INFO: Record<StepId, { title: string; description: string }> = {
   cloud: { title: "Cloud Provider", description: "Select your cloud provider" },
   domain: { title: "Domain & DNS", description: "Configure your domain and DNS" },
-  smtp: { title: "Email (SMTP)", description: "Configure email delivery" },
+  smtp: { title: "Email", description: "Configure email delivery" },
   database: { title: "Database", description: "Choose your database setup" },
   "database-creds": {
     title: "Database Credentials",

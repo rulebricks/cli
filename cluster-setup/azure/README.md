@@ -76,20 +76,21 @@ access is ever needed. (To use a pre-existing zone instead, set
 `createDnsZone = false` and `dnsZoneResourceGroup`.)
 
 **2. Create the email Entra app.** Entra app registrations are Microsoft
-Graph objects that ARM cannot create:
+Graph objects that ARM cannot create. It is a CLI-time input, not a Bicep
+parameter - no redeploy:
 
 ```bash
 SMTP_APP_ID=$(az ad app create --display-name "Rulebricks SMTP" \
   --sign-in-audience AzureADMyOrg --query appId -o tsv)
 az ad sp create --id "$SMTP_APP_ID"
 az ad app credential reset --id "$SMTP_APP_ID" --query password -o tsv  # SMTP password
-az ad sp show --id "$SMTP_APP_ID" --query id -o tsv                     # emailSmtpAppPrincipalId
 ```
 
-Put the last two values in `emailSmtpAppPrincipalId` / `emailSmtpAppClientId`
-and redeploy (or assign the role manually). In the Rulebricks CLI's email
-step, pick "Azure Communication Services" and enter the `emailSmtpUsername`
-and `emailSenderAddress` outputs with the client secret as the password.
+In the Rulebricks CLI's email step, pick "Azure Communication Services": the
+CLI discovers the email service, prompts for `$SMTP_APP_ID`, assembles the
+SMTP username, and takes the client secret as the password. `rulebricks
+deploy` grants the app access to the email service automatically - the same
+way it wires SSO and workload identity.
 
 **3. (Optional) SSO app registration.** Rulebricks supports Entra ID login
 natively:

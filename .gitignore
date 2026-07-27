@@ -24,3 +24,6 @@ npm-debug.log*
 
 # Test coverage
 coverage/
+
+# Internal configurations
+**/*.prototype.bicepparam

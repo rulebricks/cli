@@ -34,6 +34,7 @@ import {
   checkAuroraLogicalReplication,
   checkAzureKeyVaultDataPlaneAccess,
   ensureAcsCustomEmailDomainLinked,
+  ensureAcsSmtpRoleAssignment,
   ensureAzurePostgresLogicalReplication,
   getAzureSubscriptionId,
   getAzureTenantId,
@@ -653,6 +654,27 @@ function DeployCommandInner({
       cfg.smtp.from &&
       cfg.infrastructure.azureResourceGroup
     ) {
+      // Grant the SMTP Entra app access to the communication service FIRST -
+      // without it every send is unauthorized. cluster-setup no longer does
+      // this (the app is created out-of-band), so the CLI owns it, matching
+      // how SSO and workload identity are wired at deploy time.
+      if (cfg.smtp.user) {
+        const role = await ensureAcsSmtpRoleAssignment(
+          cfg.smtp.user,
+          cfg.infrastructure.azureResourceGroup,
+        );
+        if (role.status === "no-app") {
+          throw new Error(
+            `The email SMTP app (client ID ${role.detail}) was not found in this tenant. ` +
+              "Create it before deploying:\n" +
+              '  APP_ID=$(az ad app create --display-name "Rulebricks SMTP" --sign-in-audience AzureADMyOrg --query appId -o tsv)\n' +
+              "  az ad sp create --id $APP_ID\n" +
+              "  az ad app credential reset --id $APP_ID   # this secret is the SMTP password\n" +
+              "Then set the SMTP username's app-ID segment to $APP_ID and redeploy.",
+          );
+        }
+      }
+
       const acs = await ensureAcsCustomEmailDomainLinked(
         cfg.smtp.from,
         cfg.infrastructure.azureResourceGroup,

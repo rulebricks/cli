@@ -864,12 +864,12 @@ export async function checkAzureCli(): Promise<CloudCliStatus> {
     try {
       const account = JSON.parse(accountResult.stdout);
       subscriptionName = account.name;
-      
+
       if (account.state !== "Enabled") {
         status.error = `Subscription "${account.name}" is not enabled (state: ${account.state})`;
         return status;
       }
-      
+
       status.identity = subscriptionName
         ? `Subscription: ${subscriptionName}`
         : undefined;
@@ -1055,6 +1055,263 @@ export async function ensureAcsCustomEmailDomainLinked(
       { intent: "Link email domain", provider: "azure", mutating: true, timeout: 120000 },
     );
     return { status: "linked", domain };
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
+/**
+ * ACS SMTP send requires the Entra app (whose client ID is the middle segment
+ * of the SMTP username <acs>.<appClientId>.<tenant>) to hold a role on the
+ * communication service. cluster-setup deliberately does NOT create this
+ * assignment (the app is a Graph object created out-of-band), so the CLI
+ * grants it here at deploy time - the same place it wires workload-identity
+ * bindings - which removes the parameter-file round-trip and second Bicep
+ * deploy. Idempotent (a re-grant is a no-op); fail-open ("unknown") on
+ * anything ambiguous so a probe quirk never blocks a deploy.
+ */
+/**
+ * Discover the ACS communication service name in a resource group, so the
+ * wizard can assemble the SMTP username (<acs>.<appClientId>.<tenant>) from
+ * the deployment instead of asking the operator to paste the whole triplet.
+ * Null when none exists (BYO ACS elsewhere, or non-Azure) - the wizard then
+ * falls back to a free-text username field.
+ */
+export async function getAzureAcsResourceName(
+  resourceGroup: string,
+): Promise<string | null> {
+  if (!resourceGroup) return null;
+  try {
+    const res = await execCommand(
+      `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/communicationServices --query "[0].name" --output tsv`,
+      { intent: "Discover managed email", provider: "azure" },
+    );
+    return res.stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when a user-assigned managed identity of the given name exists in the
+ * resource group - used to confirm the cluster-setup external-dns identity is
+ * present before the wizard commits to auto-managed DNS.
+ */
+export async function azureManagedIdentityExists(
+  name: string,
+  resourceGroup: string,
+): Promise<boolean> {
+  if (!name || !resourceGroup) return false;
+  try {
+    const res = await execCommand(
+      `az identity show --name ${name} --resource-group ${resourceGroup} --query id --output tsv`,
+      { intent: "Discover DNS zones", provider: "azure" },
+    );
+    return res.stdout.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export interface AzureDnsZoneInfo {
+  name: string;
+  resourceGroup: string;
+  nameServers: string[];
+  // True when public NS records for the zone already point at its Azure name
+  // servers - i.e. the one-time parent-domain delegation is live.
+  delegated: boolean;
+}
+
+/**
+ * Find the Azure DNS zone that covers `domain` (the zone apex or the nearest
+ * parent zone) across the subscription, and report whether its delegation is
+ * live. Auto-DNS is VIABLE when this zone plus the external-dns identity
+ * exist; delegation being live is what makes it COMPLETE (records resolve,
+ * certificates issue). The wizard uses the former to skip the auto/manual
+ * question and the latter to show status. Null when no covering zone exists.
+ */
+export async function findAzureDnsZone(
+  domain: string,
+): Promise<AzureDnsZoneInfo | null> {
+  if (!domain) return null;
+  let zones: Array<{ name: string; resourceGroup: string }>;
+  try {
+    const res = await execCommand(
+      `az network dns zone list --query "[].{name:name,resourceGroup:resourceGroup}" --output json`,
+      { intent: "Discover DNS zones", provider: "azure" },
+    );
+    zones = JSON.parse(res.stdout || "[]");
+  } catch {
+    return null;
+  }
+  // Prefer the most specific covering zone: exact match, else the longest
+  // zone name that `domain` is a subdomain of.
+  const covering = zones
+    .filter(
+      (z) =>
+        domain === z.name.toLowerCase() ||
+        domain.endsWith(`.${z.name.toLowerCase()}`),
+    )
+    .sort((a, b) => b.name.length - a.name.length)[0];
+  if (!covering) return null;
+
+  let nameServers: string[] = [];
+  try {
+    const res = await execCommand(
+      `az network dns zone show --name ${covering.name} --resource-group ${covering.resourceGroup} --query nameServers --output json`,
+      { intent: "Discover DNS zones", provider: "azure" },
+    );
+    nameServers = (JSON.parse(res.stdout || "[]") as string[]).map((n) =>
+      n.replace(/\.$/, "").toLowerCase(),
+    );
+  } catch {
+    nameServers = [];
+  }
+
+  // Delegation check via public DNS (no shelling out). Compare the zone's
+  // authoritative name servers against what resolvers actually return for the
+  // zone apex; a non-empty intersection means the delegation is live.
+  // resolveNs has no built-in timeout, so cap it - an undelegated name can
+  // otherwise leave a resolver waiting, and this runs in an interactive
+  // wizard. A timeout simply reports "not delegated".
+  let delegated = false;
+  try {
+    const { promises: dns } = await import("node:dns");
+    const publicNs = await Promise.race([
+      dns.resolveNs(covering.name),
+      new Promise<string[]>((resolve) =>
+        setTimeout(() => resolve([]), 5000).unref?.(),
+      ),
+    ]);
+    const normalized = publicNs.map((n) => n.replace(/\.$/, "").toLowerCase());
+    delegated =
+      normalized.length > 0 && nameServers.some((n) => normalized.includes(n));
+  } catch {
+    delegated = false;
+  }
+
+  return {
+    name: covering.name,
+    resourceGroup: covering.resourceGroup,
+    nameServers,
+    delegated,
+  };
+}
+
+export interface AcsSenderAddress {
+  address: string;
+  /** True for a customer-verified domain (a branded sender). */
+  branded: boolean;
+}
+
+/**
+ * List the sender addresses available on the deployment's ACS email service.
+ * Every provisioned domain has a DoNotReply MailFrom, so the wizard can offer
+ * the branded sender (when emailCustomDomain was set) and the Azure-managed
+ * one as choices instead of asking the operator to type an address. Branded
+ * domains sort first - if one exists, it is the intended sender.
+ */
+export async function listAcsSenderAddresses(
+  resourceGroup: string,
+): Promise<AcsSenderAddress[]> {
+  if (!resourceGroup) return [];
+  try {
+    const svcRes = await execCommand(
+      `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/emailServices --query "[0].name" --output tsv`,
+      { intent: "Discover managed email", provider: "azure" },
+    );
+    const emailService = svcRes.stdout.trim();
+    if (!emailService) return [];
+    const res = await execCommand(
+      `az communication email domain list --email-service-name ${emailService} --resource-group ${resourceGroup} --output json`,
+      { intent: "Discover managed email", provider: "azure" },
+    );
+    const domains = JSON.parse(res.stdout || "[]") as Array<{
+      fromSenderDomain?: string;
+      domainManagement?: string;
+    }>;
+    return domains
+      .filter((d) => d.fromSenderDomain)
+      .map((d) => ({
+        address: `DoNotReply@${d.fromSenderDomain}`,
+        branded: d.domainManagement === "CustomerManaged",
+      }))
+      .sort((a, b) => Number(b.branded) - Number(a.branded));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Assemble an ACS SMTP username from its three parts. The wizard uses this so
+ * the operator only supplies the Entra app client ID; the ACS resource name
+ * and tenant come from the deployment.
+ */
+export function buildAcsSmtpUsername(
+  acsResource: string,
+  appClientId: string,
+  tenantId: string,
+): string {
+  return `${acsResource}.${appClientId}.${tenantId}`;
+}
+
+/**
+ * Extract the Entra app client ID (the middle segment) from an ACS SMTP
+ * username. Returns null when the value is not the expected
+ * <acs>.<appClientId>.<tenant> shape or still holds a placeholder.
+ */
+export function parseAcsSmtpAppClientId(smtpUsername: string): string | null {
+  const parts = smtpUsername.split(".");
+  if (parts.length < 3) return null;
+  const appClientId = parts[1];
+  if (!appClientId || appClientId.startsWith("<")) return null;
+  return appClientId;
+}
+
+export async function ensureAcsSmtpRoleAssignment(
+  smtpUsername: string,
+  resourceGroup: string,
+): Promise<{
+  status: "ok" | "granted" | "no-app" | "unknown";
+  detail?: string;
+}> {
+  const appClientId = parseAcsSmtpAppClientId(smtpUsername);
+  if (!appClientId) return { status: "unknown" };
+  try {
+    const acsRes = await execCommand(
+      `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/communicationServices --query "[0].id" --output tsv`,
+      { intent: "Verify email domain", provider: "azure" },
+    );
+    const acsId = acsRes.stdout.trim();
+    if (!acsId) return { status: "unknown" };
+
+    const spRes = await execCommand(
+      `az ad sp show --id ${appClientId} --query id --output tsv`,
+      { intent: "Verify email domain", provider: "azure" },
+    );
+    const spObjectId = spRes.stdout.trim();
+    if (!spObjectId) {
+      return { status: "no-app", detail: appClientId };
+    }
+
+    // Contributor is Microsoft's documented baseline for ACS SMTP send.
+    const existing = await execCommand(
+      `az role assignment list --assignee ${spObjectId} --scope ${acsId} --role Contributor --query "length(@)" --output tsv`,
+      { intent: "Verify email domain", provider: "azure" },
+    );
+    if (existing.stdout.trim() !== "0" && existing.stdout.trim() !== "") {
+      return { status: "ok" };
+    }
+    await execCommand(
+      `az role assignment create --assignee-object-id ${spObjectId} --assignee-principal-type ServicePrincipal --role Contributor --scope ${acsId}`,
+      {
+        intent: "Grant email SMTP access",
+        provider: "azure",
+        mutating: true,
+        timeout: 120000,
+      },
+    );
+    return { status: "granted" };
   } catch {
     return { status: "unknown" };
   }

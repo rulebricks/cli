@@ -7,19 +7,13 @@ param tags object
 // the resource-group region; ACS resources themselves are global.
 param dataLocation string
 
-// Service principal OBJECT ID of the Entra app used for SMTP authentication.
-// App registrations are Microsoft Graph objects that ARM cannot create (same
-// limitation as SSO clients) - create the app first, then pass its SP here:
-//   APP_ID=$(az ad app create --display-name "Rulebricks SMTP" --query appId -o tsv)
-//   az ad sp create --id $APP_ID
-//   az ad app credential reset --id $APP_ID   # SMTP password = this secret
-//   az ad sp show --id $APP_ID --query id -o tsv   # value for this parameter
-// Empty = provision the email service only; grant the role later.
-param smtpAppPrincipalId string = ''
-
-// Client (application) ID of the same Entra app; only used to render the
-// ready-to-paste SMTP username output.
-param smtpAppClientId string = ''
+// NOTE: SMTP authentication requires an Entra app registration (a Microsoft
+// Graph object ARM cannot create) granted Contributor on the communication
+// service below. That grant is performed by the Rulebricks CLI at deploy
+// time - the same place it creates workload-identity bindings and SSO trust -
+// so this module deliberately does NOT take the app's IDs. That keeps email a
+// single-deploy, CLI-configured concern, exactly like SSO, with no
+// parameter-file round-trip.
 
 // Branded sender domain (e.g. rb.corp.com or mail.rb.corp.com), typically the
 // deployment's delegated DNS zone or a subdomain of it. Empty = send from the
@@ -166,24 +160,6 @@ resource communicationService 'Microsoft.Communication/communicationServices@202
   }
 }
 
-// SMTP authentication authorizes the Entra app via an RBAC role on the
-// Communication resource. Contributor is Microsoft's documented baseline for
-// SMTP send; scope it to this single resource.
-var contributorRoleId = subscriptionResourceId(
-  'Microsoft.Authorization/roleDefinitions',
-  'b24988ac-6180-42a0-ab88-20f7382dd24c'
-)
-
-resource smtpRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (smtpAppPrincipalId != '') {
-  name: guid(communicationService.id, smtpAppPrincipalId, 'smtp-contributor')
-  scope: communicationService
-  properties: {
-    roleDefinitionId: contributorRoleId
-    principalId: smtpAppPrincipalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
 output senderAddress string = hasCustomDomain
   ? (customDomainVerified
       ? 'DoNotReply@${customDomain}'
@@ -191,11 +167,11 @@ output senderAddress string = hasCustomDomain
   : 'DoNotReply@${managedDomain.properties.fromSenderDomain}'
 output smtpHost string = 'smtp.azurecomm.net'
 output smtpPort int = 587
-// Username format: <acs-resource>.<entra-app-client-id>.<tenant-id>; the
-// password is the Entra app's client secret.
-output smtpUsername string = smtpAppClientId != ''
-  ? '${communicationService.name}.${smtpAppClientId}.${tenant().tenantId}'
-  : '${communicationService.name}.<entra-app-client-id>.${tenant().tenantId}'
+// The SMTP username is <acs-resource>.<entra-app-client-id>.<tenant-id>. Only
+// the ACS resource name comes from the infrastructure; the CLI assembles the
+// full username from this plus the Entra app the operator supplies, and the
+// password is that app's client secret.
+output acsResourceName string = communicationService.name
 // Phase-2 handoff: run these once after the first deploy (verification is a
 // POST action ARM cannot perform), wait for Verified on all four checks
 // (az communication email domain show), then rerun the SAME deployment - it
