@@ -149,6 +149,16 @@ const VECTOR_NORMALIZE_LOGS_VRL = [
   '.response = to_string(.response) ?? "null"',
   '.decision = to_string(.decision) ?? "{}"',
   '.params = to_string(.params) ?? "{}"',
+  // Promote flow/parallel correlation fields from the decision blob when the
+  // producer did not emit them top-level (fallback for older HPS records).
+  // Mirrors rulebricks.vector.normalizeLogs in the chart's _defaults.tpl.
+  "_decision = parse_json(.decision) ?? {}",
+  ".flow_execution_id = to_string(.flow_execution_id) ?? to_string(_decision.flowExecutionId) ?? null",
+  ".flow_name = to_string(.flow_name) ?? to_string(_decision.flowName) ?? null",
+  ".flow_slug = to_string(.flow_slug) ?? to_string(_decision.flowSlug) ?? null",
+  ".flow_node_id = to_string(.flow_node_id) ?? to_string(_decision.flowNodeId) ?? null",
+  ".parallel_execution_id = to_string(.parallel_execution_id) ?? to_string(_decision.parallelExecutionId) ?? null",
+  ".parallel_path = to_string(.parallel_path) ?? to_string(_decision.parallelPath) ?? null",
 ].join("\n");
 
 function decisionLogPathPrefix(config: DeploymentConfig): string {

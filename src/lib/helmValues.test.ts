@@ -1106,6 +1106,30 @@ test("decision_logs sink writes zstd NDJSON (never parquet) for every cloud", ()
   }
 });
 
+test("vector normalize VRL promotes flow correlation fields from the decision blob", () => {
+  // Keep-in-sync guard for rulebricks.vector.normalizeLogs in the chart's
+  // _defaults.tpl: without the promotion, rows shipped through CLI-generated
+  // Vector config would leave the flow_*/parallel_* columns NULL whenever a
+  // producer emitted them only inside the decision JSON.
+  const values = buildHelmValues(
+    matrix.find((c) => c.name === "aws-self-hosted-minimal")!.config,
+  ) as Record<string, any>;
+  const source = values.vector.customConfig.transforms.normalize_logs
+    .source as string;
+
+  for (const line of [
+    "_decision = parse_json(.decision) ?? {}",
+    ".flow_execution_id = to_string(.flow_execution_id) ?? to_string(_decision.flowExecutionId) ?? null",
+    ".flow_name = to_string(.flow_name) ?? to_string(_decision.flowName) ?? null",
+    ".flow_slug = to_string(.flow_slug) ?? to_string(_decision.flowSlug) ?? null",
+    ".flow_node_id = to_string(.flow_node_id) ?? to_string(_decision.flowNodeId) ?? null",
+    ".parallel_execution_id = to_string(.parallel_execution_id) ?? to_string(_decision.parallelExecutionId) ?? null",
+    ".parallel_path = to_string(.parallel_path) ?? to_string(_decision.parallelPath) ?? null",
+  ]) {
+    assert.ok(source.includes(line), `normalize VRL missing: ${line}`);
+  }
+});
+
 test("no vector sink uses the unsupported parquet codec or extension", () => {
   for (const { name, config } of matrix) {
     for (const [key, sink] of Object.entries(vectorSinks(config))) {
