@@ -1,98 +1,79 @@
 import React, { ReactNode } from "react";
 import { Box, Text } from "ink";
 import { useTheme } from "../../lib/theme.js";
+import { computeLayout } from "../../lib/layout.js";
+import { StepLayoutContext, useStepLayout, useViewport } from "./layout.js";
+import { LOGO_LINES } from "./Logo.js";
 
-interface AppShellProps {
-  children: ReactNode;
-  title?: string;
-  subtitle?: string;
-  width?: number;
-}
-
-/**
- * AppShell wraps the entire application content with consistent margins,
- * padding, and a border container for a focused visual experience.
- */
-export function AppShell({
-  children,
-  title,
-  subtitle,
-  width = 70,
-}: AppShellProps) {
-  const { colors } = useTheme();
-  const horizontalBorder = "─".repeat(width - 2);
-
-  return (
-    <Box flexDirection="column" paddingTop={0} paddingLeft={2}>
-      {/* Top border with title */}
-      <Text color={colors.accent}>
-        ╭{title ? `─ ${title} ` : ""}
-        {"─".repeat(width - 4 - (title?.length || 0))}╮
-      </Text>
-
-      {/* Subtitle if provided */}
-      {subtitle && (
-        <Box paddingX={2}>
-          <Text color={colors.muted}>{subtitle}</Text>
-        </Box>
-      )}
-
-      {/* Content area */}
-      <Box flexDirection="column" paddingX={2} paddingY={1}>
-        {children}
-      </Box>
-
-      {/* Bottom border */}
-      <Text color={colors.accent}>╰{horizontalBorder}╯</Text>
-    </Box>
-  );
-}
-
-interface ScreenContainerProps {
-  children: ReactNode;
+interface WizardShellProps {
   title: string;
-  width?: number;
+  /** Rendered in a fixed-height slot between the frame top and the step. */
+  header?: ReactNode;
+  children: ReactNode;
 }
 
 /**
- * ScreenContainer is a simpler bordered container for individual screens/steps
+ * Full-screen wizard chrome with a constant footprint: logo, titled frame,
+ * header slot, and a fixed-height step area. The layout is derived from the
+ * terminal size (recomputed live on resize) and never exceeds it, so the
+ * logo and frame stay put no matter what each step renders.
  */
-export function ScreenContainer({
-  children,
-  title,
-  width = 66,
-}: ScreenContainerProps) {
+export function WizardShell({ title, header, children }: WizardShellProps) {
   const { colors } = useTheme();
-  const innerWidth = width - 4;
+  const { rows, columns } = useViewport();
+  const layout = computeLayout(rows, columns);
 
-  return (
-    <Box flexDirection="column">
-      {/* Header */}
-      <Box>
-        <Text color={colors.accent}>┌─ </Text>
-        <Text bold color="white">
-          {title}
+  if (layout.tooSmall) {
+    return (
+      <Box flexDirection="column" paddingLeft={1} paddingTop={1}>
+        <Text color={colors.warning} bold>
+          Terminal window is too small
         </Text>
-        <Text color={colors.accent}>
-          {" "}
-          {"─".repeat(Math.max(0, innerWidth - title.length - 2))}┐
+        <Text color={colors.muted}>
+          Resize to at least 60×20 — the wizard adapts automatically.
         </Text>
       </Box>
+    );
+  }
 
-      {/* Content */}
-      <Box flexDirection="column">
-        <Box>
-          <Text color={colors.accent}>│</Text>
-          <Box flexDirection="column" paddingX={1} width={innerWidth}>
+  const topBorder = `╭─ ${title} ${"─".repeat(
+    Math.max(0, layout.frameWidth - title.length - 5),
+  )}╮`;
+  const bottomBorder = `╰${"─".repeat(Math.max(0, layout.frameWidth - 2))}╯`;
+
+  return (
+    <StepLayoutContext.Provider value={{ ...layout, frameClaimed: false }}>
+      <Box flexDirection="column" paddingLeft={2}>
+        {layout.showLogo && (
+          <Box flexDirection="column" marginTop={1} marginBottom={1}>
+            {LOGO_LINES.map((line, i) => (
+              <Text key={i} color={colors.accent}>
+                {line}
+              </Text>
+            ))}
+          </Box>
+        )}
+
+        <Text color={colors.accent}>{topBorder}</Text>
+        <Box flexDirection="column" paddingX={2} paddingY={1}>
+          <Box
+            flexDirection="column"
+            height={layout.headerRows}
+            overflowY="hidden"
+          >
+            {header}
+          </Box>
+          <Box
+            flexDirection="column"
+            height={layout.stepBoxHeight}
+            overflowY="hidden"
+          >
             {children}
           </Box>
-          <Text color={colors.accent}>│</Text>
         </Box>
+        <Text color={colors.accent}>{bottomBorder}</Text>
       </Box>
-
-      {/* Footer */}
-      <Text color={colors.accent}>└{"─".repeat(width - 1)}┘</Text>
-    </Box>
+    </StepLayoutContext.Provider>
   );
 }
 
@@ -103,7 +84,8 @@ interface ProgressHeaderProps {
 }
 
 /**
- * Progress header showing step number and progress bar
+ * Progress header showing step number and progress bar. The bar row is
+ * dropped on short terminals (driven by the wizard layout).
  */
 export function ProgressHeader({
   currentStep,
@@ -111,6 +93,8 @@ export function ProgressHeader({
   stepTitle,
 }: ProgressHeaderProps) {
   const { colors } = useTheme();
+  const layout = useStepLayout();
+  const showBar = layout?.showProgressBar ?? true;
   const percentage = Math.round((currentStep / totalSteps) * 100);
   const barWidth = 30;
   const filled = Math.round((percentage / 100) * barWidth);
@@ -122,13 +106,15 @@ export function ProgressHeader({
         Step {currentStep} of {totalSteps}:{" "}
         <Text color="white">{stepTitle}</Text>
       </Text>
-      <Box marginTop={1}>
-        <Text color={colors.accent}>[</Text>
-        <Text color={colors.success}>{"█".repeat(filled)}</Text>
-        <Text color={colors.muted}>{"░".repeat(empty)}</Text>
-        <Text color={colors.accent}>]</Text>
-        <Text color={colors.muted}> {percentage}%</Text>
-      </Box>
+      {showBar && (
+        <Box marginTop={1}>
+          <Text color={colors.accent}>[</Text>
+          <Text color={colors.success}>{"█".repeat(filled)}</Text>
+          <Text color={colors.muted}>{"░".repeat(empty)}</Text>
+          <Text color={colors.accent}>]</Text>
+          <Text color={colors.muted}> {percentage}%</Text>
+        </Box>
+      )}
     </Box>
   );
 }

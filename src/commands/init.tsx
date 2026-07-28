@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect } from "react";
-import { Box, Text, useApp, useStdout } from "ink";
+import { Box, Text, useApp } from "ink";
+import chalk from "chalk";
 import {
   WizardProvider,
   WizardState,
@@ -14,6 +15,7 @@ import {
   FeaturesStep,
   StorageStep,
   ObservabilityStep,
+  TlsStep,
   ExternalServicesStep,
   SecretsStep,
   FeatureConfigStep,
@@ -21,11 +23,11 @@ import {
   ReviewStep,
 } from "../components/Wizard/steps/index.js";
 import {
-  AppShell,
+  WizardShell,
   ProgressHeader,
   ThemeProvider,
   useTheme,
-  Logo,
+  THEMES,
   LOGO_LINES,
   CommandApprovalProvider,
 } from "../components/common/index.js";
@@ -54,11 +56,61 @@ import {
 } from "../lib/wizardSteps.js";
 import { SectionMenu } from "../components/Wizard/SectionMenu.js";
 
+/** Outcome of a saved wizard run, printed to the terminal after the
+ * alternate-screen UI exits. */
+export interface WizardCompletion {
+  mode: "create" | "configure";
+  name: string;
+  domain: string;
+}
+
+/**
+ * Print the post-wizard summary to the regular terminal buffer. Called by the
+ * command action after the full-screen UI has been torn down, so this is the
+ * only trace the wizard leaves in scrollback.
+ */
+export function printWizardCompletion(completion: WizardCompletion): void {
+  const colors = THEMES.init;
+  const accent = chalk.hex(colors.accent);
+  const muted = chalk.hex(colors.muted);
+  const success = chalk.hex(colors.success);
+  const deployCmd = accent(`rulebricks deploy ${completion.name}`);
+
+  const lines = [
+    "",
+    ...LOGO_LINES.map((line) => accent(line)),
+    "",
+    success.bold(
+      completion.mode === "configure"
+        ? "✓ Configuration updated!"
+        : "✓ Configuration saved successfully!",
+    ),
+    "",
+    `  Deployment name: ${accent.bold(completion.name)}`,
+    muted(
+      `  Configuration stored in ~/.rulebricks/deployments/${completion.name}/`,
+    ),
+    "",
+    "  Next steps:",
+    ...(completion.mode === "configure"
+      ? [muted(`    Run ${deployCmd} to apply your changes`)]
+      : [
+          muted(`    1. Run ${deployCmd} to deploy`),
+          muted("    2. Configure your DNS records when prompted"),
+          muted(
+            `    3. Access Rulebricks at ${accent(`https://${completion.domain}`)}`,
+          ),
+        ]),
+    "",
+  ];
+  console.log(lines.join("\n"));
+}
+
 interface InitWizardProps {
   initialName?: string;
   initialState?: WizardState;
   mode?: "create" | "configure";
-  onSaveComplete?: () => void;
+  onSaveComplete?: (completion: WizardCompletion) => void;
   profile?: ProfileConfig | null;
 }
 
@@ -109,6 +161,10 @@ const STEP_INFO: Record<StepId, { title: string; description: string }> = {
     title: "Feature Settings",
     description: "Configure enabled features",
   },
+  tls: {
+    title: "Certificates",
+    description: "Choose how TLS certificates are issued",
+  },
   version: {
     title: "License & Version",
     description: "Enter license and select version",
@@ -118,7 +174,7 @@ const STEP_INFO: Record<StepId, { title: string; description: string }> = {
 
 interface WizardStepControllerProps {
   mode: "create" | "configure";
-  onSaveComplete?: () => void;
+  onSaveComplete?: (completion: WizardCompletion) => void;
 }
 
 function WizardStepController({
@@ -127,7 +183,6 @@ function WizardStepController({
 }: WizardStepControllerProps) {
   const { state, toConfig, configIssues } = useWizard();
   const { exit } = useApp();
-  const { write } = useStdout();
   const { colors } = useTheme();
   const [currentStep, setCurrentStep] = useState<ControllerStep>(
     mode === "configure" ? "menu" : "cloud",
@@ -137,16 +192,7 @@ function WizardStepController({
     () => new Set(),
   );
   const [saving, setSaving] = useState(false);
-  const [complete, setComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Clear terminal when transitioning to completion screen
-  useEffect(() => {
-    if (complete) {
-      // Clear terminal using ANSI escape codes
-      write("\x1B[2J\x1B[0;0H");
-    }
-  }, [complete, write]);
 
   // Track pending navigation to handle React's async state updates
   const [pendingNav, setPendingNav] = useState<"next" | "back" | null>(null);
@@ -268,9 +314,14 @@ function WizardStepController({
           await saveDeploymentConfig(config);
           const profileData = extractProfileFromConfig(config);
           await updateProfile(profileData);
-          setComplete(true);
-          onSaveComplete?.();
-          setTimeout(() => exit(), 4000);
+          // The summary is printed to the regular buffer by the command
+          // action once the full-screen UI has been restored.
+          onSaveComplete?.({
+            mode: "configure",
+            name: config.name,
+            domain: config.domain,
+          });
+          exit();
           return;
         }
 
@@ -294,9 +345,12 @@ function WizardStepController({
       const profileData = extractProfileFromConfig(config);
       await updateProfile(profileData);
 
-      setComplete(true);
-      onSaveComplete?.();
-      setTimeout(() => exit(), 4000);
+      onSaveComplete?.({
+        mode: "create",
+        name: config.name,
+        domain: config.domain,
+      });
+      exit();
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to save configuration",
@@ -323,103 +377,31 @@ function WizardStepController({
   const totalSteps = steps.length;
   const stepInfo = currentStep === "menu" ? null : STEP_INFO[currentStep];
 
-  // Completion screen
-  if (complete) {
-    return (
-      <Box flexDirection="column">
-        {/* Render logo directly (not via Static) after terminal clear */}
-        <Box flexDirection="column" marginTop={1} marginBottom={2}>
-          {LOGO_LINES.map((line, i) => (
-            <Text key={i} color={colors.accent}>
-              {line}
-            </Text>
-          ))}
-        </Box>
-
-        <Box flexDirection="column" paddingLeft={2}>
-          <Box marginBottom={1}>
-            <Text color={colors.success} bold>
-              {mode === "configure"
-                ? "✓ Configuration updated!"
-                : "✓ Configuration saved successfully!"}
-            </Text>
-          </Box>
-
-          <Box flexDirection="column" marginBottom={1}>
-            <Text>
-              Deployment name:{" "}
-              <Text color={colors.accent} bold>
-                {state.name}
-              </Text>
-            </Text>
-            <Text color={colors.muted}>
-              Configuration stored in ~/.rulebricks/deployments/{state.name}/
-            </Text>
-          </Box>
-
-          <Box flexDirection="column" marginTop={1}>
-            <Text bold>Next steps:</Text>
-            <Box marginLeft={2} flexDirection="column">
-              {mode === "configure" ? (
-                <Text color={colors.muted}>
-                  Run{" "}
-                  <Text color={colors.accent}>
-                    rulebricks deploy {state.name}
-                  </Text>{" "}
-                  to apply your changes
-                </Text>
-              ) : (
-                <>
-                  <Text color={colors.muted}>
-                    1. Run{" "}
-                    <Text color={colors.accent}>
-                      rulebricks deploy {state.name}
-                    </Text>{" "}
-                    to deploy
-                  </Text>
-                  <Text color={colors.muted}>
-                    2. Configure your DNS records when prompted
-                  </Text>
-                  <Text color={colors.muted}>
-                    3. Access Rulebricks at{" "}
-                    <Text color={colors.accent}>https://{state.domain}</Text>
-                  </Text>
-                </>
-              )}
-            </Box>
-          </Box>
-
-          <Box marginTop={2}>
-            <Text color={colors.muted} dimColor>
-              Exiting in a moment...
-            </Text>
-          </Box>
-        </Box>
-      </Box>
-    );
-  }
-
-  // Saving state - simple, without wrapper
+  // Saving state - rendered inside the stable shell
   if (saving) {
     return (
-      <Box flexDirection="column" paddingTop={1} paddingLeft={2}>
-        <Text color={colors.accent}>⧗ Saving configuration...</Text>
-      </Box>
+      <WizardShell title="Rulebricks Configuration">
+        <Box flexDirection="column" paddingTop={1}>
+          <Text color={colors.accent}>⧗ Saving configuration...</Text>
+        </Box>
+      </WizardShell>
     );
   }
 
-  // Error state - simple, without wrapper
+  // Error state - rendered inside the stable shell
   if (error) {
     return (
-      <Box flexDirection="column" paddingTop={1} paddingLeft={2}>
-        <Text color={colors.error} bold>
-          ✗ Error
-        </Text>
-        <Text color={colors.error}>{error}</Text>
-        <Box marginTop={1}>
-          <Text color={colors.muted}>Press Ctrl+C to exit and try again</Text>
+      <WizardShell title="Rulebricks Configuration">
+        <Box flexDirection="column" paddingTop={1}>
+          <Text color={colors.error} bold>
+            ✗ Error
+          </Text>
+          <Text color={colors.error}>{error}</Text>
+          <Box marginTop={1}>
+            <Text color={colors.muted}>Press Ctrl+C to exit and try again</Text>
+          </Box>
         </Box>
-      </Box>
+      </WizardShell>
     );
   }
 
@@ -473,6 +455,8 @@ function WizardStepController({
         return <ObservabilityStep {...nav} entryDirection={navDirection} />;
       case "feature-config":
         return <FeatureConfigStep {...nav} entryDirection={navDirection} />;
+      case "tls":
+        return <TlsStep {...nav} entryDirection={navDirection} />;
       case "version":
         return <VersionStep {...nav} entryDirection={navDirection} />;
       case "review":
@@ -488,28 +472,29 @@ function WizardStepController({
     }
   };
 
-  return (
-    <AppShell title="Rulebricks Configuration">
-      {mode === "configure" ? (
-        // Step counts are meaningless when hopping between sections from the
-        // menu, so show just the section title while editing.
-        stepInfo && (
-          <Box marginBottom={1}>
-            <Text color={colors.muted}>
-              Updating: <Text color="white">{stepInfo.title}</Text>
-            </Text>
-          </Box>
-        )
-      ) : (
-        <ProgressHeader
-          currentStep={stepNumber}
-          totalSteps={totalSteps}
-          stepTitle={stepInfo?.title || "Complete"}
-        />
-      )}
+  const header =
+    mode === "configure" ? (
+      // Step counts are meaningless when hopping between sections from the
+      // menu, so show just the section title while editing.
+      stepInfo && (
+        <Box marginBottom={1}>
+          <Text color={colors.muted}>
+            Updating: <Text color="white">{stepInfo.title}</Text>
+          </Text>
+        </Box>
+      )
+    ) : (
+      <ProgressHeader
+        currentStep={stepNumber}
+        totalSteps={totalSteps}
+        stepTitle={stepInfo?.title || "Complete"}
+      />
+    );
 
-      <Box marginTop={1}>{renderStep()}</Box>
-    </AppShell>
+  return (
+    <WizardShell title="Rulebricks Configuration" header={header}>
+      {renderStep()}
+    </WizardShell>
   );
 }
 
@@ -539,17 +524,17 @@ export function InitWizard({
   if (!profileLoaded) {
     return (
       <ThemeProvider theme="init">
-        <Logo />
-        <Box paddingLeft={2}>
-          <Text>Loading...</Text>
-        </Box>
+        <WizardShell title="Rulebricks Configuration">
+          <Box paddingTop={1}>
+            <Text>Loading...</Text>
+          </Box>
+        </WizardShell>
       </ThemeProvider>
     );
   }
 
   return (
     <ThemeProvider theme="init">
-      <Logo />
       <CommandApprovalProvider>
         <WizardProvider
           initialName={initialName}

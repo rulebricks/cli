@@ -6,6 +6,7 @@ export { SupabaseCredentialsStep } from './SupabaseCredentialsStep.js';
 export { FeaturesStep } from './FeaturesStep.js';
 export { StorageStep } from './StorageStep.js';
 export { ObservabilityStep } from './ObservabilityStep.js';
+export { TlsStep } from './TlsStep.js';
 export { ExternalServicesStep } from './ExternalServicesStep.js';
 export { SecretsStep } from './SecretsStep.js';
 export { FeatureConfigStep } from './FeatureConfigStep.js';

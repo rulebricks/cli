@@ -45,6 +45,7 @@ test("minimal create path lists twelve steps", () => {
     "storage",
     "observability",
     "features",
+    "tls",
     "version",
     "review",
   ]);
@@ -70,6 +71,7 @@ test("configure sections are the active steps minus cloud and review", () => {
     "storage",
     "observability",
     "features",
+    "tls",
     "version",
   ]);
 

@@ -213,6 +213,48 @@ test("built-in observability settings flow into generated Helm values", () => {
   assert.equal(values.clickstack.ferretdb.persistence.size, "10Gi");
 });
 
+test("provided certificates keep TLS on with zero in-chart issuance", () => {
+  const config = cloneFixture("azure-tls-provided");
+  const values = buildHelmValues(config, { tlsEnabled: true }) as Record<
+    string,
+    any
+  >;
+
+  assert.equal(values.global.tlsEnabled, true);
+  assert.equal(values.global.tlsCertificatesProvided, true);
+  // No Let's Encrypt machinery: the TLS secrets are operator-provided.
+  assert.equal(values["cert-manager"].enabled, false);
+  assert.equal(values.clusterIssuer.enabled, false);
+  // Traefik still terminates TLS exactly as in auto mode.
+  assert.equal(values.traefik.ports.websecure.http.tls.enabled, true);
+  // Private corporate CA: the root bundle rides into the values so the chart
+  // distributes it to in-cluster callers of the public endpoints.
+  assert.match(values.global.tlsPrivateCaBundle, /BEGIN CERTIFICATE/);
+});
+
+test("an external issuer replaces Let's Encrypt without installing cert-manager", () => {
+  const config = cloneFixture("azure-tls-external-issuer");
+  const values = buildHelmValues(config, { tlsEnabled: true }) as Record<
+    string,
+    any
+  >;
+
+  assert.equal(values.global.tlsEnabled, true);
+  assert.equal(values.global.tlsCertificatesProvided, false);
+  assert.deepEqual(values.global.tlsIssuerRef, {
+    name: "corp-venafi",
+    kind: "VenafiClusterIssuer",
+    group: "jetstack.io",
+  });
+  // The cluster's own cert-manager installation owns the CRDs - the chart
+  // must not run a second controller or its Let's Encrypt issuer.
+  assert.equal(values["cert-manager"].enabled, false);
+  assert.equal(values.clusterIssuer.enabled, false);
+  assert.equal(values.traefik.ports.websecure.http.tls.enabled, true);
+  // Publicly-trusted CA: no trust bundle needed.
+  assert.equal(values.global.tlsPrivateCaBundle, undefined);
+});
+
 test("metrics export coexists with built-in ClickStack observability", () => {
   const config = cloneFixture("azure-clickstack-with-metrics-export");
   const values = buildHelmValues(config) as Record<string, any>;
@@ -365,7 +407,16 @@ test("wizard orders storage before observability and skips feature config for bu
       steps.indexOf("external-services"),
       steps.indexOf("version"),
     ),
-    ["external-services", "secrets", "storage", "observability", "features"],
+    [
+      "external-services",
+      "secrets",
+      "storage",
+      "observability",
+      "features",
+      // Certificates always follow the feature toggles so the required
+      // hostname set is final by the time certs are collected.
+      "tls",
+    ],
   );
   assert.equal(steps.includes("feature-config"), false);
 });

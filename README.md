@@ -47,7 +47,7 @@ aws cloudformation create-stack \
 
 # Azure: optional access check, then deploy AKS with Bicep
 az login
-# See cluster-setup/azure/PRECHECK.md for what to confirm first
+# See cluster-setup/azure/CHECKLIST.md for what to confirm first
 az account set --subscription <subscription-id>
 az group create --name rulebricks-rg --location eastus
 export POSTGRES_ADMIN_PASSWORD='<strong-password>'

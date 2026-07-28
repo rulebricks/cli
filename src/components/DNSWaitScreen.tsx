@@ -202,7 +202,7 @@ export function DNSWaitScreen({
                   </Text>
                   <Box marginTop={1}>
                     <Text color={colors.muted}>
-                      Press Enter to continue with TLS setup
+                      Press Enter to finish the deployment
                     </Text>
                   </Box>
                 </Box>

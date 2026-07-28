@@ -59,6 +59,23 @@
           "type": "boolean",
           "description": "Enable TLS/HTTPS"
         },
+        "tlsCertificatesProvided": {
+          "type": "boolean",
+          "description": "Bring-your-own certificates: TLS secrets are created out-of-band under the names each ingress expects, and no cert-manager.io annotations are emitted. Pair with cert-manager.enabled=false."
+        },
+        "tlsIssuerRef": {
+          "type": "object",
+          "description": "Existing cert-manager issuer to use instead of this chart's Let's Encrypt ClusterIssuer (Venafi, Vault, private ACME, ...). Pair with cert-manager.enabled=false - the cluster's own cert-manager installation owns the CRDs.",
+          "properties": {
+            "name": { "type": "string" },
+            "kind": { "type": "string" },
+            "group": { "type": "string" }
+          }
+        },
+        "tlsPrivateCaBundle": {
+          "type": "string",
+          "description": "Corporate root CA bundle (PEM) for privately-issued certificates; mounted into the components that call this deployment's own HTTPS endpoints via NODE_EXTRA_CA_CERTS."
+        },
         "externalDnsEnabled": {
           "type": "boolean",
           "description": "Enable external-dns integration for automatic DNS record management"

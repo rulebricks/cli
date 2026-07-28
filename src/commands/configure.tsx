@@ -1,13 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import {
-  BorderBox,
-  Logo,
   Spinner,
   ThemeProvider,
   useTheme,
+  WizardShell,
 } from "../components/common/index.js";
-import { InitWizard } from "./init.js";
+import { InitWizard, type WizardCompletion } from "./init.js";
 import {
   configToWizardState,
   type WizardState,
@@ -27,6 +26,7 @@ import {
 
 interface ConfigureCommandProps {
   name: string;
+  onSaveComplete?: (completion: WizardCompletion) => void;
 }
 
 type ConfigureStep = "loading" | "wizard" | "error";
@@ -311,7 +311,10 @@ function applyHelmValuesToConfig(
   return next;
 }
 
-function ConfigureCommandInner({ name }: ConfigureCommandProps) {
+function ConfigureCommandInner({
+  name,
+  onSaveComplete,
+}: ConfigureCommandProps) {
   const { colors } = useTheme();
   const [step, setStep] = useState<ConfigureStep>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -354,6 +357,7 @@ function ConfigureCommandInner({ name }: ConfigureCommandProps) {
         initialState={wizardState}
         mode="configure"
         profile={profile}
+        onSaveComplete={onSaveComplete}
       />
     );
   }
@@ -361,27 +365,25 @@ function ConfigureCommandInner({ name }: ConfigureCommandProps) {
   if (step === "error") {
     return (
       <ThemeProvider theme="init">
-        <Logo />
-        <BorderBox title="Configure Failed">
-          <Box flexDirection="column" marginY={1}>
+        <WizardShell title="Rulebricks Configuration">
+          <Box flexDirection="column" paddingTop={1}>
             <Text color={colors.error} bold>
               ✗ Error
             </Text>
             <Text color={colors.error}>{error}</Text>
           </Box>
-        </BorderBox>
+        </WizardShell>
       </ThemeProvider>
     );
   }
 
   return (
     <ThemeProvider theme="init">
-      <Logo />
-      <BorderBox title="Configure">
-        <Box marginY={1}>
+      <WizardShell title="Rulebricks Configuration">
+        <Box paddingTop={1}>
           <Spinner label="Loading configuration..." />
         </Box>
-      </BorderBox>
+      </WizardShell>
     </ThemeProvider>
   );
 }

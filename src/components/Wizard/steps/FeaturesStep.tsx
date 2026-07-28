@@ -64,7 +64,10 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
     state.customEmailsEnabled;
 
   return (
-    <BorderBox title="Optional Features">
+    <BorderBox
+      title="Optional Features"
+      footer={<StepFooter hints={["Space/Enter to toggle", "Esc to go back"]} />}
+    >
       <CheckboxList
         label="Select features to enable"
         items={[
@@ -104,7 +107,6 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
           </Text>
         </Box>
       )}
-      <StepFooter hints={["Space/Enter to toggle", "Esc to go back"]} />
     </BorderBox>
   );
 }

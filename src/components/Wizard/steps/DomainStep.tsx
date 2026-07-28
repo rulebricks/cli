@@ -91,6 +91,10 @@ export function DomainStep({
   );
   const [validating, setValidating] = useState(false);
 
+  // TLS certificate issuance lives in the dedicated Certificates step near
+  // the end of the wizard: the hostnames needing certificates depend on the
+  // observability and features steps, which come after this one.
+
   // Azure DNS auto-detection. When the cluster-setup zone AND the
   // external-dns identity already exist, auto-manage is unambiguously the
   // right answer, so we skip the auto/manual question and instead show the
@@ -190,7 +194,7 @@ export function DomainStep({
       render: (flow) => (
         <TextField
           label="Enter the admin email address"
-          hint="Used for Rulebricks administration, notifications, and TLS certificate (Let's Encrypt) notices"
+          hint="Used for Rulebricks administration, notifications, and certificate expiry notices (when TLS uses Let's Encrypt)"
           value={adminEmail}
           onChange={setAdminEmail}
           placeholder="admin@example.com"
@@ -264,7 +268,7 @@ export function DomainStep({
           {azureZone?.delegated ? (
             <Box borderStyle="round" borderColor="green" paddingX={1}>
               <Text color="green">
-                Delegation is live. TLS certificates are issued automatically.
+                Delegation is live, DNS records are managed automatically.
               </Text>
             </Box>
           ) : (
@@ -276,8 +280,8 @@ export function DomainStep({
             >
               <Text color="yellow">
                 Delegate the zone by adding these NS records for{" "}
-                {azureZone?.name} at your parent domain, then certificates issue
-                automatically:
+                {azureZone?.name} at your parent domain. DNS records are then
+                managed automatically:
               </Text>
               {(azureZone?.nameServers ?? []).map((ns) => (
                 <Text key={ns} color="yellow">
@@ -358,12 +362,11 @@ export function DomainStep({
   };
 
   return (
-    <BorderBox title="Domain & DNS">
+    <BorderBox title="Domain & DNS" footer={<StepFooter />}>
       {flow.render()}
 
       <CheckRows rows={progress()} />
       <FieldError error={error} />
-      <StepFooter />
     </BorderBox>
   );
 }

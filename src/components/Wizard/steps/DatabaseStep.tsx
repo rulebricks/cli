@@ -179,12 +179,11 @@ export function DatabaseStep({
   };
 
   return (
-    <BorderBox title="Database">
+    <BorderBox title="Database" footer={<StepFooter />}>
       {flow.render()}
 
       <CheckRows rows={progress()} />
       <FieldError error={error} />
-      <StepFooter />
     </BorderBox>
   );
 }

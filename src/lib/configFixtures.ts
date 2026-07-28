@@ -91,6 +91,7 @@ interface MatrixOptions {
   tracing?: NonNullable<DeploymentConfig["features"]["tracing"]>;
   appLogs?: NonNullable<DeploymentConfig["features"]["logging"]["appLogs"]>;
   cache?: NonNullable<DeploymentConfig["features"]["cache"]>;
+  tls?: DeploymentConfig["tls"];
   version?: string;
 }
 
@@ -148,6 +149,7 @@ function build(options: MatrixOptions): DeploymentConfig {
     adminEmail: "admin@example.com",
     tlsEmail: "tls@example.com",
     dns: { provider: "route53", autoManage: false },
+    tls: options.tls,
     smtp: {
       host: "smtp.example.com",
       port: 587,
@@ -415,6 +417,41 @@ export function buildConfigMatrix(): { name: string; config: DeploymentConfig }[
         clientId: "33333333-3333-3333-3333-333333333333",
         tenantId: "22222222-2222-2222-2222-222222222222",
         clientSecretRef: { name: "azure-monitor", key: "client-secret" },
+      },
+    },
+    {
+      // Bring-your-own certificates from a PRIVATE corporate CA: TLS on with
+      // zero in-chart issuance, plus the root bundle distributed to
+      // in-cluster callers (the fixture file is a real committed PEM so the
+      // bundle-read path is exercised end-to-end).
+      name: "azure-tls-provided",
+      provider: "azure",
+      tls: {
+        mode: "provided",
+        certificates: [
+          {
+            certFile: "/etc/rulebricks/tls/wildcard.crt",
+            keyFile: "/etc/rulebricks/tls/wildcard.key",
+          },
+        ],
+        caTrust: "private",
+        caBundleFile: "src/lib/__fixtures__/test-ca.pem",
+      },
+    },
+    {
+      // Existing cert-manager issuer (Venafi enhanced issuer shape): the
+      // chart points its Certificates/annotations at it; no in-chart
+      // cert-manager or Let's Encrypt issuer.
+      name: "azure-tls-external-issuer",
+      provider: "azure",
+      tls: {
+        mode: "external-issuer",
+        issuer: {
+          name: "corp-venafi",
+          kind: "VenafiClusterIssuer",
+          group: "jetstack.io",
+        },
+        caTrust: "public",
       },
     },
     {

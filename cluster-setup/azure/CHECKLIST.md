@@ -6,13 +6,15 @@ To deploy Rulebricks, your workflow will be:
    - **Delegated DNS subdomain** (e.g. `rb.mycorp.com`)
    - **Approved IP ranges** (VNet address space and subnets)
    - **Entra app for email** (Client ID and client secret)
+   - **Entra app for SSO** (Client ID and client secret)
+   - **TLS certificates** (Only if your organization issues its own)
    - **Rulebricks license key** (Request from Rulebricks)
  - Prepare the machine that will deploy the infrastructure and Rulebricks application.
    - Have the Azure CLI, the Rulebricks CLI, and helm installed
    - Know if you have a network path to the VNet (true/false)
  - Create a copy of, review, and configure the bicep parameters file, then deploy the cluster.
  - Wait for all resources to be deployed successfully, debug any issues (permissions, quota, etc.)
- - Using the Rulebricks CLI, run `rulebricks init` to fully configure your instance.
+ - Using the Rulebricks CLI, run `rulebricks init` to fully configure your Rulebricks instance.
  - Run `rulebricks deploy` to deploy the Rulebricks application.
 
 This checklist continues with what to confirm you have on hand before deploying bicep.
@@ -57,6 +59,32 @@ afterward.
       `dnsZoneNameServers` deployment output).
 - [ ] If the parent domain publishes a CAA record, confirm it permits
       Let's Encrypt (`letsencrypt.org`).
+
+### TLS certificates
+
+`rulebricks init` asks how certificates are issued and supports three paths:
+
+1. **Let's Encrypt (default)** | issued and renewed automatically for every
+   hostname; nothing to prepare beyond the CAA check above.
+2. **Your cluster's certificate manager** | if your platform team runs a
+   cert-manager issuer (Venafi, Vault, a private ACME CA, ...), the CLI
+   points certificate requests at it and renewal stays fully automatic. Have
+   on hand: the issuer's name and kind.
+3. **Bring your own certificate files** | request them before an install.
+   Rulebricks serves these hostnames under the subdomain (`<sub>` = the
+   `dnsZoneName` above):
+
+   - [ ] `<sub>` | the main app and API
+   - [ ] `supabase.<sub>` | authentication and data APIs
+   - [ ] `observability.<sub>` | built-in observability UI
+   - [ ] `valkey.<sub>` | only if the optional Valkey admin UI is enabled
+
+   One wildcard certificate covering `<sub>` and `*.<sub>` works for all of
+   them; otherwise four individual certificates. 
+   
+   **It will also be useful to know if the issuing CA is publicly trusted, or
+    a private/corporate CA.** Both are supported.
+
 
 ## 4. Network path for the installer
 
@@ -110,9 +138,8 @@ These need to be provisioned before deployment:
       The CLI takes the app's client ID (`<appId>`) and its client secret
       (`<clientSecret>`), and grants the app access to the email service
       during deploy.
-- [ ] An Entra app for SSO (optional, for Entra ID login). Have on hand: its
-      client ID, a client secret, and your tenant ID. The app needs one web
-      redirect URI - `https://supabase.<subdomain-from-step-3>/auth/v1/callback` -
+- [ ] An Entra app for SSO. Have on hand: its client ID, a client secret, and your tenant ID. The app needs one web
+      redirect URI - `https://supabase.<subdomain-from-step-3>/auth/v1/callback`, 
       and ID token issuance enabled; the default `User.Read` permission is
       sufficient. To create:
       `az ad app create --display-name "Rulebricks SSO" --sign-in-audience AzureADMyOrg --web-redirect-uris "https://supabase.<subdomain>/auth/v1/callback" --enable-id-token-issuance true`,

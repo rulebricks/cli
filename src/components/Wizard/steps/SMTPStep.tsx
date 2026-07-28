@@ -509,7 +509,7 @@ export function SMTPStep({
   });
 
   return (
-    <BorderBox title="Email">
+    <BorderBox title="Email" footer={<StepFooter />}>
       <Box flexDirection="column" marginY={1}>
         <Text color="gray" dimColor>
           Configure email delivery for user invitations, password resets, and
@@ -521,7 +521,6 @@ export function SMTPStep({
 
       {flow.current !== "provider" && <CheckRows rows={completed()} />}
       <FieldError error={error} />
-      <StepFooter />
     </BorderBox>
   );
 }

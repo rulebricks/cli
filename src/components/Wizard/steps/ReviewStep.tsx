@@ -2,7 +2,13 @@ import React, { useState } from 'react';
 import { Box, Text } from 'ink';
 import TextInput from 'ink-text-input';
 import { useWizard } from '../WizardContext.js';
-import { BorderBox, useGatedInput, useTheme } from '../../common/index.js';
+import {
+  BorderBox,
+  ScrollArea,
+  useGatedInput,
+  useStepLayout,
+  useTheme,
+} from '../../common/index.js';
 import { DNS_PROVIDER_NAMES, CLOUD_PROVIDER_NAMES, LOGGING_SINK_INFO, isSupportedDnsProvider, KafkaPreset } from '../../../types/index.js';
 
 interface ReviewStepProps {
@@ -33,6 +39,7 @@ export function ReviewStep({
 }: ReviewStepProps) {
   const { state, dispatch, configIssues } = useWizard();
   const { colors } = useTheme();
+  const layout = useStepLayout();
   const [editingName, setEditingName] = useState(allowEditName && !state.name);
   const [name, setName] = useState(state.name || '');
   const [error, setError] = useState<string | null>(null);
@@ -134,10 +141,12 @@ export function ReviewStep({
   // Helper to render a config row
   const ConfigRow = ({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) => (
     <Box>
-      <Box width={16}>
+      <Box width={16} flexShrink={0}>
         <Text color={colors.muted}>{label}</Text>
       </Box>
-      <Text color={valueColor || colors.accent}>{value}</Text>
+      <Text color={valueColor || colors.accent} wrap="truncate-end">
+        {value}
+      </Text>
     </Box>
   );
   
@@ -148,8 +157,31 @@ export function ReviewStep({
     </Box>
   );
   
+  // Body rows available inside the fixed step box: subtract the two border
+  // rows and the pinned three-row footer. Falls back to a sane height when
+  // rendered outside the wizard shell.
+  const bodyHeight = layout ? layout.stepBoxHeight - 5 : 20;
+
+  const footer = (
+    <Box marginTop={1} flexDirection="column">
+      {issues.length === 0 ? (
+        <Text color={colors.success} bold>
+          Press Enter to save this configuration
+        </Text>
+      ) : (
+        <Text color={colors.muted}>
+          Go back (Esc) to fix the items above, then return here to save.
+        </Text>
+      )}
+      <Text color={colors.muted} dimColor>
+        {allowEditName ? 'e to edit name • ' : ''}Esc to go back
+      </Text>
+    </Box>
+  );
+
   return (
-    <BorderBox title="Review Configuration">
+    <BorderBox title="Review Configuration" footer={footer}>
+      <ScrollArea height={bodyHeight}>
       <Box flexDirection="column">
         <SectionHeader title="Deployment" />
         <ConfigRow label="Name" value={state.name} />
@@ -411,21 +443,7 @@ export function ReviewStep({
           ))}
         </Box>
       )}
-
-      <Box marginTop={1} flexDirection="column">
-        {issues.length === 0 ? (
-          <Text color={colors.success} bold>
-            Press Enter to save this configuration
-          </Text>
-        ) : (
-          <Text color={colors.muted}>
-            Go back (Esc) to fix the items above, then return here to save.
-          </Text>
-        )}
-        <Text color={colors.muted} dimColor>
-          {allowEditName ? 'e to edit name • ' : ''}Esc to go back
-        </Text>
-      </Box>
+      </ScrollArea>
     </BorderBox>
   );
 }

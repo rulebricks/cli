@@ -1,6 +1,12 @@
 export { BorderBox, Section, ProgressBar } from "./Box.js";
 export { Spinner, StatusLine } from "./Spinner.js";
-export { AppShell, ScreenContainer, ProgressHeader } from "./AppShell.js";
+export { WizardShell, ProgressHeader } from "./AppShell.js";
+export {
+  renderFullScreen,
+  ScrollArea,
+  useStepLayout,
+  useViewport,
+} from "./layout.js";
 export { DeploymentPicker } from "./DeploymentPicker.js";
 export { Logo, LOGO_LINES } from "./Logo.js";
 export {

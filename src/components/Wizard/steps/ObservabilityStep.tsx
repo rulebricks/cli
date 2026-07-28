@@ -239,11 +239,10 @@ export function ObservabilityStep({
   });
 
   return (
-    <BorderBox title="Observability">
+    <BorderBox title="Observability" footer={<StepFooter />}>
       {flow.render()}
 
       <FieldError error={error} />
-      <StepFooter />
     </BorderBox>
   );
 }

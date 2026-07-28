@@ -229,7 +229,7 @@ export function VersionStep({
   });
 
   return (
-    <BorderBox title="License & Version">
+    <BorderBox title="License & Version" footer={<StepFooter />}>
       {flow.render()}
 
       {flow.current === "version" && licenseKey && (
@@ -240,7 +240,6 @@ export function VersionStep({
         />
       )}
       <FieldError error={error} />
-      <StepFooter />
     </BorderBox>
   );
 }

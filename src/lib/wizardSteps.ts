@@ -10,6 +10,11 @@ export const WIZARD_STEP_ORDER = [
   "observability",
   "features",
   "feature-config",
+  // Certificates come AFTER observability/features on purpose: the hostname
+  // set needing certificates depends on those toggles (built-in
+  // observability, Valkey admin ingress), so the coverage preview is
+  // computed against the operator's actual selections.
+  "tls",
   "version",
   "review",
 ] as const;
@@ -65,6 +70,7 @@ export function getActiveWizardSteps(
     steps.push("feature-config");
   }
 
+  steps.push("tls");
   steps.push("version", "review");
 
   return steps;

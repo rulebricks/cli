@@ -518,7 +518,7 @@ export function SecretsStep({
   };
 
   return (
-    <BorderBox title="Secrets">
+    <BorderBox title="Secrets" footer={<StepFooter />}>
       {flow.render()}
 
       {backend === "cluster" && flow.current === "backend" && (
@@ -532,7 +532,6 @@ export function SecretsStep({
 
       <CheckRows rows={progress()} />
       <FieldError error={error} />
-      <StepFooter />
     </BorderBox>
   );
 }

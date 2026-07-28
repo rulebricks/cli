@@ -148,7 +148,7 @@ export function SupabaseCredentialsStep({
   };
 
   return (
-    <BorderBox title="Supabase Credentials">
+    <BorderBox title="Supabase Credentials" footer={<StepFooter />}>
       <Box flexDirection="column" marginY={1}>
         <Text color="gray" dimColor>
           Configure credentials for your self-hosted Supabase instance
@@ -162,7 +162,6 @@ export function SupabaseCredentialsStep({
 
       <CheckRows rows={progress()} />
       <FieldError error={error} />
-      <StepFooter />
     </BorderBox>
   );
 }

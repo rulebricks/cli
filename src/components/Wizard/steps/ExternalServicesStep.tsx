@@ -1036,7 +1036,7 @@ export function ExternalServicesStep({
   });
 
   return (
-    <BorderBox title="External Services">
+    <BorderBox title="External Services" footer={<StepFooter />}>
       <Box flexDirection="column" marginY={1}>
         <Text>Managed services for Rulebricks.</Text>
         <Text color="gray" dimColor>
@@ -1049,7 +1049,6 @@ export function ExternalServicesStep({
       {flow.render()}
 
       <FieldError error={error} />
-      <StepFooter />
     </BorderBox>
   );
 }

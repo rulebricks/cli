@@ -5,7 +5,12 @@ import { render } from "ink";
 import React from "react";
 import chalk from "chalk";
 
-import { InitWizard } from "./commands/init.js";
+import {
+  InitWizard,
+  printWizardCompletion,
+  type WizardCompletion,
+} from "./commands/init.js";
+import { renderFullScreen } from "./components/common/index.js";
 import { DeployCommand } from "./commands/deploy.js";
 import { ConfigureCommand } from "./commands/configure.js";
 import { UpgradeCommand } from "./commands/upgrade.js";
@@ -32,12 +37,7 @@ const program = new Command();
 program
   .name("rulebricks")
   .description("CLI for deploying and managing private Rulebricks instances")
-  .version(VERSION)
-  .hook("preAction", () => {
-    // Clear terminal for a fresh start
-    // Logo is now rendered via Ink's Static component in each command
-    console.clear();
-  });
+  .version(VERSION);
 
 // Init command - interactive configuration wizard
 program
@@ -50,10 +50,22 @@ program
   )
   .action(async (name, options) => {
     const deploymentName = name || options.name;
-    const { waitUntilExit } = render(
-      <InitWizard initialName={deploymentName} />,
+    let completion: WizardCompletion | null = null;
+    // The wizard runs on the alternate screen buffer; the summary is printed
+    // to the regular terminal after it restores.
+    await renderFullScreen(
+      <InitWizard
+        initialName={deploymentName}
+        onSaveComplete={(result) => {
+          completion = result;
+        }}
+      />,
     );
-    await waitUntilExit();
+    if (completion) {
+      printWizardCompletion(completion);
+    } else {
+      console.log(chalk.dim("Cancelled — no changes were saved."));
+    }
   });
 
 // Deploy command
@@ -107,10 +119,20 @@ program
       process.exit(1);
     }
 
-    const { waitUntilExit } = render(
-      <ConfigureCommand name={deploymentName} />,
+    let completion: WizardCompletion | null = null;
+    await renderFullScreen(
+      <ConfigureCommand
+        name={deploymentName}
+        onSaveComplete={(result) => {
+          completion = result;
+        }}
+      />,
     );
-    await waitUntilExit();
+    if (completion) {
+      printWizardCompletion(completion);
+    } else {
+      console.log(chalk.dim("Cancelled — no changes were saved."));
+    }
   });
 
 // Upgrade command

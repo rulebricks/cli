@@ -470,7 +470,7 @@ export function CloudProviderStep({
   });
 
   return (
-    <BorderBox title="Cloud Provider">
+    <BorderBox title="Cloud Provider" footer={<StepFooter />}>
       {finishing ? (
         <Box flexDirection="column" marginY={1}>
           <Spinner label="Refreshing kubeconfig for selected cluster..." />
@@ -480,7 +480,6 @@ export function CloudProviderStep({
       )}
 
       <FieldError error={error} />
-      <StepFooter />
     </BorderBox>
   );
 }

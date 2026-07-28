@@ -53,6 +53,21 @@ export interface WizardState {
   dnsProvider: DnsProvider;
   dnsAutoManage: boolean;
 
+  // TLS certificate issuance: "auto" (Let's Encrypt), "external-issuer" (an
+  // issuer the cluster's platform team already runs - Venafi, Vault, ...) or
+  // "provided" (operator-supplied PEM files loaded into the ingress TLS
+  // secrets).
+  tlsMode: "auto" | "external-issuer" | "provided";
+  tlsCertificates: Array<{ certFile: string; keyFile: string }>;
+  tlsIssuerName: string;
+  tlsIssuerKind: string;
+  tlsIssuerGroup: string;
+  // Whether the issuing CA is publicly trusted (non-auto modes). A private
+  // CA needs its root bundle so in-cluster callers of the deployment's own
+  // HTTPS endpoints can verify it.
+  tlsCaTrust: "public" | "private";
+  tlsCaBundleFile: string;
+
   // SMTP
   smtpHost: string;
   smtpPort: number;
@@ -253,6 +268,21 @@ type WizardAction =
   | { type: "SET_ADMIN_EMAIL"; email: string }
   | { type: "SET_DNS_PROVIDER"; provider: DnsProvider }
   | { type: "SET_DNS_AUTO_MANAGE"; autoManage: boolean }
+  | {
+      type: "SET_TLS_CONFIG";
+      config: Partial<
+        Pick<
+          WizardState,
+          | "tlsMode"
+          | "tlsCertificates"
+          | "tlsIssuerName"
+          | "tlsIssuerKind"
+          | "tlsIssuerGroup"
+          | "tlsCaTrust"
+          | "tlsCaBundleFile"
+        >
+      >;
+    }
   | {
       type: "SET_SMTP";
       config: Partial<
@@ -499,6 +529,15 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     // DNS Configuration - pre-populate from profile
     dnsProvider: profile?.dnsProvider ?? "other",
     dnsAutoManage: false,
+
+    // TLS certificate issuance
+    tlsMode: "auto",
+    tlsCertificates: [],
+    tlsIssuerName: "",
+    tlsIssuerKind: "ClusterIssuer",
+    tlsIssuerGroup: "cert-manager.io",
+    tlsCaTrust: "public",
+    tlsCaBundleFile: "",
 
     // SMTP - pre-populate from profile
     smtpHost: profile?.smtpHost ?? "",
@@ -1092,6 +1131,26 @@ export function collectConfigIssues(state: WizardState): string[] {
     }
   }
 
+  if (state.tlsMode === "provided" && state.tlsCertificates.length === 0) {
+    issues.push(
+      "TLS is set to bring-your-own certificates but no certificate files are configured.",
+    );
+  }
+  if (state.tlsMode === "external-issuer" && !state.tlsIssuerName) {
+    issues.push(
+      "TLS is set to an existing certificate-manager issuer but no issuer name is configured.",
+    );
+  }
+  if (
+    state.tlsMode !== "auto" &&
+    state.tlsCaTrust === "private" &&
+    !state.tlsCaBundleFile
+  ) {
+    issues.push(
+      "The issuing CA is marked private but no root CA bundle file is configured.",
+    );
+  }
+
   if (state.metricsExportEnabled) {
     const remoteWrite = buildRemoteWriteFromState(state);
     if (!remoteWrite) {
@@ -1208,6 +1267,13 @@ export function configToWizardState(
     tlsEmail: config.tlsEmail,
     dnsProvider: config.dns.provider,
     dnsAutoManage: config.dns.autoManage,
+    tlsMode: config.tls?.mode ?? "auto",
+    tlsCertificates: config.tls?.certificates ?? [],
+    tlsIssuerName: config.tls?.issuer?.name ?? "",
+    tlsIssuerKind: config.tls?.issuer?.kind ?? "ClusterIssuer",
+    tlsIssuerGroup: config.tls?.issuer?.group ?? "cert-manager.io",
+    tlsCaTrust: config.tls?.caTrust ?? "public",
+    tlsCaBundleFile: config.tls?.caBundleFile ?? "",
     smtpHost: config.smtp.host,
     smtpPort: config.smtp.port,
     smtpUser: config.smtp.user,
@@ -1553,6 +1619,8 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       };
     case "SET_DNS_AUTO_MANAGE":
       return { ...state, dnsAutoManage: action.autoManage };
+    case "SET_TLS_CONFIG":
+      return { ...state, ...action.config };
     case "SET_SMTP":
       return { ...state, ...action.config };
     case "SET_DATABASE_TYPE":
@@ -1789,6 +1857,29 @@ export function WizardProvider({
         provider: state.dnsProvider,
         autoManage: state.dnsAutoManage,
       },
+      // Omitted entirely in auto mode: absent tls = Let's Encrypt default.
+      tls:
+        state.tlsMode !== "auto"
+          ? {
+              mode: state.tlsMode,
+              ...(state.tlsMode === "external-issuer"
+                ? {
+                    issuer: {
+                      name: state.tlsIssuerName,
+                      kind: state.tlsIssuerKind || undefined,
+                      group: state.tlsIssuerGroup || undefined,
+                    },
+                  }
+                : {}),
+              ...(state.tlsMode === "provided"
+                ? { certificates: state.tlsCertificates }
+                : {}),
+              caTrust: state.tlsCaTrust,
+              ...(state.tlsCaTrust === "private"
+                ? { caBundleFile: state.tlsCaBundleFile }
+                : {}),
+            }
+          : undefined,
       smtp: {
         host: state.smtpHost,
         port: state.smtpPort,

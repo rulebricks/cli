@@ -885,7 +885,7 @@ export function StorageStep({
     : "Decision logs are stored as a prefix within it.";
 
   return (
-    <BorderBox title={storageTitle}>
+    <BorderBox title={storageTitle} footer={<StepFooter />}>
       <Box flexDirection="column" marginBottom={1}>
         <Text>Configure one bucket/container for all Rulebricks data.</Text>
         <Text color="gray" dimColor>
@@ -899,7 +899,6 @@ export function StorageStep({
         flow.current,
       ) && <CheckRows rows={chosenSummary()} />}
       <FieldError error={error} />
-      <StepFooter />
     </BorderBox>
   );
 }

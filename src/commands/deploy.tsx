@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Box, Text, useApp } from "ink";
 import { platform } from "os";
+import { readFileSync } from "fs";
+import { execa } from "execa";
 import {
   BorderBox,
   Spinner,
@@ -56,7 +58,13 @@ import {
   ensureNamespace,
   applyDeploymentSecrets,
   applyExternalDnsAzureConfig,
+  applyProvidedTlsSecrets,
 } from "../lib/secrets.js";
+import {
+  planTlsSecrets,
+  parseCertificate,
+  TlsSecretPlan,
+} from "../lib/tlsCerts.js";
 import { setupExternalSecrets } from "../lib/eso.js";
 import {
   runInstallSequence,
@@ -161,6 +169,28 @@ function DeployCommandInner({
     if (!config) return;
 
     try {
+      // Non-auto issuance: TLS has been live since the first install (no
+      // ACME involved), so confirming DNS needs no TLS flip or upgrade.
+      // External-issuer mode still waits on its Certificates going Ready;
+      // provided certificates have nothing to issue at all.
+      if (config.tls && config.tls.mode !== "auto") {
+        const externalIssuer = config.tls.mode === "external-issuer";
+        setStatus((s) => ({
+          ...s,
+          dnsConfig: "success",
+          helmUpgradeTls: "skipped",
+          certCheck: externalIssuer ? "running" : "skipped",
+        }));
+        if (externalIssuer) {
+          setStep("cert-check");
+          await verifyCertificates(getNamespace(config.name));
+        }
+        await markRunningState(config, getNamespace(config.name));
+        setStep("complete");
+        setTimeout(() => exit(), 5000);
+        return;
+      }
+
       setStep("helm-upgrade-tls");
       setStatus((s) => ({
         ...s,
@@ -220,6 +250,11 @@ function DeployCommandInner({
       const externalDnsEnabled =
         cfg.dns.autoManage && isSupportedDnsProvider(cfg.dns.provider);
       setUseExternalDns(externalDnsEnabled);
+      // Non-auto TLS issuance (external issuer or provided certificates) has
+      // no ACME dependency, so TLS is on from the very first install even
+      // when DNS is managed manually.
+      const tlsMode = cfg.tls?.mode ?? "auto";
+      const tlsProvided = tlsMode === "provided";
 
       const existingState = await loadDeploymentState(name);
       const state: DeploymentState = existingState || {
@@ -235,6 +270,46 @@ function DeployCommandInner({
       setStep("preflight");
       markRunning("preflight");
       await runPreflightChecks(cfg);
+      // Bring-your-own certificates: read and validate the PEM files now
+      // (key pairing, expiry, SAN coverage of every served hostname) so a
+      // gap fails here with the exact missing hostname instead of surfacing
+      // as a TLS handshake error after install.
+      let tlsSecretPlan: TlsSecretPlan = { entries: [], warnings: [] };
+      if (tlsProvided) {
+        tlsSecretPlan = planTlsSecrets(cfg, getReleaseName(cfg.name));
+        if (tlsSecretPlan.warnings.length > 0) {
+          setTlsWarning(tlsSecretPlan.warnings.join("\n"));
+        }
+      }
+      // External issuer: probe that the referenced issuer actually exists so
+      // a typo'd name surfaces now instead of as Certificates stuck in
+      // Pending. Fail-open (warn) - the CRD may be unreadable to this
+      // principal, or use naming this probe cannot derive.
+      if (tlsMode === "external-issuer" && cfg.tls?.issuer?.name) {
+        const issuer = cfg.tls.issuer;
+        const resource = `${(issuer.kind || "ClusterIssuer").toLowerCase()}.${issuer.group || "cert-manager.io"}`;
+        try {
+          await execa("kubectl", ["get", resource, issuer.name]);
+        } catch (probeError) {
+          setTlsWarning(
+            `Could not confirm the certificate issuer "${issuer.name}" (${resource}) exists: ` +
+              `${probeError instanceof Error ? probeError.message.split("\n")[0] : String(probeError)}. ` +
+              "If certificates stay Pending after install, verify the issuer name/kind with your platform team.",
+          );
+        }
+      }
+      // Private CA: confirm the root bundle is readable and parseable before
+      // it gets baked into the values.
+      if (tlsMode !== "auto" && cfg.tls?.caTrust === "private") {
+        try {
+          parseCertificate(readFileSync(cfg.tls.caBundleFile ?? "", "utf8"));
+        } catch {
+          throw new Error(
+            `Cannot read or parse the private root CA bundle at: ${cfg.tls.caBundleFile}. ` +
+              "It must be a PEM file containing your corporate root (and any intermediates).",
+          );
+        }
+      }
       markSuccess("preflight");
 
       // Ensure the per-namespace workload-identity trust exists. cluster-setup
@@ -407,7 +482,7 @@ function DeployCommandInner({
       await runInstallSequence(
         {
           regenerateValues,
-          tlsEnabled: externalDnsEnabled,
+          tlsEnabled: externalDnsEnabled || tlsMode !== "auto",
           secretMode,
         },
         {
@@ -428,9 +503,17 @@ function DeployCommandInner({
             if (externalDnsAzureConfig) {
               await applyExternalDnsAzureConfig(namespace, externalDnsAzureConfig);
             }
+            if (tlsSecretPlan.entries.length > 0) {
+              await applyProvidedTlsSecrets(namespace, tlsSecretPlan.entries);
+            }
           },
           setupExternalSecrets: async () => {
             await setupExternalSecrets(cfg, { overwriteSecrets: syncSecrets });
+            // TLS material is ingress plumbing, not an application secret -
+            // it goes straight to Kubernetes even in ESO mode.
+            if (tlsSecretPlan.entries.length > 0) {
+              await applyProvidedTlsSecrets(namespace, tlsSecretPlan.entries);
+            }
           },
           installChart: () =>
             installOrUpgradeChart(name, {
@@ -448,11 +531,15 @@ function DeployCommandInner({
           helmInstall: "success",
           dnsConfig: "skipped",
           helmUpgradeTls: "skipped",
-          certCheck: "running",
+          certCheck: tlsProvided ? "skipped" : "running",
         }));
 
-        setStep("cert-check");
-        await verifyCertificates(namespace);
+        // Provided certificates have no ACME issuance to wait on - the TLS
+        // secrets were applied before the install.
+        if (!tlsProvided) {
+          setStep("cert-check");
+          await verifyCertificates(namespace);
+        }
         await markRunningState(cfg, namespace);
         setStep("complete");
         setTimeout(() => exit(), 5000);
@@ -466,10 +553,12 @@ function DeployCommandInner({
           ...s,
           dnsConfig: "skipped",
           helmUpgradeTls: "skipped",
-          certCheck: "running",
+          certCheck: tlsProvided ? "skipped" : "running",
         }));
-        setStep("cert-check");
-        await verifyCertificates(namespace);
+        if (!tlsProvided) {
+          setStep("cert-check");
+          await verifyCertificates(namespace);
+        }
         await markRunningState(cfg, namespace);
         setStep("complete");
         setTimeout(() => exit(), 5000);

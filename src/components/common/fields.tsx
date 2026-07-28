@@ -9,6 +9,7 @@ import SelectInput from "ink-select-input";
 import TextInput from "ink-text-input";
 import { Spinner } from "./Spinner.js";
 import { useGatedInput } from "./CommandApproval.js";
+import { useStepLayout } from "./layout.js";
 import { useTheme } from "../../lib/theme.js";
 
 /** Sentinel select value that drops the user into manual text entry. */
@@ -59,41 +60,53 @@ export function WizardSelect({
   footer,
 }: WizardSelectProps) {
   const { colors } = useTheme();
-  const resolvedIndex =
-    initialIndex ??
+  const layout = useStepLayout();
+  const maxRows = layout?.listLimit ?? 8;
+  const resolvedIndex = Math.min(
     Math.max(
+      initialIndex ??
+        Math.max(
+          0,
+          items.findIndex((item) => item.value === initialValue),
+        ),
       0,
-      items.findIndex((item) => item.value === initialValue),
-    );
-  const scrolls = items.length > 8;
-
-  const list = (
-    <SelectInput
-      items={items}
-      onSelect={(item: SelectOption) => onSelect(item.value)}
-      initialIndex={Math.min(Math.max(resolvedIndex, 0), items.length - 1)}
-      limit={scrolls ? 8 : undefined}
-      indicatorComponent={() => null}
-      itemComponent={({ isSelected, label: itemLabel }) => (
-        <Text color={isSelected ? colors.accent : undefined}>
-          {isSelected ? "❯ " : "  "}
-          {itemLabel}
-        </Text>
-      )}
-    />
+    ),
+    Math.max(items.length - 1, 0),
   );
+  // Lists take exactly the rows they need; scrolling kicks in only when the
+  // item count exceeds what the layout allows (no reserved blank rows).
+  const limit = Math.min(items.length, maxRows);
+  const scrolls = items.length > limit;
+  const [highlighted, setHighlighted] = useState(resolvedIndex);
 
   return (
     <Box flexDirection="column" marginY={1}>
       <FieldHeader label={label} hint={hint} />
-      {scrolls ? (
-        <Box marginTop={1} height={10} flexDirection="column" overflowY="hidden">
-          {list}
-        </Box>
-      ) : (
-        <Box marginTop={1} flexDirection="column">
-          {list}
-        </Box>
+      <Box marginTop={1} flexDirection="column">
+        <SelectInput
+          items={items}
+          onSelect={(item: SelectOption) => onSelect(item.value)}
+          onHighlight={(item: SelectOption) =>
+            setHighlighted(items.findIndex((i) => i.value === item.value))
+          }
+          initialIndex={resolvedIndex}
+          limit={scrolls ? limit : undefined}
+          indicatorComponent={() => null}
+          itemComponent={({ isSelected, label: itemLabel }) => (
+            <Text
+              color={isSelected ? colors.accent : undefined}
+              wrap="truncate-end"
+            >
+              {isSelected ? "❯ " : "  "}
+              {itemLabel}
+            </Text>
+          )}
+        />
+      </Box>
+      {scrolls && (
+        <Text color={colors.muted} dimColor>
+          ↑/↓ to scroll • {Math.max(highlighted, 0) + 1}/{items.length}
+        </Text>
       )}
       {footer && (
         <Text color={colors.muted} dimColor>
@@ -184,8 +197,10 @@ export function DiscoveredSelect({
   noRecommendationNotice,
 }: DiscoveredSelectProps) {
   const { colors } = useTheme();
+  const layout = useStepLayout();
   const [items, setItems] = useState<SelectOption[]>([]);
   const [loading, setLoading] = useState(true);
+  const [highlighted, setHighlighted] = useState(0);
 
   const runLoad = async () => {
     setLoading(true);
@@ -216,6 +231,7 @@ export function DiscoveredSelect({
   }
 
   const recommended = recommendIndex ? recommendIndex(items) : -1;
+  const maxRows = layout?.listLimit ?? 8;
   const savedIndex = initialValue
     ? items.findIndex((item) => item.value === initialValue)
     : -1;
@@ -242,6 +258,10 @@ export function DiscoveredSelect({
     })),
     { label: manualLabel, value: MANUAL },
   ];
+  // Size the list to its contents; scroll only past the layout's budget
+  // instead of reserving a fixed block of rows.
+  const limit = Math.min(listItems.length, maxRows);
+  const scrolls = listItems.length > limit;
 
   return (
     <Box flexDirection="column" marginY={1}>
@@ -256,18 +276,26 @@ export function DiscoveredSelect({
           <Text color="yellow">{noRecommendationNotice}</Text>
         </Box>
       )}
-      <Box marginTop={1} height={10} flexDirection="column" overflowY="hidden">
+      <Box marginTop={1} flexDirection="column">
         <SelectInput
           items={listItems}
           onSelect={(item: SelectOption) => {
             if (item.value === MANUAL) onManual();
             else onSelect(item.value);
           }}
-          limit={8}
+          onHighlight={(item: SelectOption) =>
+            setHighlighted(
+              listItems.findIndex((i) => i.value === item.value),
+            )
+          }
+          limit={scrolls ? limit : undefined}
           initialIndex={preselect}
           indicatorComponent={() => null}
           itemComponent={({ isSelected, label: itemLabel }) => (
-            <Text color={isSelected ? colors.accent : undefined}>
+            <Text
+              color={isSelected ? colors.accent : undefined}
+              wrap="truncate-end"
+            >
               {isSelected ? "❯ " : "  "}
               {itemLabel}
             </Text>
@@ -277,6 +305,9 @@ export function DiscoveredSelect({
       <Box marginTop={1}>
         <Text color="gray" dimColor>
           R to refresh • ↑/↓ to navigate • Enter to select
+          {scrolls
+            ? ` • ${Math.max(highlighted, 0) + 1}/${listItems.length}`
+            : ""}
         </Text>
       </Box>
     </Box>
@@ -375,15 +406,27 @@ export interface CheckRow {
   value?: string;
 }
 
+/** Most completed-setting rows shown before older ones collapse. */
+const MAX_CHECK_ROWS = 5;
+
 export function CheckRows({ rows }: { rows: CheckRow[] }) {
   const { colors } = useTheme();
   if (rows.length === 0) return null;
+  // Cap the block so accumulating checkmarks can't blow the fixed step-box
+  // budget; the most recent settings are the relevant ones.
+  const collapsed = Math.max(0, rows.length - (MAX_CHECK_ROWS - 1));
+  const visible = collapsed > 0 ? rows.slice(collapsed) : rows;
   return (
     <Box marginTop={1} flexDirection="column">
-      {rows.map((row) => (
+      {collapsed > 0 && (
+        <Text color="gray" dimColor>
+          {"  "}… {collapsed} earlier setting{collapsed === 1 ? "" : "s"}
+        </Text>
+      )}
+      {visible.map((row) => (
         <Box key={row.label}>
           <Text color={colors.success}>{"✓"}</Text>
-          <Text color="gray">
+          <Text color="gray" wrap="truncate-end">
             {" "}
             {row.label}
             {row.value ? `: ${row.value}` : ""}

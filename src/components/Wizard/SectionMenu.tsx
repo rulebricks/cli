@@ -1,6 +1,11 @@
 import React, { useState } from "react";
 import { Box, Text } from "ink";
-import { BorderBox, useGatedInput, useTheme } from "../common/index.js";
+import {
+  BorderBox,
+  StepFooter,
+  useGatedInput,
+  useTheme,
+} from "../common/index.js";
 import type { WizardStepId } from "../../lib/wizardSteps.js";
 
 export interface SectionMenuItem {
@@ -54,7 +59,18 @@ export function SectionMenu({
       : sections[cursor]?.description;
 
   return (
-    <BorderBox title="Update Configuration">
+    <BorderBox
+      title="Update Configuration"
+      footer={
+        <StepFooter
+          hints={[
+            "↑/↓ to navigate",
+            "Enter to select",
+            "Esc to exit without saving",
+          ]}
+        />
+      }
+    >
       <Box flexDirection="column" marginY={1}>
         <Text bold>What would you like to update?</Text>
         <Text color="gray" dimColor>
@@ -95,12 +111,6 @@ export function SectionMenu({
             </Text>
           </Box>
         )}
-
-        <Box marginTop={1}>
-          <Text color="gray" dimColor>
-            ↑/↓ to navigate • Enter to select • Esc to exit without saving
-          </Text>
-        </Box>
       </Box>
     </BorderBox>
   );

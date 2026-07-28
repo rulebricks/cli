@@ -1,3 +1,4 @@
+import { readFileSync } from "fs";
 import {
   DeploymentConfig,
   getReleaseName,
@@ -666,6 +667,27 @@ export function deriveRealtimeSecrets(jwtSecret: string): {
 function sanitizeRemoteWriteUrl(url: string): string {
   // eslint-disable-next-line no-control-regex
   return url.replace(/[\u0000-\u001F\u007F]/g, "").trim();
+}
+
+/**
+ * Reads the corporate root CA bundle for privately-issued TLS certificates
+ * (non-auto issuance modes with caTrust "private"). Returns "" when not
+ * configured; throws with the offending path when configured but unreadable,
+ * so the gap surfaces at generation time instead of as an in-cluster TLS
+ * verification failure.
+ */
+function resolveTlsPrivateCaBundle(config: DeploymentConfig): string {
+  const tls = config.tls;
+  if (!tls || tls.mode === "auto" || tls.caTrust !== "private" || !tls.caBundleFile) {
+    return "";
+  }
+  try {
+    return readFileSync(tls.caBundleFile, "utf8");
+  } catch {
+    throw new Error(
+      `Cannot read the private root CA bundle at: ${tls.caBundleFile}`,
+    );
+  }
 }
 
 function generateRemoteWriteSpec(
@@ -1695,6 +1717,19 @@ export function buildHelmValues(
   }
 
   const { tlsEnabled = true, secretMode = "inline" } = options;
+  // Bring-your-own certificates: TLS stays on, but every in-chart issuance
+  // path (cert-manager subchart, ClusterIssuer, ingress-shim annotations via
+  // the global) is disabled - the CLI creates the TLS secrets from the
+  // operator's PEM files at deploy time.
+  const tlsCertificatesProvided = config.tls?.mode === "provided";
+  // Existing cert-manager issuer (Venafi, Vault, ...): the chart's
+  // Certificates and annotations point at it, and the in-chart cert-manager
+  // stays off - the cluster's own installation owns the CRDs.
+  const tlsExternalIssuer =
+    config.tls?.mode === "external-issuer" ? config.tls.issuer : undefined;
+  // Corporate root bundle for privately-issued certificates, distributed to
+  // in-cluster callers of the deployment's own HTTPS endpoints.
+  const tlsPrivateCaBundle = resolveTlsPrivateCaBundle(config);
   // Infrastructure image tags from the chart's images/manifest.yaml. The async
   // generate* entry points resolve the live catalog for the target chart
   // version; direct (sync) callers fall back to the bundled snapshot.
@@ -1858,6 +1893,17 @@ export function buildHelmValues(
       domain: config.domain,
       email: config.adminEmail,
       tlsEnabled,
+      tlsCertificatesProvided,
+      ...(tlsExternalIssuer
+        ? {
+            tlsIssuerRef: {
+              name: tlsExternalIssuer.name,
+              kind: tlsExternalIssuer.kind || "ClusterIssuer",
+              group: tlsExternalIssuer.group || "cert-manager.io",
+            },
+          }
+        : {}),
+      ...(tlsPrivateCaBundle ? { tlsPrivateCaBundle } : {}),
       licenseKey: config.licenseKey,
       // Pull secret for the private docker.io/rulebricks/* images. References the
       // license registry secret <release>-regcred (index.docker.io, authed by the
@@ -2318,7 +2364,10 @@ export function buildHelmValues(
     // CERT-MANAGER (TLS Certificates)
     // =============================================================================
     "cert-manager": {
-      enabled: tlsEnabled,
+      // Off for provided certificates (nothing to issue) AND for an external
+      // issuer (the cluster's own cert-manager installation owns the CRDs -
+      // a second controller instance would fight it).
+      enabled: tlsEnabled && !tlsCertificatesProvided && !tlsExternalIssuer,
       // CRDs managed in parent chart (cert-manager v1.15+ uses crds.enabled,
       // not the deprecated installCRDs flag).
       crds: { enabled: false },
@@ -2382,7 +2431,7 @@ export function buildHelmValues(
 
     // Cluster Issuer for Let's Encrypt
     clusterIssuer: {
-      enabled: tlsEnabled,
+      enabled: tlsEnabled && !tlsCertificatesProvided && !tlsExternalIssuer,
       email: config.tlsEmail,
       server: "https://acme-v02.api.letsencrypt.org/directory",
     },
@@ -3221,6 +3270,20 @@ export async function updateHelmValuesForTLS(
     const content = await fs.readFile(valuesPath, "utf8");
     const values = YAML.parse(content) as Record<string, unknown>;
 
+    // Bring-your-own certificates / external issuer: the TLS flip must never
+    // re-enable the Let's Encrypt machinery - issuance is out of this
+    // chart's hands in both modes.
+    const globalValues =
+      values.global && typeof values.global === "object"
+        ? (values.global as Record<string, unknown>)
+        : undefined;
+    const issuerRef = globalValues?.tlsIssuerRef as
+      | Record<string, unknown>
+      | undefined;
+    const certificatesProvided = !!(
+      globalValues?.tlsCertificatesProvided || issuerRef?.name
+    );
+
     // Update TLS settings
     if (values.global && typeof values.global === "object") {
       (values.global as Record<string, unknown>).tlsEnabled = tlsEnabled;
@@ -3228,12 +3291,14 @@ export async function updateHelmValuesForTLS(
 
     // Update cert-manager
     if (values["cert-manager"] && typeof values["cert-manager"] === "object") {
-      (values["cert-manager"] as Record<string, unknown>).enabled = tlsEnabled;
+      (values["cert-manager"] as Record<string, unknown>).enabled =
+        tlsEnabled && !certificatesProvided;
     }
 
     // Update cluster issuer
     if (values.clusterIssuer && typeof values.clusterIssuer === "object") {
-      (values.clusterIssuer as Record<string, unknown>).enabled = tlsEnabled;
+      (values.clusterIssuer as Record<string, unknown>).enabled =
+        tlsEnabled && !certificatesProvided;
     }
 
     // Update traefik TLS

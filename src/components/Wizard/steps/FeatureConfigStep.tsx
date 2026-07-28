@@ -150,6 +150,10 @@ export function FeatureConfigStep({
   // registrations instead of pasted.
   const ssoAzureDiscovery = state.provider === "azure";
   const [ssoDetecting, setSsoDetecting] = useState(false);
+  // True only when THIS session's tenant detection filled the URL - drives
+  // the "detected from your signed-in tenant" hint so it never mislabels a
+  // remembered or hand-typed value.
+  const [ssoUrlDetected, setSsoUrlDetected] = useState(false);
   const [ssoClientIdManual, setSsoClientIdManual] = useState(false);
   // The deployment's callback URI when the selected app doesn't allow it yet.
   const [ssoRedirectWarning, setSsoRedirectWarning] = useState<string | null>(
@@ -446,21 +450,44 @@ export function FeatureConfigStep({
             initialValue={ssoProvider ?? undefined}
             onSelect={(value) => {
               const provider = value as SSOProvider;
+              // A URL/client ID/secret saved for a DIFFERENT provider is
+              // never valid for the new one (e.g. a remembered Ory URL must
+              // not leak into the Entra authority field) - reset on switch.
+              const changed = provider !== ssoProvider;
+              let effectiveUrl = ssoUrl;
+              if (changed) {
+                effectiveUrl = "";
+                setSsoUrl("");
+                setSsoClientId("");
+                setSsoClientSecret("");
+                setSsoUrlDetected(false);
+              }
               setSsoProvider(provider);
               dispatch({
                 type: "SET_SSO_CONFIG",
-                config: { ssoProvider: provider },
+                config: {
+                  ssoProvider: provider,
+                  ...(changed
+                    ? { ssoUrl: "", ssoClientId: "", ssoClientSecret: "" }
+                    : {}),
+                },
               });
               // Entra on an Azure cluster: the authority URL is just the
-              // signed-in tenant - derive it instead of asking. Saved or
-              // already-typed values win; detection failure falls through to
-              // the manual URL field.
-              if (provider === "azure" && ssoAzureDiscovery && !ssoUrl) {
+              // signed-in tenant - derive it instead of asking. A URL that
+              // already has the Entra authority shape wins (saved configs);
+              // anything else is stale or mistyped and gets replaced.
+              // Detection failure falls through to the manual URL field.
+              if (
+                provider === "azure" &&
+                ssoAzureDiscovery &&
+                !effectiveUrl.startsWith("https://login.microsoftonline.com")
+              ) {
                 void (async () => {
                   setSsoDetecting(true);
                   const tenant = await getAzureTenantId().catch(() => null);
                   if (tenant) {
                     setSsoUrl(`https://login.microsoftonline.com/${tenant}`);
+                    setSsoUrlDetected(true);
                   }
                   setSsoDetecting(false);
                   flow.next();
@@ -479,8 +506,8 @@ export function FeatureConfigStep({
           label={`${(ssoProvider ?? "OIDC").toUpperCase()} Provider URL`}
           hint={
             ssoProvider === "azure"
-              ? ssoAzureDiscovery && ssoUrl
-                ? "Prefilled from your signed-in Azure tenant - edit if SSO lives in a different tenant"
+              ? ssoUrlDetected
+                ? "Detected from your signed-in Azure tenant - edit if SSO lives in a different tenant"
                 : "e.g., https://login.microsoftonline.com/your-tenant-id"
               : ssoProvider === "okta"
                 ? "e.g., https://your-org.okta.com"
@@ -1901,12 +1928,11 @@ export function FeatureConfigStep({
   }
 
   return (
-    <BorderBox title="Feature Configuration">
+    <BorderBox title="Feature Configuration" footer={<StepFooter />}>
       {flow.render()}
 
       <CheckRows rows={monitoringChecks()} />
       <FieldError error={error} />
-      <StepFooter />
     </BorderBox>
   );
 }

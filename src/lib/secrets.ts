@@ -213,6 +213,34 @@ export async function applyExternalDnsAzureConfig(
 }
 
 /**
+ * Bring-your-own certificates: create/update the kubernetes.io/tls Secrets
+ * each ingress expects, from the operator's PEM material (planned by
+ * tlsCerts.planTlsSecrets). Applied in every secret mode - TLS material is
+ * ingress plumbing, not an application secret, so it never routes through a
+ * managed secrets backend. `kubectl apply` upserts, which is also the
+ * rotation path: rerun deploy with renewed files and Traefik hot-reloads.
+ */
+export async function applyProvidedTlsSecrets(
+  namespace: string,
+  entries: Array<{ secretName: string; certPem: string; keyPem: string }>,
+): Promise<void> {
+  for (const entry of entries) {
+    await execa("kubectl", ["apply", "-f", "-"], {
+      input: JSON.stringify({
+        apiVersion: "v1",
+        kind: "Secret",
+        type: "kubernetes.io/tls",
+        metadata: { name: entry.secretName, namespace },
+        stringData: {
+          "tls.crt": entry.certPem,
+          "tls.key": entry.keyPem,
+        },
+      }),
+    });
+  }
+}
+
+/**
  * Create/update the deployment's Kubernetes Secrets. `kubectl apply` is an
  * upsert, so upgrades and redeploys never wipe or churn the Secrets. Returns the
  * names applied.

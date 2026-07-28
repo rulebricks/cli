@@ -736,6 +736,65 @@ export const DeploymentConfigSchema = z.object({
   adminEmail: z.string().email(),
   tlsEmail: z.string().email(),
 
+  // TLS certificate issuance. Absent or "auto" = Let's Encrypt via
+  // cert-manager (the default). "external-issuer" = an issuer the cluster's
+  // platform team already runs (Venafi, Vault, private ACME, ...) - the
+  // chart's Certificates/annotations point at it and no in-chart cert-manager
+  // is installed. "provided" = operator-supplied PEM files the CLI loads into
+  // the TLS secrets each ingress expects (mapped to hostnames by their SANs).
+  // Neither non-auto mode has an ACME dependency, so TLS is on from the first
+  // install regardless of DNS state. caTrust records whether the issuing CA
+  // is publicly trusted; a private CA requires the root bundle so in-cluster
+  // callers of the deployment's own HTTPS endpoints can verify it.
+  tls: z
+    .object({
+      mode: z.enum(["auto", "external-issuer", "provided"]),
+      issuer: z
+        .object({
+          name: z.string().min(1),
+          kind: z.string().optional(),
+          group: z.string().optional(),
+        })
+        .optional(),
+      certificates: z
+        .array(
+          z.object({
+            certFile: z.string().min(1),
+            keyFile: z.string().min(1),
+          }),
+        )
+        .optional(),
+      caTrust: z.enum(["public", "private"]).optional(),
+      caBundleFile: z.string().optional(),
+    })
+    .superRefine((tls, ctx) => {
+      if (tls.mode === "provided" && !(tls.certificates?.length)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'tls.mode "provided" requires at least one entry in tls.certificates (certFile + keyFile PEM paths).',
+          path: ["certificates"],
+        });
+      }
+      if (tls.mode === "external-issuer" && !tls.issuer?.name) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'tls.mode "external-issuer" requires tls.issuer.name (the cert-manager issuer the cluster already runs).',
+          path: ["issuer"],
+        });
+      }
+      if (tls.caTrust === "private" && !tls.caBundleFile) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'tls.caTrust "private" requires tls.caBundleFile (PEM root CA bundle for in-cluster trust).',
+          path: ["caBundleFile"],
+        });
+      }
+    })
+    .optional(),
+
   // DNS Configuration
   dns: z.object({
     // Where is the user's DNS hosted?
