@@ -160,6 +160,11 @@ function build(options: MatrixOptions): DeploymentConfig {
     },
     database: databaseConfig,
     storage,
+    clickhouse: {
+      decisionLogs: {
+        retentionDays: 30,
+      },
+    },
     externalServices: options.externalServices,
     backup:
       database === "self-hosted"

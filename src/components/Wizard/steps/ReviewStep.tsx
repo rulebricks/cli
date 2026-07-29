@@ -107,8 +107,11 @@ export function ReviewStep({
           : state.storageAzureBlobClientId
             ? `workload identity (${state.storageAzureBlobClientId})`
             : 'workload identity';
-  const clickStackStorageGi =
-    Number.parseInt(state.clickHouseStorageSize || "0", 10) + 10;
+  const decisionLogsPersistent =
+    state.clickStackEnabled || state.clickHousePersistenceEnabled;
+  const clickHouseStorageGi =
+    Number.parseInt(state.clickHouseStorageSize || "0", 10) +
+    (state.clickStackEnabled ? 10 : 0);
   const usesInClusterPostgres =
     state.databaseType === 'self-hosted' && state.postgresMode !== 'external';
   
@@ -393,17 +396,28 @@ export function ReviewStep({
           }
           valueColor={state.clickStackEnabled ? colors.success : colors.muted}
         />
-        {state.clickStackEnabled && (
+        {decisionLogsPersistent ? (
           <>
             <ConfigRow
               label="Retention"
-              value={`telemetry ${state.clickStackTelemetryRetentionDays}d`}
+              value={
+                state.clickStackEnabled
+                  ? `telemetry ${state.clickStackTelemetryRetentionDays}d, decision logs ${state.decisionLogRetentionDays}d`
+                  : `decision logs ${state.decisionLogRetentionDays}d`
+              }
             />
             <ConfigRow
               label="Storage"
-              value={`ClickHouse ${state.clickHouseStorageSize}, HyperDX metadata 10Gi (${clickStackStorageGi} Gi requested)`}
+              value={`ClickHouse ${state.clickHouseStorageSize}${
+                state.clickStackEnabled ? ", HyperDX metadata 10Gi" : ""
+              } (${clickHouseStorageGi} Gi requested)`}
             />
           </>
+        ) : (
+          <ConfigRow
+            label="Decision logs"
+            value="Archive-only object-storage querying (no ClickHouse PVC)"
+          />
         )}
         <ConfigRow label="Monitoring" value={monitoringDestination} />
         {!state.clickStackEnabled && state.tracingEnabled && (

@@ -8,12 +8,17 @@ import {
   signSupabaseJwt,
 } from "./helmValues.js";
 import { AZURE_POSTGRES_CA_BUNDLE } from "./azurePostgresCa.js";
+import {
+  DECISION_LOG_CLICKHOUSE_SINK,
+  DEFAULT_DECISION_LOG_RETENTION_DAYS,
+} from "./chartDefaults.js";
 import { bundledImageCatalog } from "./imageCatalog.js";
 import { getActiveWizardSteps } from "./wizardSteps.js";
 import {
   collectConfigIssues,
   configToWizardState,
 } from "../components/Wizard/WizardContext.js";
+import { applyHelmValuesToConfig } from "../commands/configure.js";
 import {
   storageProviderForCloud,
   storageRegionForCloud,
@@ -91,6 +96,23 @@ test("config matrix parses against the deployment schema", () => {
   }
 });
 
+test("deployment config validates decision-log retention", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  config.clickhouse = {
+    decisionLogs: {
+      retentionDays: 0,
+    },
+  };
+
+  const result = DeploymentConfigSchema.safeParse(config);
+  assert.equal(result.success, false);
+  assert.ok(
+    result.error!.issues.some(
+      (issue) => issue.path.join(".") === "clickhouse.decisionLogs.retentionDays",
+    ),
+  );
+});
+
 test("generated Helm values are valid against the chart schema for every config", () => {
   for (const { name, config } of matrix) {
     const values = buildHelmValues(config);
@@ -133,6 +155,10 @@ test("ClickStack is the default in-cluster observability backend", () => {
   assert.equal(values.clickstack.enabled, undefined);
   assert.equal(values.clickhouse.persistence.enabled, true);
   assert.equal(values.clickhouse.persistence.size, "100Gi");
+  assert.equal(
+    values.clickhouse.decisionLogs.retentionDays,
+    DEFAULT_DECISION_LOG_RETENTION_DAYS,
+  );
   assert.deepEqual(values.clickhouse.resources, {
     requests: { cpu: "1000m", memory: "4Gi" },
     limits: { cpu: "4", memory: "12Gi" },
@@ -171,15 +197,20 @@ test("ClickStack is the default in-cluster observability backend", () => {
     limits: { cpu: "1000m", memory: "1Gi" },
   });
   assert.equal(values["vector-agent"].enabled, false);
-  // ClickStack mode dual-writes the decision_logs_recent hot tier: a bounded
-  // best-effort cache sink alongside the durable object-storage archive sink.
+  // Persistent mode writes the direct decision_logs table alongside the
+  // durable object-storage export.
   const chSink = values.vector.customConfig.sinks.decision_logs_clickhouse;
-  assert.ok(chSink, "expected the decision_logs_clickhouse hot-tier sink");
+  assert.ok(chSink, "expected the persistent decision_logs ClickHouse sink");
   assert.equal(chSink.type, "clickhouse");
-  assert.equal(chSink.table, "decision_logs_recent");
+  assert.equal(chSink.table, "decision_logs");
   assert.equal(chSink.database, "rulebricks");
-  // drop_newest is load-bearing: a ClickHouse outage or full disk must drop
-  // hot-tier events instead of backpressuring Kafka and stalling the archive.
+  assert.equal(DECISION_LOG_CLICKHOUSE_SINK.bufferMaxSize, 4 * 1024 ** 3);
+  assert.equal(
+    chSink.buffer.max_size,
+    DECISION_LOG_CLICKHOUSE_SINK.bufferMaxSize,
+  );
+  // drop_newest is load-bearing: a ClickHouse outage or full disk must not
+  // backpressure Kafka and stall the durable object-storage export.
   assert.equal(chSink.buffer.when_full, "drop_newest");
   assert.ok(values.vector.customConfig.sinks.decision_logs);
   assert.equal(
@@ -203,12 +234,18 @@ test("built-in observability settings flow into generated Helm values", () => {
       clickHouseStorageSize: "250Gi",
     },
   };
+  config.clickhouse = {
+    decisionLogs: {
+      retentionDays: 45,
+    },
+  };
 
   const values = buildHelmValues(config) as Record<string, any>;
 
   assert.equal(values.clickstack.clickhouse.retentionDays, 14);
   assert.equal(values.clickstack.clickhouse.decisionLogs, undefined);
   assert.equal(values.global.clickstack.clickhouse, undefined);
+  assert.equal(values.clickhouse.decisionLogs.retentionDays, 45);
   assert.equal(values.clickhouse.persistence.size, "250Gi");
   assert.equal(values.clickstack.ferretdb.persistence.size, "10Gi");
 });
@@ -366,6 +403,53 @@ test("configure wizard backfills missing self-hosted Supabase JWT secret", () =>
   );
 });
 
+test("configure wizard hydrates decision-log retention and persistence override", () => {
+  const config = cloneFixture("aws-tracing-elastic");
+  config.clickhouse = {
+    persistence: { enabled: true },
+    decisionLogs: { retentionDays: 60 },
+  };
+
+  const state = configToWizardState(config);
+
+  assert.equal(state.clickHousePersistenceEnabled, true);
+  assert.equal(state.decisionLogRetentionDays, 60);
+});
+
+test("configure reconciles live decision-log retention and BYO persistence", () => {
+  const config = cloneFixture("aws-tracing-elastic");
+  const hydrated = applyHelmValuesToConfig(config, {
+    global: { clickstack: { enabled: false } },
+    clickstack: { clickhouse: { retentionDays: 12 } },
+    clickhouse: {
+      persistence: { enabled: true, size: "300Gi" },
+      decisionLogs: { retentionDays: 90 },
+    },
+  });
+
+  assert.equal(
+    hydrated.features.observability?.clickstack.telemetryRetentionDays,
+    12,
+  );
+  assert.equal(
+    hydrated.features.observability?.clickstack.clickHouseStorageSize,
+    "300Gi",
+  );
+  assert.equal(hydrated.clickhouse?.persistence?.enabled, true);
+  assert.equal(hydrated.clickhouse?.decisionLogs?.retentionDays, 90);
+
+  const builtIn = cloneFixture("aws-self-hosted-minimal");
+  const builtInHydrated = applyHelmValuesToConfig(builtIn, {
+    global: { clickstack: { enabled: true } },
+    clickhouse: { persistence: { enabled: true } },
+  });
+  assert.equal(
+    builtInHydrated.clickhouse?.persistence,
+    undefined,
+    "derived ClickStack persistence must not become an explicit BYO override",
+  );
+});
+
 test("self-hosted Supabase keys derive from the configured JWT secret", () => {
   const config = cloneFixture("aws-self-hosted-minimal");
   config.database.supabaseJwtSecret = "test-jwt-secret-used-for-derived-keys";
@@ -509,7 +593,7 @@ test("Valkey Admin ingress emits public hostname and BasicAuth users", () => {
   assert.deepEqual(valkeyAdmin.ingress.allowedIPs, ["203.0.113.0/24"]);
 });
 
-test("ClickHouse bootstrap ships a disk-pressure-bounded hot tier over the archive", (t) => {
+test("ClickHouse bootstrap ships one TTL-bounded persistent decision_logs table", (t) => {
   const candidates = [
     process.env.RULEBRICKS_CHART_DIR,
     path.resolve(process.cwd(), "../private/helm"),
@@ -530,51 +614,23 @@ test("ClickHouse bootstrap ships a disk-pressure-bounded hot tier over the archi
   );
 
   assert.match(defaults, /rulebricks\.decision_logs_archive/);
-  assert.match(defaults, /CREATE OR REPLACE VIEW rulebricks\.decision_logs AS SELECT/);
-  // ClickStack mode creates the decision_logs_recent hot tier: daily
-  // partitions (fine-grained eviction units for the retention CronJob), an
-  // insert guard so a broken CronJob can't fill the volume, and a dynamic
-  // hot/cold boundary read from system.parts so an evicted partition is
-  // transparently served by the archive instead of leaving a hole.
-  assert.match(defaults, /CREATE TABLE IF NOT EXISTS rulebricks\.decision_logs_recent/);
+  // Persistent mode creates the app's query surface directly as a MergeTree
+  // table. Stateless mode may render the same name as an archive-backed view,
+  // but there is no second recent/hot table or UNION query surface.
+  assert.match(defaults, /CREATE TABLE IF NOT EXISTS rulebricks\.decision_logs/);
+  assert.doesNotMatch(defaults, /decision_logs_recent/);
   assert.match(defaults, /PARTITION BY toYYYYMMDD\(timestamp\)/);
+  assert.match(defaults, /TTL toDateTime\(timestamp\)/);
   assert.match(defaults, /min_free_disk_ratio_to_perform_insert/);
-  // path_trace: present in every structure define + select list, migrated
-  // onto existing hot tiers by an idempotent ALTER on each upgrade job run,
-  // and normalized by the Vector VRL.
+  // Correlation columns are part of the single table and normalized by Vector.
   assert.match(defaults, /path_trace Nullable\(String\)/);
-  assert.match(
-    defaults,
-    /ALTER TABLE rulebricks\.decision_logs_recent ADD COLUMN IF NOT EXISTS path_trace Nullable\(String\)/,
-  );
   assert.match(defaults, /\.path_trace = to_string\(\.path_trace\) \?\? null/);
-  // log_id: internal-only unique record id (deterministic ORDER BY
-  // tiebreaker / dedup key). Same trailing-Nullable migration pattern as
-  // path_trace, with Vector minting ids for legacy producers.
+  // log_id is the deterministic ORDER BY tiebreaker.
   assert.match(defaults, /log_id Nullable\(String\)/);
-  assert.match(
-    defaults,
-    /ALTER TABLE rulebricks\.decision_logs_recent ADD COLUMN IF NOT EXISTS log_id Nullable\(String\)/,
-  );
   assert.match(defaults, /\.log_id = to_string\(\.log_id\) \?\? uuid_v4\(\)/);
-  assert.match(defaults, /minOrNull\(toUInt32\(partition\)\)/);
-  assert.match(defaults, /FROM system\.parts/);
-  // The hot tier is bounded by disk pressure, NEVER by a time TTL: an
-  // unbounded burst must evict by size, and a fixed retention window would
-  // reintroduce the fill-the-PVC failure mode that got the tier removed.
-  assert.doesNotMatch(defaults, /TTL toDateTime\(timestamp\)/);
-  // The archive itself is two object-storage tiers behind one view: raw
-  // NDJSON (the recent tail) UNION ALL compacted per-hour Parquet, rewritten
-  // by the compaction CronJob. Parquet is written by ClickHouse, never by
-  // Vector (whose azure_blob/gcs sinks have no parquet encoder).
-  assert.match(defaults, /decision_logs_parquet_s3/);
-  assert.match(defaults, /decision_logs_parquet_azure/);
-  assert.match(defaults, /decision_logs_parquet_gcs/);
-  assert.match(defaults, /<format>Parquet<\/format>/);
-  assert.match(
-    defaults,
-    /decision_logs_archive AS SELECT [\s\S]*? UNION ALL SELECT/,
-  );
+  assert.doesNotMatch(defaults, /decision_logs_parquet_/);
+  assert.doesNotMatch(defaults, /<format>Parquet<\/format>/);
+  assert.doesNotMatch(defaults, /minOrNull\(toUInt32\(partition\)\)/);
 });
 
 test("BYO observability opt-out disables ClickStack and keeps export paths", () => {
@@ -584,7 +640,7 @@ test("BYO observability opt-out disables ClickStack and keeps export paths", () 
   assert.equal(values.global.clickstack.enabled, false);
   assert.equal(values.global.clickstack.clickhouse, undefined);
   assert.equal(values.clickstack.enabled, undefined);
-  // BYO mode stays fully stateless and archive-only: no hot-tier dual-write,
+  // BYO mode stays stateless and archive-only by default: no direct dual-write,
   // no ClickHouse credentials in Vector, decision logs served straight from
   // the object-storage archive view.
   assert.equal(values.clickhouse.persistence.enabled, false);
@@ -598,6 +654,32 @@ test("BYO observability opt-out disables ClickStack and keeps export paths", () 
   assert.deepEqual(
     values["kube-prometheus-stack"].prometheus.prometheusSpec.remoteWrite,
     [],
+  );
+});
+
+test("BYO observability can explicitly keep persistent decision logs", () => {
+  const config = cloneFixture("aws-tracing-elastic");
+  config.clickhouse = {
+    persistence: { enabled: true },
+    decisionLogs: { retentionDays: 21 },
+  };
+
+  const values = buildHelmValues(config) as Record<string, any>;
+
+  assert.equal(values.global.clickstack.enabled, false);
+  assert.equal(values.clickhouse.persistence.enabled, true);
+  assert.equal(values.clickhouse.persistence.size, "100Gi");
+  assert.equal(values.clickhouse.decisionLogs.retentionDays, 21);
+  assert.equal(
+    values.vector.customConfig.sinks.decision_logs_clickhouse.table,
+    "decision_logs",
+  );
+  assert.ok(values.vector.customConfig.sinks.decision_logs);
+  assert.equal(
+    values.vector.env.some(
+      (entry: { name?: string }) => entry.name === "CLICKHOUSE_PASSWORD",
+    ),
+    true,
   );
 });
 
@@ -1082,8 +1164,7 @@ test("decision_logs sink writes zstd NDJSON (never parquet) for every cloud", ()
   // Vector's azure_blob/gcs sinks have no parquet encoder and `parquet` is not a
   // valid encoding.codec; ClickHouse reads these blobs as JSONEachRow. zstd (not
   // gzip): decompression dominates ClickHouse's archive-scan cost and zstd
-  // decodes 2-3x faster; the chart's *.{gz,zst} glob keeps old gzip archives
-  // readable, so this is not a migration.
+  // decodes 2-3x faster.
   for (const name of [
     "aws-self-hosted-minimal", // s3
     "gcp-self-hosted", // gcs

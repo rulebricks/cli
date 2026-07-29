@@ -35,18 +35,21 @@ export const DECISION_LOG_BATCH = {
   timeout_secs: 300,
 } as const;
 
-// Vector -> ClickHouse dual-write into the decision_logs_recent hot tier
-// (ClickStack mode only). Small, frequent batches keep recent decisions
-// queryable within seconds. The buffer is a bounded 1 GiB disk buffer with
-// when_full: drop_newest - the hot tier is a CACHE over the durable
-// object-storage archive, so when ClickHouse is down or its disk guard
-// rejects inserts, Vector must drop hot-tier events rather than backpressure
-// the Kafka source and stall the archive sink (the system of record).
+export const DEFAULT_DECISION_LOG_RETENTION_DAYS = 30;
+export const DEFAULT_CLICKHOUSE_STORAGE_SIZE = "100Gi";
+
+// Vector -> ClickHouse writes into the persistent decision_logs table.
+// Small, frequent batches keep decisions queryable within seconds. The bounded
+// 4 GiB disk buffer gives transient ClickHouse restarts substantially more
+// headroom than the old 1 GiB cache buffer without allowing an outage to consume
+// unbounded node disk. when_full: drop_newest remains load-bearing: object
+// storage is the durable export, so ClickHouse must never backpressure the Kafka
+// source and stall that sink.
 // Internal tuning constants, deliberately NOT user-facing config.
-export const DECISION_LOG_ACCELERATION_SINK = {
+export const DECISION_LOG_CLICKHOUSE_SINK = {
   batchMaxBytes: 10485760,
   batchTimeoutSecs: 5,
-  bufferMaxSize: 1073741824,
+  bufferMaxSize: 4294967296,
 } as const;
 
 // In-cluster Prometheus sizing (always installed; the wizard only configures

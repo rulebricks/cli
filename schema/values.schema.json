@@ -1091,11 +1091,18 @@
         "enabled": { "type": "boolean", "default": true },
         "persistence": {
           "type": "object",
-          "description": "Local MergeTree storage (otel telemetry + the decision_logs_recent hot tier). Required while clickstack.enabled. Statefulness is derived: with ClickStack disabled, ClickHouse always renders stateless over the object-storage decision-log archive - a Deployment instead of a StatefulSet, with no PVC - regardless of this flag.",
+          "description": "Local MergeTree storage for the direct decision_logs table and optional ClickStack telemetry. This is the statefulness switch; ClickStack requires it, while disabling it without ClickStack selects an archive-backed Deployment with emptyDir.",
           "properties": {
             "enabled": { "type": "boolean", "default": true },
             "size": { "type": "string" },
             "storageClass": { "type": "string" }
+          }
+        },
+        "decisionLogs": {
+          "type": "object",
+          "description": "Persistent decision-log table configuration. Stateless archive retention is managed by object-storage lifecycle policy.",
+          "properties": {
+            "retentionDays": { "type": "integer", "minimum": 1, "default": 30 }
           }
         },
         "queryLimits": {

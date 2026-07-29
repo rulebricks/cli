@@ -123,6 +123,12 @@ The wizard now collects a shared object storage backend for every deployment. Ru
 
 Database backups are optional for self-hosted Supabase deployments. When enabled, the Helm chart schedules Barman base backups according to the configured cron schedule and retention window. You can also run `rulebricks backup <name>` to trigger an on-demand backup, or `rulebricks restore <name>` to list backups in object storage and interactively restore one after confirmation.
 
+## Decision-log Retention and ClickHouse Storage
+
+Persistent mode keeps decision logs directly queryable in ClickHouse for 30 days by default while Vector continues exporting the same records to object storage. Set the window in `config.yaml` at `clickhouse.decisionLogs.retentionDays`. ClickStack enables persistent mode automatically; with ClickStack disabled, the default is stateless object-storage querying, and advanced config-file users can opt back into a PVC with `clickhouse.persistence.enabled: true`.
+
+The wizard defaults the ClickHouse PVC to `100Gi` and preserves any explicit `features.observability.clickstack.clickHouseStorageSize` value. There is intentionally no traffic estimator: start with 100Gi, use observed ClickHouse disk growth over representative days to account for the chosen retention window, and leave roughly 30% free for MergeTree merges. ClickStack telemetry shares this PVC when enabled.
+
 ## Infrastructure Image Versions
 
 The CLI does not pin infrastructure image tags (Kafka, Supabase, ClickStack, Vector, etc.) in its source. The [Helm chart](https://github.com/rulebricks/helm)'s `images/manifest.yaml` is the single source of truth, and it ships inside every published chart tarball. At values-generation time the CLI resolves the manifest for the exact chart version being installed (with a local cache under `~/.rulebricks/cache/image-manifests/`), so CVE-driven tag bumps in the chart never require a CLI release. A snapshot bundled at build time (`npm run sync-images`) is used only as an offline fallback; the next online deploy re-resolves live data. The app, HPS, and HPS worker images are governed by `global.version` (a user setting) and are unaffected.

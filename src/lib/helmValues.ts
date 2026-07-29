@@ -18,8 +18,10 @@ import {
   SOLUTION_TOPIC_PARTITIONS,
   LOGS_TOPIC_PARTITIONS,
   TOPIC_REPLICATION_FACTOR,
-  DECISION_LOG_ACCELERATION_SINK,
+  DECISION_LOG_CLICKHOUSE_SINK,
   DECISION_LOG_BATCH,
+  DEFAULT_CLICKHOUSE_STORAGE_SIZE,
+  DEFAULT_DECISION_LOG_RETENTION_DAYS,
   PROMETHEUS_RETENTION,
   PROMETHEUS_STORAGE_SIZE,
   TRAEFIK_MIN_REPLICAS,
@@ -203,8 +205,7 @@ function generateVectorSinks(
           // extension (compressed content) is invisible to the view - decision
           // logs upload fine but never appear in the app. zstd (not gzip):
           // decompression is the dominant per-thread cost when ClickHouse
-          // scans the archive, and zstd decodes 2-3x faster; the {gz,zst}
-          // glob keeps pre-existing gzip history readable.
+          // scans the archive, and zstd decodes 2-3x faster.
           filename_extension: "ndjson.zst",
           compression: "zstd",
           encoding: { codec: "json" },
@@ -222,8 +223,7 @@ function generateVectorSinks(
           // azure_blob has no filename_extension (unlike aws_s3/gcs); the blob
           // suffix comes from Compression::extension() - ".log.zst" for zstd
           // (verified against the pinned Vector 0.57 source). ClickHouse globs
-          // on *.{gz,zst}, so both new zstd blobs and pre-existing gzip
-          // history stay visible.
+          // on compressed NDJSON object suffixes.
           compression: "zstd",
           encoding: { codec: "json" },
           framing: { method: "newline_delimited" },
@@ -259,18 +259,18 @@ function generateVectorSinks(
     }
   }
 
-  // ClickStack mode only: best-effort dual-write into the decision_logs_recent
-  // MergeTree hot tier (created by the chart's decisionLogsViewSql, evicted by
-  // its disk-pressure retention CronJob). The object-storage decision_logs sink
-  // above remains the durable system of record; drop_newest on the bounded
-  // buffer guarantees a ClickHouse outage can never stall the archive path.
-  if (isClickStackEnabled(config)) {
+  // Persistent mode: best-effort dual-write into the direct decision_logs
+  // MergeTree table. The object-storage sink above remains the durable export;
+  // drop_newest on the bounded buffer guarantees a ClickHouse outage can never
+  // stall that archive path. Stateless mode omits this sink and queries the
+  // object-storage-backed decision_logs view instead.
+  if (isClickHousePersistenceEnabled(config)) {
     sinks.decision_logs_clickhouse = {
       type: "clickhouse",
       inputs: ["normalize_logs"],
       endpoint: `http://${getReleaseName(config.name)}-clickhouse:8123`,
       database: "rulebricks",
-      table: "decision_logs_recent",
+      table: "decision_logs",
       format: "json_each_row",
       skip_unknown_fields: true,
       auth: {
@@ -279,12 +279,12 @@ function generateVectorSinks(
         password: "${CLICKHOUSE_PASSWORD}",
       },
       batch: {
-        max_bytes: DECISION_LOG_ACCELERATION_SINK.batchMaxBytes,
-        timeout_secs: DECISION_LOG_ACCELERATION_SINK.batchTimeoutSecs,
+        max_bytes: DECISION_LOG_CLICKHOUSE_SINK.batchMaxBytes,
+        timeout_secs: DECISION_LOG_CLICKHOUSE_SINK.batchTimeoutSecs,
       },
       buffer: {
         type: "disk",
-        max_size: DECISION_LOG_ACCELERATION_SINK.bufferMaxSize,
+        max_size: DECISION_LOG_CLICKHOUSE_SINK.bufferMaxSize,
         when_full: "drop_newest",
       },
     };
@@ -506,8 +506,8 @@ function generateVectorEnv(config: DeploymentConfig): Array<Record<string, unkno
   }
 
   // Interpolated into the decision_logs_clickhouse sink's basic-auth block
-  // (see generateVectorSinks); only exists while ClickStack is on.
-  if (isClickStackEnabled(config)) {
+  // (see generateVectorSinks); only exists in persistent decision-log mode.
+  if (isClickHousePersistenceEnabled(config)) {
     env.push({
       name: "CLICKHOUSE_PASSWORD",
       valueFrom: {
@@ -757,6 +757,16 @@ function generateRemoteWriteSpec(
 
 function isClickStackEnabled(config: DeploymentConfig): boolean {
   return config.features.observability?.clickstack?.enabled ?? true;
+}
+
+function isClickHousePersistenceEnabled(config: DeploymentConfig): boolean {
+  // ClickStack telemetry lives in ClickHouse and therefore always forces a PVC.
+  // Without ClickStack, config-file users can explicitly retain persistent,
+  // directly queried decision logs; absent/false keeps the archive-only mode.
+  return (
+    isClickStackEnabled(config) ||
+    config.clickhouse?.persistence?.enabled === true
+  );
 }
 
 function generateClickStackValues(
@@ -1833,9 +1843,14 @@ export function buildHelmValues(
   // keys below, always keeping the rulebricks/<name> path.
   const reg = config.imageRegistry || DEFAULT_IMAGE_REGISTRY;
   const clickStackEnabled = isClickStackEnabled(config);
+  const clickHousePersistenceEnabled =
+    isClickHousePersistenceEnabled(config);
   const clickStackConfig = config.features.observability?.clickstack;
   const clickHouseStorageSize =
-    clickStackConfig?.clickHouseStorageSize ?? "100Gi";
+    clickStackConfig?.clickHouseStorageSize ?? DEFAULT_CLICKHOUSE_STORAGE_SIZE;
+  const decisionLogRetentionDays =
+    config.clickhouse?.decisionLogs?.retentionDays ??
+    DEFAULT_DECISION_LOG_RETENTION_DAYS;
   // Distributed tracing (self-hosted only). Lives under global so the
   // rulebricks subchart deployments can read it; the collector + traefik are
   // wired below from the same source.
@@ -2252,14 +2267,17 @@ export function buildHelmValues(
         existingSecret: '{{ printf "%s-clickhouse-credentials" .Release.Name }}',
         existingSecretKey: "admin-password",
       },
-      persistence: clickStackEnabled
+      decisionLogs: {
+        retentionDays: decisionLogRetentionDays,
+      },
+      persistence: clickHousePersistenceEnabled
         ? {
             enabled: true,
             storageClass: storageClass,
             size: clickHouseStorageSize,
           }
         : { enabled: false },
-      resources: clickStackEnabled
+      resources: clickHousePersistenceEnabled
         ? {
             requests: { cpu: "1000m", memory: "4Gi" },
             limits: { cpu: "4", memory: "12Gi" },

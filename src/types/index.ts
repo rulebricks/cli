@@ -855,6 +855,25 @@ export const DeploymentConfigSchema = z.object({
     })
     .optional(),
 
+  // ClickHouse decision-log mode. ClickStack always requires persistence;
+  // without ClickStack, persistence.enabled=true is the config-file escape hatch
+  // for keeping the direct MergeTree decision_logs table instead of querying
+  // the object-storage archive view.
+  clickhouse: z
+    .object({
+      persistence: z
+        .object({
+          enabled: z.boolean().optional(),
+        })
+        .optional(),
+      decisionLogs: z
+        .object({
+          retentionDays: z.number().int().min(1).optional(),
+        })
+        .optional(),
+    })
+    .optional(),
+
   // External/managed Redis and Kafka (for large deployments that prefer managed
   // services over the in-cluster defaults). Omitted/embedded means the chart
   // deploys these in-cluster as usual.

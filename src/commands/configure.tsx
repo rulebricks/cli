@@ -54,7 +54,7 @@ function secretRefValue(value: unknown): SecretKeyRef | undefined {
   return name && key ? { name, key } : undefined;
 }
 
-function applyHelmValuesToConfig(
+export function applyHelmValuesToConfig(
   config: DeploymentConfig,
   values: Record<string, unknown> | null,
 ): DeploymentConfig {
@@ -129,6 +129,18 @@ function applyHelmValuesToConfig(
         next.features.sso.clientSecret;
     }
 
+    if (isRecord(global.clickstack)) {
+      const enabled = booleanValue(global.clickstack.enabled);
+      if (enabled !== undefined) {
+        next.features.observability = {
+          clickstack: {
+            ...next.features.observability?.clickstack,
+            enabled,
+          },
+        };
+      }
+    }
+
     if (isRecord(global.storage) && next.storage) {
       const storage = global.storage;
       next.storage.provider =
@@ -176,6 +188,72 @@ function applyHelmValuesToConfig(
         };
       }
     }
+  }
+
+  const clickStackValues = isRecord(values.clickstack)
+    ? values.clickstack
+    : null;
+  const clickStackClickHouse =
+    clickStackValues && isRecord(clickStackValues.clickhouse)
+      ? clickStackValues.clickhouse
+      : null;
+  const telemetryRetentionDays = numberValue(
+    clickStackClickHouse?.retentionDays,
+  );
+
+  const clickHouseValues = isRecord(values.clickhouse)
+    ? values.clickhouse
+    : null;
+  const persistence =
+    clickHouseValues && isRecord(clickHouseValues.persistence)
+      ? clickHouseValues.persistence
+      : null;
+  const decisionLogs =
+    clickHouseValues && isRecord(clickHouseValues.decisionLogs)
+      ? clickHouseValues.decisionLogs
+      : null;
+  const decisionLogRetentionDays = numberValue(decisionLogs?.retentionDays);
+  const clickHouseStorageSize = stringValue(persistence?.size);
+
+  if (telemetryRetentionDays !== undefined || clickHouseStorageSize) {
+    const saved = next.features.observability?.clickstack;
+    next.features.observability = {
+      clickstack: {
+        enabled: saved?.enabled ?? true,
+        ...saved,
+        telemetryRetentionDays:
+          telemetryRetentionDays ?? saved?.telemetryRetentionDays,
+        clickHouseStorageSize:
+          clickHouseStorageSize ?? saved?.clickHouseStorageSize,
+      },
+    };
+  }
+
+  if (decisionLogRetentionDays !== undefined) {
+    next.clickhouse = {
+      ...next.clickhouse,
+      decisionLogs: {
+        ...next.clickhouse?.decisionLogs,
+        retentionDays: decisionLogRetentionDays,
+      },
+    };
+  }
+
+  // clickhouse.persistence.enabled is derived while ClickStack is on, so only
+  // hydrate it as an explicit decision-log override in BYO mode. This avoids a
+  // configure round-trip accidentally keeping a PVC after the user turns
+  // ClickStack off.
+  const persistenceEnabled = booleanValue(persistence?.enabled);
+  if (
+    next.features.observability?.clickstack?.enabled === false &&
+    persistenceEnabled !== undefined
+  ) {
+    next.clickhouse = {
+      ...next.clickhouse,
+      persistence: {
+        enabled: persistenceEnabled,
+      },
+    };
   }
 
   if (isRecord(values.clusterIssuer)) {

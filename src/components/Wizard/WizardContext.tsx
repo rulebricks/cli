@@ -25,6 +25,10 @@ import {
   validateRemoteWriteConfig,
 } from "../../types/index.js";
 import { generateSecureSecret } from "../../lib/validation.js";
+import {
+  DEFAULT_CLICKHOUSE_STORAGE_SIZE,
+  DEFAULT_DECISION_LOG_RETENTION_DAYS,
+} from "../../lib/chartDefaults.js";
 
 // Partial config during wizard flow
 export interface WizardState {
@@ -144,6 +148,10 @@ export interface WizardState {
   clickStackEnabled: boolean;
   clickStackTelemetryRetentionDays: number;
   clickHouseStorageSize: string;
+  decisionLogRetentionDays: number;
+  // Config-file escape hatch: when ClickStack is off, keep ClickHouse
+  // persistent and write decision logs directly instead of archive-only mode.
+  clickHousePersistenceEnabled: boolean;
   metricsExportEnabled: boolean;
   prometheusMonitoringDestination: MonitoringDestination | null;
   prometheusRemoteWriteUrl: string;
@@ -351,6 +359,7 @@ type WizardAction =
           WizardState,
           | "clickStackTelemetryRetentionDays"
           | "clickHouseStorageSize"
+          | "decisionLogRetentionDays"
         >
       >;
     }
@@ -629,7 +638,9 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     // is always installed)
     clickStackEnabled: true,
     clickStackTelemetryRetentionDays: 7,
-    clickHouseStorageSize: "100Gi",
+    clickHouseStorageSize: DEFAULT_CLICKHOUSE_STORAGE_SIZE,
+    decisionLogRetentionDays: DEFAULT_DECISION_LOG_RETENTION_DAYS,
+    clickHousePersistenceEnabled: false,
     metricsExportEnabled: false,
     prometheusMonitoringDestination: null,
     prometheusRemoteWriteUrl: "",
@@ -971,6 +982,12 @@ export function collectConfigIssues(state: WizardState): string[] {
 
   if (state.aiEnabled && !state.openaiApiKey) {
     issues.push("AI is enabled but the OpenAI API key is missing.");
+  }
+  if (
+    !Number.isInteger(state.decisionLogRetentionDays) ||
+    state.decisionLogRetentionDays < 1
+  ) {
+    issues.push("Decision-log retention must be at least 1 day.");
   }
   if (
     state.ssoEnabled &&
@@ -1365,6 +1382,11 @@ export function configToWizardState(
     clickHouseStorageSize:
       config.features.observability?.clickstack?.clickHouseStorageSize ??
       base.clickHouseStorageSize,
+    decisionLogRetentionDays:
+      config.clickhouse?.decisionLogs?.retentionDays ??
+      base.decisionLogRetentionDays,
+    clickHousePersistenceEnabled:
+      config.clickhouse?.persistence?.enabled ?? false,
     // The toggle reflects whether remote_write is actually configured, so
     // configure resumes with the metrics-export sub-flow only when in use.
     metricsExportEnabled: !!(
@@ -1969,6 +1991,14 @@ export function WizardProvider({
         paths: {
           decisionLogs: "decision-logs",
           dbBackups: "db-backups",
+        },
+      },
+      clickhouse: {
+        persistence: {
+          enabled: state.clickHousePersistenceEnabled,
+        },
+        decisionLogs: {
+          retentionDays: state.decisionLogRetentionDays,
         },
       },
       backup: {
