@@ -88,8 +88,9 @@ export const options = {
   },
 };
 
-// Request parameters (longer timeout for bulk requests)
-const params = createRequestParams(config.apiKey, "30s");
+// Request parameters (above the server's 60s RPC deadline so the benchmark
+// measures server behavior, not the client cap)
+const params = createRequestParams(config.apiKey, "75s");
 
 /**
  * Pre-stringified body pool, built lazily per VU. Generating and stringifying

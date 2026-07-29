@@ -55,6 +55,16 @@
           "description": "Pull secrets for the private rulebricks/* images (and any custom registry the imageRegistry override points at)",
           "items": { "type": "object" }
         },
+        "registry": {
+          "type": "object",
+          "description": "Image registry credential seams",
+          "properties": {
+            "existingPullSecret": {
+              "type": "string",
+              "description": "Name of a pre-created kubernetes.io/dockerconfigjson Secret; when set the chart does not render <release>-regcred from the license key"
+            }
+          }
+        },
         "tlsEnabled": {
           "type": "boolean",
           "description": "Enable TLS/HTTPS"
@@ -605,6 +615,24 @@
                 "cooldownPeriod": { "type": "integer", "minimum": 0 },
                 "lagThreshold": { "type": ["integer", "string"] },
                 "cpuThreshold": { "type": ["integer", "string"] }
+              }
+            },
+            "warmup": {
+              "type": "object",
+              "description": "Fleet warm-up (/api/v1/scale): pre-scale the worker fleet to its ceiling ahead of burst workloads via a KEDA metrics-api trigger polling HPS's /internal/warmup-metric. Requires the shared in-cluster Redis.",
+              "properties": {
+                "enabled": { "type": "boolean", "default": true },
+                "ttlSeconds": {
+                  "type": "integer",
+                  "minimum": 30,
+                  "default": 600,
+                  "description": "How long one warm-up call holds the fleet at max before normal scale-down reclaims it; repeat calls refresh the window."
+                },
+                "prewarmOnInstall": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "One-shot post-install Job that allocates every reachable burst node once so image prepull caches images on the VMs before they deallocate. Worth enabling only where scale-down PARKS nodes (Azure Deallocate mode) instead of terminating them."
+                }
               }
             },
             "imagePrepull": {
@@ -1229,6 +1257,31 @@
         "enabled": { "type": "boolean" }
       }
     },
+    "cluster-autoscaler": {
+      "type": "object",
+      "description": "Kubernetes cluster-autoscaler subchart (AWS EKS only; GKE/AKS node pools autoscale natively). autoDiscovery.clusterName and awsRegion are required when enabled.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullSecrets": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "autoDiscovery": {
+          "type": "object",
+          "properties": {
+            "clusterName": { "type": "string" }
+          }
+        },
+        "awsRegion": { "type": "string" }
+      }
+    },
     "migrations": {
       "type": "object",
       "description": "Configuration for database migration jobs",
@@ -1609,7 +1662,7 @@
     },
     {
       "title": "External Database Validation",
-      "description": "If supabase.externalDatabase is enabled (self-hosted Supabase services against an external PostgreSQL), the config must be workable end to end: (1) supabase.db.enabled must be false so the bundled Postgres, the in-cluster db alias, and the migration job all agree on the external server; (2) the host must be resolvable, either inline (externalDatabase.host) or from a Secret (externalDatabase.secretRef + secretRefKey.host); (3) the shared service-role password must have a source (supabase.secret.db.password inline, supabase.secret.db.secretRef, or externalDatabase.secretRef); (4) while externalDatabase.bootstrap.enabled is true (the default), master credentials are required (bootstrap.masterPassword inline or bootstrap.secretRef with keys master-username/master-password/service-password) - disable bootstrap only if you run bootstrap.sql yourself; (5) the migration job needs migrations.externalDb.host (it does not read externalDatabase.host).",
+      "description": "If supabase.externalDatabase is enabled (self-hosted Supabase services against an external PostgreSQL), the config must be workable end to end: (1) supabase.db.enabled must be false so the bundled Postgres, the in-cluster db alias, and the migration job all agree on the external server; (2) the host must be resolvable, either inline (externalDatabase.host) or from a Secret (externalDatabase.secretRef + secretRefKey.host); (3) the shared service-role password must have a source (supabase.secret.db.password inline, supabase.secret.db.secretRef, or externalDatabase.secretRef); (4) while externalDatabase.bootstrap.enabled is true (the default), master credentials are required (bootstrap.masterPassword inline or bootstrap.secretRef with keys master-username/master-password/service-password) - disable bootstrap only if you run bootstrap.sql yourself; (5) the migration job needs a host source: migrations.externalDb.host or externalDatabase.secretRef + secretRefKey.host (it does not read externalDatabase.host).",
       "if": {
         "properties": {
           "supabase": {
@@ -1832,7 +1885,7 @@
             ]
           },
           {
-            "description": "Migration job host: migrations.externalDb.host (or the legacy supabase.auth.environment.DB_HOST seam).",
+            "description": "Migration job host: migrations.externalDb.host, the external database Secret (externalDatabase.secretRef + secretRefKey.host), or the legacy supabase.auth.environment.DB_HOST seam.",
             "anyOf": [
               {
                 "properties": {
@@ -1851,6 +1904,30 @@
                   }
                 },
                 "required": ["migrations"]
+              },
+              {
+                "properties": {
+                  "supabase": {
+                    "type": "object",
+                    "required": ["externalDatabase"],
+                    "properties": {
+                      "externalDatabase": {
+                        "type": "object",
+                        "required": ["secretRef", "secretRefKey"],
+                        "properties": {
+                          "secretRef": { "type": "string", "minLength": 1 },
+                          "secretRefKey": {
+                            "type": "object",
+                            "required": ["host"],
+                            "properties": {
+                              "host": { "type": "string", "minLength": 1 }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
               },
               {
                 "properties": {

@@ -210,6 +210,59 @@ export function validateValuesInvariants(values: unknown): string[] {
         `kafka "${prefix}solution" partitions (${solutionTopic.partitions}) must equal rulebricks.hps.workers.solutionPartitions (${solutionPartitions}); HPS derives MAX_WORKERS from it`,
       );
     }
+
+    // 3b. Broker disk must cover the worst-case sum of per-topic retention
+    //     caps (partitions x retention.bytes) with headroom for KRaft
+    //     metadata and active segments. A full disk halts the broker and
+    //     takes the RPC path down with it; caps larger than the disk make
+    //     that inevitable under a sustained burst.
+    const parseStorageBytes = (value: unknown): number | undefined => {
+      if (typeof value === "number") return value;
+      if (typeof value !== "string") return undefined;
+      const match = value.trim().match(/^([0-9]+(?:\.[0-9]+)?)\s*(Ki|Mi|Gi|Ti|K|M|G|T)?$/);
+      if (!match) return undefined;
+      const scale: Record<string, number> = {
+        Ki: 1024,
+        Mi: 1024 ** 2,
+        Gi: 1024 ** 3,
+        Ti: 1024 ** 4,
+        K: 1000,
+        M: 1000 ** 2,
+        G: 1000 ** 3,
+        T: 1000 ** 4,
+      };
+      return Number(match[1]) * (match[2] ? scale[match[2]] : 1);
+    };
+    const storageBytes = parseStorageBytes(
+      get(values, ["kafka", "storage", "size"]),
+    );
+    if (storageBytes !== undefined) {
+      let retentionCapBytes = 0;
+      for (const topic of topics) {
+        const partitions = topic?.partitions;
+        const retention = Number(
+          get(topic, ["config", "retention.bytes"]),
+        );
+        if (
+          typeof partitions === "number" &&
+          Number.isFinite(retention) &&
+          retention > 0
+        ) {
+          retentionCapBytes += partitions * retention;
+        }
+      }
+      const budgetBytes = storageBytes * 0.85;
+      if (retentionCapBytes > budgetBytes) {
+        const gib = (bytes: number) => (bytes / 1024 ** 3).toFixed(1);
+        errors.push(
+          `kafka.topics retention caps total ${gib(retentionCapBytes)}Gi ` +
+            `(sum of partitions x retention.bytes) but must stay <= 85% of ` +
+            `kafka.storage.size (${gib(budgetBytes)}Gi of ${gib(storageBytes)}Gi); ` +
+            `a full broker disk halts the whole request path - raise ` +
+            `kafka.storage.size or lower per-topic retention.bytes`,
+        );
+      }
+    }
   }
 
   // 4. Distributed tracing: when enabled, the collector must have a non-empty

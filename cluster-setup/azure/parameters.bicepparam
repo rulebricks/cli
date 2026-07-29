@@ -114,7 +114,7 @@ param enableDataServicePrivateEndpoints = true
 // compute-optimized F-series are valid substitutes wherever your
 // subscription's quota lives.
 
-param nodeCount = 3
+param nodeCount = 4
 // Autoscaling ceiling for the core pool.
 param maxNodeCount = 6
 param nodeVmSize = 'Standard_D4as_v6'
@@ -138,6 +138,9 @@ param systemNodeVmSize = 'Standard_D2as_v6'
 param enableBurstPool = true
 param burstVmSize = 'Standard_D16as_v6'
 param burstMinCount = 1
+// Four D16 nodes fit roughly 120 workers at the chart's 500m CPU request
+// after node/DaemonSet overhead. Peak DAv6 usage is approximately 94 cores
+// (6xD4 core + 4xD16 burst + 3xD2 system), fitting a 100-core family quota.
 param burstMaxCount = 4
 
 // ---------------------------------------------------------------------------

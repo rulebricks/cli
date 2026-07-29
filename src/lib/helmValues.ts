@@ -1132,7 +1132,12 @@ function generateKafkaTopics(
       replicas: TOPIC_REPLICATION_FACTOR,
       config: {
         "retention.ms": "86400000",
-        "retention.bytes": "268435456",
+        // Per-partition byte cap sized for a HOT partition: single-tenant
+        // bursts key most log records onto one partition, and a cap smaller
+        // than the burst backlog makes the broker delete unconsumed segments
+        // (silent decision-log loss, observed at 256Mi under load). The cap
+        // times partitions (24 x 1Gi) must stay within the broker volume.
+        "retention.bytes": "1073741824",
         "max.message.bytes": "2097152",
       },
     },
@@ -2111,6 +2116,14 @@ export function buildHelmValues(
         keda: {
           enabled: true,
         },
+        // Fleet warm-up (/api/v1/scale): enabled + TTL fall back to chart
+        // defaults. The one-shot post-install prewarm (allocate every burst
+        // node once so image prepull caches images on the VMs) is only worth
+        // it where scale-down PARKS nodes instead of terminating them -
+        // Azure's burst pool uses Deallocate mode, AWS nodegroups terminate.
+        warmup: {
+          prewarmOnInstall: config.infrastructure.provider === "azure",
+        },
         // Warm the hps/worker images onto active worker-capable nodes so burst
         // scale-outs skip the image pull without targeting shutdown nodes.
         imagePrepull: {
@@ -2145,17 +2158,16 @@ export function buildHelmValues(
           keda: {
             enabled: true,
             // Poll fast so bursts are detected within seconds; the chart's
-            // ScaledObject defaults add exponential scale-up (double every
-            // 15s) and smooth scale-down (5-min window, -25%/min) behavior.
+            // ScaledObject defaults jump to the requested fleet ceiling in one
+            // reconcile and use smooth scale-down (5-min window, -25%/min).
             // min/max replica counts fall back to the chart defaults.
             pollingInterval: 5,
             cooldownPeriod: 300,
             // Lag is measured in MESSAGES; with chunked bulk dispatch each
-            // message is a bounded unit of work (~50-150ms), so 50 messages
-            // approximates 5-8s of backlog for a single worker - one replica
-            // is added per ~5s of fleet backlog, biasing toward early
-            // scale-out for bursty traffic.
-            lagThreshold: 50,
+            // message is a bounded unit of work (~50-150ms), so 15 messages
+            // represents roughly 1-2s of backlog for one worker and drives
+            // early scale-out for bursty traffic.
+            lagThreshold: 15,
             cpuThreshold: 25,
           },
           podLabels: applicationPodLabels,
@@ -2195,7 +2207,13 @@ export function buildHelmValues(
       // Single combined controller+broker node (KRaft, no ZooKeeper).
       replicas: TOPIC_REPLICATION_FACTOR,
       storage: {
-        size: "20Gi",
+        // Must cover the per-topic retention.bytes caps: logs 24 x 1Gi = 24Gi
+        // plus solution/solution-response 2 x 128 x 64Mi = 16Gi, leaving
+        // ~10Gi for KRaft metadata / active segments / fs overhead. A full
+        // disk halts the broker and takes the whole request path down with
+        // it (observed at 50k solutions/s). validateValuesInvariants enforces
+        // caps <= 85% of this size.
+        size: "50Gi",
         class: storageClass,
       },
       // Critical tier: the broker must always be able to preempt burst workers.

@@ -834,7 +834,7 @@ test("in-cluster provisioning uses baseline partitions and the (empty) prefix", 
     assert.equal(values.rulebricks.hps.workers.keda.maxReplicaCount, undefined);
 
     // Non-tier scale-out tuning is still emitted (aggressive early scale-out).
-    assert.equal(values.rulebricks.hps.workers.keda.lagThreshold, 50);
+    assert.equal(values.rulebricks.hps.workers.keda.lagThreshold, 15);
 
     // num.partitions is decoupled from worker count (auto-create default only).
     assert.equal(
@@ -916,6 +916,21 @@ test("invariant checker catches partition/worker and prefix drift", () => {
   assert.ok(
     validateValuesInvariants(requestOverLimit).some((e) =>
       e.includes("must not exceed limit"),
+    ),
+  );
+
+  // Retention caps exceeding the broker disk budget: a full disk halts the
+  // broker AND the RPC path (observed live), so the sum of
+  // partitions x retention.bytes must stay within 85% of storage.size.
+  const oversizedRetention = JSON.parse(JSON.stringify(base));
+  const logsTopic = oversizedRetention.kafka.topics.find(
+    (t: { name: string }) => t.name === "logs",
+  );
+  assert.ok(logsTopic, "fixture must provision a logs topic");
+  logsTopic.config["retention.bytes"] = String(4 * 1024 ** 3); // 24 x 4Gi = 96Gi >> 50Gi
+  assert.ok(
+    validateValuesInvariants(oversizedRetention).some((e) =>
+      e.includes("kafka.storage.size"),
     ),
   );
 });
@@ -1426,6 +1441,21 @@ test("operational DaemonSets use explicit safe tolerations", () => {
     BURST_POOL_TOLERATION,
     CRITICAL_ADDONS_TOLERATION,
   ]);
+});
+
+test("install prewarm is enabled only where scale-down parks nodes (Azure)", () => {
+  // Azure's burst pool uses Deallocate mode: parked VMs keep their disks, so
+  // a one-shot prewarm leaves images cached for every future burst.
+  const azure = buildHelmValues(
+    matrix.find((c) => c.name === "azure-workload-identity")!.config,
+  ) as Record<string, any>;
+  assert.equal(azure.rulebricks.hps.warmup.prewarmOnInstall, true);
+
+  // AWS nodegroups terminate instances on scale-down; prewarming buys nothing.
+  const aws = buildHelmValues(
+    matrix.find((c) => c.name === "aws-self-hosted-minimal")!.config,
+  ) as Record<string, any>;
+  assert.equal(aws.rulebricks.hps.warmup.prewarmOnInstall, false);
 });
 
 test("operational DaemonSet tolerations include ARM and burst pools explicitly", () => {
