@@ -14,7 +14,6 @@ import { renderFullScreen } from "./components/common/index.js";
 import { DeployCommand } from "./commands/deploy.js";
 import { ConfigureCommand } from "./commands/configure.js";
 import { UpgradeCommand } from "./commands/upgrade.js";
-import { ChartUpgradeCommand } from "./commands/upgradeChart.js";
 import { DestroyCommand } from "./commands/destroy.js";
 import { StatusCommand } from "./commands/status.js";
 import { ListCommand } from "./commands/list.js";
@@ -138,12 +137,12 @@ program
 // Upgrade command
 program
   .command("upgrade")
-  .description("Upgrade Rulebricks to a new version")
+  .description("Upgrade Rulebricks app and/or infrastructure chart version")
   .argument("[name]", "Deployment name")
-  .option("--version <version>", "Target version (defaults to latest)")
+  .option("--version <version>", "Target app version (skips app picker)")
   .option(
-    "--chart",
-    "Upgrade the infrastructure chart version instead of the app version",
+    "--chart-version <version>",
+    "Target chart version (skips chart picker)",
   )
   .option("--dry-run", "Preview changes without applying")
   .action(async (name, options) => {
@@ -155,21 +154,11 @@ program
       process.exit(1);
     }
 
-    if (options.chart) {
-      const { waitUntilExit } = render(
-        <ChartUpgradeCommand
-          name={deploymentName}
-          targetVersion={options.version}
-        />,
-      );
-      await waitUntilExit();
-      return;
-    }
-
     const { waitUntilExit } = render(
       <UpgradeCommand
         name={deploymentName}
         targetVersion={options.version}
+        targetChartVersion={options.chartVersion}
         dryRun={options.dryRun}
       />,
     );

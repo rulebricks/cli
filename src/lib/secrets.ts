@@ -17,6 +17,7 @@ import {
   getNamespacePhase,
   waitForNamespaceDeletion,
 } from "./kubernetes.js";
+import { isKubernetesForbiddenError } from "./cloudErrors.js";
 
 export interface K8sSecretManifest {
   name: string;
@@ -180,9 +181,29 @@ export async function ensureNamespace(namespace: string): Promise<void> {
     kind: "Namespace",
     metadata: { name: namespace },
   };
-  await execa("kubectl", ["apply", "-f", "-"], {
-    input: JSON.stringify(manifest),
-  });
+  try {
+    await execa("kubectl", ["apply", "-f", "-"], {
+      input: JSON.stringify(manifest),
+    });
+  } catch (error) {
+    const detail =
+      error && typeof error === "object" && "stderr" in error
+        ? String((error as { stderr?: string }).stderr ?? "")
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    if (isKubernetesForbiddenError(detail)) {
+      throw new Error(
+        [
+          `No permission to create the namespace ${namespace}. Ask your platform team to run:`,
+          `  kubectl create namespace ${namespace}`,
+          `  kubectl create rolebinding rulebricks-deployer --clusterrole=admin --user=<your-user> --namespace ${namespace}`,
+          "Then rerun the deploy.",
+        ].join("\n"),
+      );
+    }
+    throw error;
+  }
 }
 
 /**

@@ -4,6 +4,7 @@ import {
   esoSecretEntries,
   buildEsoManifests,
   defaultSecretsPrefix,
+  formatSeedDeniedHint,
   isEsoBackend,
 } from "./eso.js";
 import { buildDeploymentSecrets } from "./secrets.js";
@@ -152,6 +153,38 @@ test("Azure manifests carry workload-identity SA + vault URL", () => {
     store.spec.provider.azurekv.serviceAccountRef.name,
     "rulebricks-secrets-reader",
   );
+});
+
+test("seed-denied hint lists only the denied entries with their keys and a grant", () => {
+  const config = withBackend(fixture("aws-all-features"), {
+    backend: "aws-secrets-manager",
+    aws: { roleArn: "arn:aws:iam::1:role/x" },
+  });
+  const entries = esoSecretEntries(config);
+  assert.ok(entries.length >= 2, "fixture has at least two entries");
+  const deniedKey = entries[0].remoteKey;
+  const hint = formatSeedDeniedHint(config, [deniedKey]);
+
+  assert.match(hint, /could not be written from this machine/);
+  assert.ok(hint.includes(deniedKey), hint);
+  assert.ok(
+    hint.includes(entries[0].keys[0]),
+    "lists the entry's JSON keys",
+  );
+  assert.ok(
+    !hint.includes(`  ${entries[1].remoteKey}  `),
+    "does not list entries that were written",
+  );
+  assert.match(hint, /secretsmanager:CreateSecret/);
+
+  const azureConfig = withBackend(config, {
+    backend: "azure-key-vault",
+    azure: { vaultName: "corp-vault" },
+  });
+  const azureHint = formatSeedDeniedHint(azureConfig, [
+    esoSecretEntries(azureConfig)[0].remoteKey,
+  ]);
+  assert.match(azureHint, /Key Vault Secrets Officer/);
 });
 
 test("byo-secret-store references the existing store and creates none", () => {

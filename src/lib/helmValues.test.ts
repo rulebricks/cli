@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  buildDeployValues,
   buildHelmValues,
   resolveExternalDbSslRootCert,
+  resolveProductVersion,
   signSupabaseJwt,
 } from "./helmValues.js";
 import { AZURE_POSTGRES_CA_BUNDLE } from "./azurePostgresCa.js";
@@ -988,6 +990,67 @@ test("semver product versions are emitted to global.version", () => {
     global: { version?: string };
   };
   assert.equal(values.global.version, "1.8.17");
+});
+
+test("resolveProductVersion prefers values/state over stale config", () => {
+  assert.equal(
+    resolveProductVersion({
+      selected: "1.9.0",
+      valuesVersion: "1.8.0",
+      stateVersion: "1.8.0",
+      configVersion: "1.5.0",
+    }),
+    "1.9.0",
+  );
+  assert.equal(
+    resolveProductVersion({
+      valuesVersion: "1.8.0",
+      stateVersion: "1.8.0",
+      configVersion: "1.5.0",
+    }),
+    "1.8.0",
+  );
+  assert.equal(
+    resolveProductVersion({
+      stateVersion: "1.8.0",
+      configVersion: "1.5.0",
+    }),
+    "1.8.0",
+  );
+  assert.equal(
+    resolveProductVersion({ configVersion: "1.5.0" }),
+    "1.5.0",
+  );
+});
+
+test("chart values regen with resolved product version does not revert app", () => {
+  // Simulates: app upgraded to 1.8.0 in values.yaml, config.yaml still 1.5.0.
+  // Upgrade must resolve to 1.8.0 and regenerate without overwriting it.
+  const config = cloneFixture("aws-self-hosted-minimal");
+  config.version = "1.5.0";
+  const existing = {
+    global: { version: "1.8.0" },
+  };
+
+  const staleMerged = buildDeployValues(existing, config) as {
+    global: { version?: string };
+  };
+  assert.equal(
+    staleMerged.global.version,
+    "1.5.0",
+    "stale config alone would overwrite live global.version",
+  );
+
+  const resolved = resolveProductVersion({
+    valuesVersion: "1.8.0",
+    stateVersion: "1.8.0",
+    configVersion: config.version,
+  });
+  assert.equal(resolved, "1.8.0");
+  const fixed = buildDeployValues(existing, { ...config, version: resolved! }) as {
+    global: { version?: string };
+  };
+  assert.equal(fixed.global.version, "1.8.0");
 });
 
 test("validateRemoteWriteConfig enforces per-destination requirements", () => {

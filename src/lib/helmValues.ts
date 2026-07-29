@@ -116,6 +116,30 @@ export function deploymentSecretNames(config: DeploymentConfig): {
 // and let the chart fall back to its default.
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 
+/**
+ * Resolve the product (app) version to use when regenerating Helm values.
+ * Prefer an explicit selection, then live values/state, then config — so a
+ * stale config.yaml after an app-only upgrade cannot silently revert images.
+ */
+export function resolveProductVersion(sources: {
+  selected?: string | null;
+  valuesVersion?: string | null;
+  stateVersion?: string | null;
+  configVersion?: string | null;
+}): string | undefined {
+  for (const candidate of [
+    sources.selected,
+    sources.valuesVersion,
+    sources.stateVersion,
+    sources.configVersion,
+  ]) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
+
 const SUPABASE_JWT_ISSUED_AT = 1641769200;
 const SUPABASE_JWT_EXPIRES_AT = 4102444800;
 

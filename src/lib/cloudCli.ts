@@ -9,7 +9,11 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import { execa } from "execa";
 import { CloudProvider, CLOUD_REGIONS } from "../types/index.js";
-import { approveCloudCommandOrThrow } from "./commandApproval.js";
+import {
+  approveCloudCommandOrThrow,
+  CommandDeniedError,
+} from "./commandApproval.js";
+import { isCloudAuthorizationError } from "./cloudErrors.js";
 import { filterAzureWorkloadIdentities } from "./clusterSetupDefaults.js";
 
 const execAsync = promisify(exec);
@@ -1612,7 +1616,8 @@ export function recommendSmtpAppIndex(
 export async function ensureAcsSmtpRoleAssignment(
   smtpUsername: string,
 ): Promise<{
-  status: "ok" | "granted" | "no-app" | "unknown";
+  status: "ok" | "granted" | "no-app" | "denied" | "unknown";
+  /** no-app: the missing app client ID. denied: the grant command an admin can run. */
   detail?: string;
 }> {
   const appClientId = parseAcsSmtpAppClientId(smtpUsername);
@@ -1649,15 +1654,24 @@ export async function ensureAcsSmtpRoleAssignment(
     if (existing.stdout.trim() !== "0" && existing.stdout.trim() !== "") {
       return { status: "ok" };
     }
-    await execCommand(
-      `az role assignment create --assignee-object-id ${spObjectId} --assignee-principal-type ServicePrincipal --role Contributor --scope ${acsId}`,
-      {
+    const grantCommand = `az role assignment create --assignee-object-id ${spObjectId} --assignee-principal-type ServicePrincipal --role Contributor --scope ${acsId}`;
+    let grant: { stdout: string; stderr: string };
+    try {
+      grant = await execCommand(grantCommand, {
         intent: "Grant email SMTP access",
         provider: "azure",
         mutating: true,
         timeout: 120000,
-      },
-    );
+      });
+    } catch (error) {
+      if (error instanceof CommandDeniedError) {
+        return { status: "denied", detail: grantCommand };
+      }
+      throw error;
+    }
+    if (!grant.stdout.trim() && isCloudAuthorizationError(grant.stderr)) {
+      return { status: "denied", detail: grantCommand };
+    }
     return { status: "granted" };
   } catch {
     return { status: "unknown" };
@@ -2190,16 +2204,22 @@ export function planAcrImports(
  * everywhere else. Failures are collected, not thrown: the caller decides
  * whether missing mirrors block the deploy.
  */
+export interface AcrImportFailure {
+  ref: string;
+  source: string;
+  detail?: string;
+}
+
 export async function mirrorImagesToAcr(
   registryName: string,
   licenseKey: string,
   specs: AcrImportSpec[],
-): Promise<{ imported: string[]; skipped: string[]; failed: string[] }> {
+): Promise<{ imported: string[]; skipped: string[]; failed: AcrImportFailure[] }> {
   const { formatDockerPat } = await import("./dockerHub.js");
   const pat = formatDockerPat(licenseKey);
   const imported: string[] = [];
   const skipped: string[] = [];
-  const failed: string[] = [];
+  const failed: AcrImportFailure[] = [];
 
   for (const spec of specs) {
     const ref = `${spec.repository}:${spec.tag}`;
@@ -2228,12 +2248,23 @@ export async function mirrorImagesToAcr(
         },
       );
       if (importRes.stderr && /error/i.test(importRes.stderr)) {
-        failed.push(`${ref}: ${importRes.stderr.split("\n")[0]}`);
+        failed.push({
+          ref,
+          source: spec.source,
+          detail: importRes.stderr.split("\n")[0],
+        });
       } else {
         imported.push(ref);
       }
-    } catch {
-      failed.push(ref);
+    } catch (error) {
+      failed.push({
+        ref,
+        source: spec.source,
+        detail:
+          error instanceof CommandDeniedError
+            ? "command approval denied"
+            : (error as { message?: string })?.message,
+      });
     }
   }
   return { imported, skipped, failed };
@@ -3377,8 +3408,15 @@ export interface SecretWriteResult {
   created: boolean;
   updated: boolean;
   skipped: boolean;
+  /** Write refused (IAM/RBAC or approval denied). Caller decides; the ESO sync gate is the arbiter of missing entries. */
+  denied?: boolean;
 }
 
+/**
+ * Run a mutating seeding command. Returns denied (instead of throwing) when
+ * the user declined the approval or the cloud refused authorization, so
+ * seeding fails open: entries pre-seeded by a platform team still sync.
+ */
 async function approvedExeca(
   displayCommand: string,
   intent: string,
@@ -3386,14 +3424,26 @@ async function approvedExeca(
   file: string,
   args: string[],
   input?: string,
-): Promise<void> {
-  await approveCloudCommandOrThrow({
-    command: displayCommand,
-    intent,
-    provider,
-    mutating: true,
-  });
-  await execa(file, args, input === undefined ? {} : { input });
+): Promise<{ denied: boolean }> {
+  try {
+    await approveCloudCommandOrThrow({
+      command: displayCommand,
+      intent,
+      provider,
+      mutating: true,
+    });
+    await execa(file, args, input === undefined ? {} : { input });
+    return { denied: false };
+  } catch (error) {
+    if (error instanceof CommandDeniedError) {
+      return { denied: true };
+    }
+    const e = error as { stderr?: string; message?: string };
+    if (isCloudAuthorizationError(e.stderr || e.message || "")) {
+      return { denied: true };
+    }
+    throw error;
+  }
 }
 
 /**
@@ -3417,7 +3467,7 @@ export async function writeAwsSecretsManagerSecret(options: {
     return { created: false, updated: false, skipped: true };
   }
   if (exists) {
-    await approvedExeca(
+    const write = await approvedExeca(
       `aws secretsmanager put-secret-value --secret-id ${name} --region ${region} --secret-string <redacted>`,
       "Update secrets manager entry",
       "aws",
@@ -3434,9 +3484,12 @@ export async function writeAwsSecretsManagerSecret(options: {
       ],
       value,
     );
+    if (write.denied) {
+      return { created: false, updated: false, skipped: false, denied: true };
+    }
     return { created: false, updated: true, skipped: false };
   }
-  await approvedExeca(
+  const write = await approvedExeca(
     `aws secretsmanager create-secret --name ${name} --region ${region} --secret-string <redacted>`,
     "Create secrets manager entry",
     "aws",
@@ -3455,6 +3508,9 @@ export async function writeAwsSecretsManagerSecret(options: {
     ],
     value,
   );
+  if (write.denied) {
+    return { created: false, updated: false, skipped: false, denied: true };
+  }
   return { created: true, updated: false, skipped: false };
 }
 
@@ -3477,7 +3533,7 @@ export async function writeAzureKeyVaultSecret(options: {
   if (exists && !overwrite) {
     return { created: false, updated: false, skipped: true };
   }
-  await approvedExeca(
+  const write = await approvedExeca(
     `az keyvault secret set --vault-name ${vaultName} --name ${name} --file <redacted>`,
     exists ? "Update Key Vault entry" : "Create Key Vault entry",
     "azure",
@@ -3497,6 +3553,9 @@ export async function writeAzureKeyVaultSecret(options: {
     ],
     value,
   );
+  if (write.denied) {
+    return { created: false, updated: false, skipped: false, denied: true };
+  }
   return exists
     ? { created: false, updated: true, skipped: false }
     : { created: true, updated: false, skipped: false };
@@ -3522,7 +3581,7 @@ export async function writeGcpSecretManagerSecret(options: {
     return { created: false, updated: false, skipped: true };
   }
   if (exists) {
-    await approvedExeca(
+    const write = await approvedExeca(
       `gcloud secrets versions add ${name} --project ${projectId} --data-file=<redacted>`,
       "Update Secret Manager entry",
       "gcp",
@@ -3530,9 +3589,12 @@ export async function writeGcpSecretManagerSecret(options: {
       ["secrets", "versions", "add", name, "--project", projectId, "--data-file=-"],
       value,
     );
+    if (write.denied) {
+      return { created: false, updated: false, skipped: false, denied: true };
+    }
     return { created: false, updated: true, skipped: false };
   }
-  await approvedExeca(
+  const write = await approvedExeca(
     `gcloud secrets create ${name} --project ${projectId} --data-file=<redacted>`,
     "Create Secret Manager entry",
     "gcp",
@@ -3549,5 +3611,8 @@ export async function writeGcpSecretManagerSecret(options: {
     ],
     value,
   );
+  if (write.denied) {
+    return { created: false, updated: false, skipped: false, denied: true };
+  }
   return { created: true, updated: false, skipped: false };
 }

@@ -45,6 +45,7 @@ import {
   ESO_READER_SERVICE_ACCOUNT,
   ESO_CONTROLLER_SERVICE_ACCOUNT,
 } from "./workloadIdentity.js";
+import { isKubernetesForbiddenError } from "./cloudErrors.js";
 
 // Pinned to the chart's external-secrets dependency version (Chart.yaml).
 const ESO_CHART_VERSION = "2.7.0";
@@ -128,17 +129,26 @@ export interface SeedSummary {
   created: string[];
   updated: string[];
   skipped: string[];
+  /** Entries whose write was refused (IAM/RBAC or approval denied). The sync gate decides whether they actually exist. */
+  denied: string[];
 }
 
 /**
  * Seed the cloud secrets manager with the deployment's secrets.
  * create-if-absent unless overwrite; byo-secret-store seeds nothing.
+ * Write denials do not throw: the entries may already be pre-seeded by a
+ * platform team, and waitForExternalSecrets is the arbiter of missing ones.
  */
 export async function seedCloudSecrets(
   config: DeploymentConfig,
   options: { overwrite: boolean },
 ): Promise<SeedSummary> {
-  const summary: SeedSummary = { created: [], updated: [], skipped: [] };
+  const summary: SeedSummary = {
+    created: [],
+    updated: [],
+    skipped: [],
+    denied: [],
+  };
   const backend = config.secrets?.backend;
   if (!backend || backend === "cluster" || backend === "byo-secret-store") {
     return summary;
@@ -193,11 +203,43 @@ export async function seedCloudSecrets(
         break;
       }
     }
-    if (result.created) summary.created.push(entry.remoteKey);
+    if (result.denied) summary.denied.push(entry.remoteKey);
+    else if (result.created) summary.created.push(entry.remoteKey);
     else if (result.updated) summary.updated.push(entry.remoteKey);
     else summary.skipped.push(entry.remoteKey);
   }
   return summary;
+}
+
+/**
+ * Hint appended to the sync-timeout error when some entries could not be
+ * written from this machine: lists them (with their required JSON keys) and
+ * the access an admin can grant. Only shown on that failure path.
+ */
+export function formatSeedDeniedHint(
+  config: DeploymentConfig,
+  deniedKeys: string[],
+): string {
+  const denied = new Set(deniedKeys);
+  const entries = esoSecretEntries(config).filter((entry) =>
+    denied.has(entry.remoteKey),
+  );
+  const backend = config.secrets?.backend;
+  const grant =
+    backend === "aws-secrets-manager"
+      ? `  aws: secretsmanager:CreateSecret and PutSecretValue on ${providerPrefix(config)}/*`
+      : backend === "azure-key-vault"
+        ? `  az role assignment create --role "Key Vault Secrets Officer" --assignee <your-object-id> --scope <vault-resource-id>`
+        : `  gcloud projects add-iam-policy-binding ${config.infrastructure.gcpProjectId ?? "<project>"} --member user:<you> --role roles/secretmanager.admin`;
+  return [
+    "These entries could not be written from this machine (access denied):",
+    ...entries.map(
+      (entry) => `  ${entry.remoteKey}  (JSON object with keys: ${entry.keys.join(", ")})`,
+    ),
+    "Ask your platform team to create them, or grant write access:",
+    grant,
+    "Then rerun the deploy.",
+  ].join("\n");
 }
 
 /** True when the ExternalSecret CRD is available on the cluster. */
@@ -255,6 +297,22 @@ export async function ensureEsoOperator(
       "5m",
     ]);
   } catch (error) {
+    const detail =
+      error && typeof error === "object" && "stderr" in error
+        ? String((error as { stderr?: string }).stderr ?? "")
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    if (isKubernetesForbiddenError(detail)) {
+      throw new Error(
+        [
+          "Installing the External Secrets Operator needs cluster-level access (it creates CRDs), which this kubeconfig does not have.",
+          "Ask your platform team to install it, then rerun the deploy:",
+          `  helm upgrade --install ${ESO_RELEASE_NAME} external-secrets --repo ${ESO_HELM_REPO} --version ${ESO_CHART_VERSION} --namespace ${namespace} --create-namespace --set installCRDs=true`,
+          "An ESO already running on the cluster also works; its CRDs are detected and reused.",
+        ].join("\n"),
+      );
+    }
     throw new Error(
       `Failed to install the External Secrets Operator (release ${ESO_RELEASE_NAME}): ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -502,7 +560,18 @@ export async function setupExternalSecrets(
   });
   const { installed } = await ensureEsoOperator(namespace);
   await applyEsoManifests(config);
-  await waitForExternalSecrets(config);
+  try {
+    await waitForExternalSecrets(config);
+  } catch (error) {
+    // A denied write plus a failed sync means the entry really is missing:
+    // point at the entries and the grant instead of only the sync status.
+    if (seeded.denied.length > 0) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}\n\n${formatSeedDeniedHint(config, seeded.denied)}`,
+      );
+    }
+    throw error;
+  }
   return { seeded, operatorInstalled: installed };
 }
 

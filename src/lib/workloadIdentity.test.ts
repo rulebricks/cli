@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   awsRoleNameFromArn,
   awsTrustPolicyAllowsPodIdentity,
+  formatFederationDeniedWarning,
   isAwsPodIdentityCliUnsupported,
   isAwsPodIdentityTrustPolicyInvalid,
   plannedBindings,
@@ -136,6 +137,27 @@ test("extracts role names from ARNs, including paths", () => {
     awsRoleNameFromArn("arn:aws:iam::123456789012:role/teams/data/my-role"),
     "my-role",
   );
+});
+
+test("federation denied warning lists every subject and its create command", () => {
+  const warning = formatFederationDeniedWarning([
+    {
+      subject: "rulebricks/vector",
+      command:
+        "aws eks create-pod-identity-association --cluster-name c --namespace rulebricks --service-account vector --role-arn arn:aws:iam::1:role/x --region us-east-1",
+    },
+    {
+      subject: "rulebricks/external-secrets",
+      command:
+        "aws eks create-pod-identity-association --cluster-name c --namespace rulebricks --service-account external-secrets --role-arn arn:aws:iam::1:role/y --region us-east-1",
+    },
+  ]);
+  assert.match(warning, /No permission to create workload identity trust/);
+  assert.match(warning, /- rulebricks\/vector/);
+  assert.match(warning, /- rulebricks\/external-secrets/);
+  assert.match(warning, /--service-account vector/);
+  assert.match(warning, /--service-account external-secrets/);
+  assert.match(warning, /Ask your cloud admin to run/);
 });
 
 test("external MSK IAM binds hps, worker, topic-provision, and keda-operator SAs (one association each)", () => {

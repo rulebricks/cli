@@ -24,14 +24,37 @@ import {
   usesInClusterPostgres,
 } from "../types/index.js";
 import { approveCloudCommandOrThrow } from "./commandApproval.js";
+import { isCloudAuthorizationError } from "./cloudErrors.js";
 
 const execAsync = promisify(exec);
 const CLI_TIMEOUT = 60000;
 
+/** A binding whose create was refused by cloud IAM, with the command an admin can run. */
+export interface DeniedBinding {
+  subject: string;
+  command: string;
+}
+
 export interface FederationOutcome {
   created: string[];
   existing: string[];
+  /** Bindings skipped because cloud IAM denied the create (fail-open). */
+  denied?: DeniedBinding[];
   skipped?: string;
+}
+
+/**
+ * Warning shown when IAM denied some federation creates: lists the exact
+ * commands an admin can run. Deploy continues on the assumption the trust
+ * exists or will be created out-of-band.
+ */
+export function formatFederationDeniedWarning(denied: DeniedBinding[]): string {
+  return [
+    "No permission to create workload identity trust for:",
+    ...denied.map((d) => `  - ${d.subject}`),
+    "Ask your cloud admin to run (skip any that already exist):",
+    ...denied.map((d) => `  ${d.command}`),
+  ].join("\n");
 }
 
 export interface FederationRemovalOutcome {
@@ -1019,13 +1042,21 @@ async function ensureAzure(
     resourceGroup: string;
   }
   const identityByClientId = new Map<string, ResolvedIdentity>();
+  // clientIds whose lookup was refused by RBAC: skip repeat lookups and
+  // fail open with a placeholder command instead of a misleading hard stop.
+  const lookupDenied = new Set<string>();
   const created: string[] = [];
   const existing: string[] = [];
+  const denied: DeniedBinding[] = [];
 
   for (const binding of bindings) {
     const clientId = binding.principal;
+    const subject = `system:serviceaccount:${namespace}:${binding.serviceAccount}`;
+    // Unique per (namespace, SA) so several deployments can share one identity.
+    const ficName = `${namespace}-${binding.serviceAccount}`.slice(0, 120);
+
     let identity = identityByClientId.get(clientId);
-    if (!identity) {
+    if (!identity && !lookupDenied.has(clientId)) {
       const lookupRes = await run(
         `az identity list --query "[?clientId=='${clientId}'].{name: name, resourceGroup: resourceGroup} | [0]" --output json`,
         { intent, provider: "azure" },
@@ -1041,17 +1072,26 @@ async function ensureAzure(
       } catch {
         // Treated as not found below.
       }
-      if (!identity) {
+      if (!identity && lookupRes.code !== 0 && isCloudAuthorizationError(lookupRes.stderr)) {
+        lookupDenied.add(clientId);
+      } else if (!identity) {
         throw new Error(
           `No user-assigned identity with client ID ${clientId} found in the current subscription. Run cluster-setup first, or check the active subscription (az account show).`,
         );
+      } else {
+        identityByClientId.set(clientId, identity);
       }
-      identityByClientId.set(clientId, identity);
     }
-
-    const subject = `system:serviceaccount:${namespace}:${binding.serviceAccount}`;
-    // Unique per (namespace, SA) so several deployments can share one identity.
-    const ficName = `${namespace}-${binding.serviceAccount}`.slice(0, 120);
+    if (!identity) {
+      denied.push({
+        subject,
+        command:
+          `az identity federated-credential create --name ${ficName} ` +
+          `--identity-name <identity with clientId ${clientId}> --resource-group <its resource group> ` +
+          `--issuer ${issuer} --subject ${subject} --audiences api://AzureADTokenExchange`,
+      });
+      continue;
+    }
 
     const listRes = await run(
       `az identity federated-credential list --identity-name ${shq(identity.name)} --resource-group ${shq(identity.resourceGroup)} --query "[?subject=='${subject}'] | length(@)" --output tsv`,
@@ -1062,14 +1102,21 @@ async function ensureAzure(
       continue;
     }
 
-    const createRes = await run(
+    const createCommand =
       `az identity federated-credential create --name ${shq(ficName)} ` +
-        `--identity-name ${shq(identity.name)} --resource-group ${shq(identity.resourceGroup)} ` +
-        `--issuer ${shq(issuer)} --subject ${shq(subject)} ` +
-        `--audiences api://AzureADTokenExchange`,
-      { intent, provider: "azure", mutating: true },
-    );
+      `--identity-name ${shq(identity.name)} --resource-group ${shq(identity.resourceGroup)} ` +
+      `--issuer ${shq(issuer)} --subject ${shq(subject)} ` +
+      `--audiences api://AzureADTokenExchange`;
+    const createRes = await run(createCommand, {
+      intent,
+      provider: "azure",
+      mutating: true,
+    });
     if (createRes.code !== 0) {
+      if (isCloudAuthorizationError(createRes.stderr)) {
+        denied.push({ subject, command: createCommand });
+        continue;
+      }
       throw new Error(
         `Failed to create federated credential for ${subject}: ${createRes.stderr.trim()}`,
       );
@@ -1077,7 +1124,7 @@ async function ensureAzure(
     created.push(subject);
   }
 
-  return { created, existing };
+  return { created, existing, ...(denied.length > 0 ? { denied } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1098,6 +1145,7 @@ async function ensureAws(
 
   const created: string[] = [];
   const existing: string[] = [];
+  const denied: DeniedBinding[] = [];
   const intent = "Configure workload identity (AWS)";
 
   // Preflight 1: the Pod Identity agent add-on. Without it every association
@@ -1168,12 +1216,15 @@ async function ensureAws(
       continue;
     }
 
-    const createRes = await run(
+    const createCommand =
       `aws eks create-pod-identity-association --cluster-name ${shq(cluster)} ` +
-        `--namespace ${shq(namespace)} --service-account ${shq(binding.serviceAccount)} ` +
-        `--role-arn ${shq(roleArn)} --region ${shq(region)}`,
-      { intent, provider: "aws", mutating: true },
-    );
+      `--namespace ${shq(namespace)} --service-account ${shq(binding.serviceAccount)} ` +
+      `--role-arn ${shq(roleArn)} --region ${shq(region)}`;
+    const createRes = await run(createCommand, {
+      intent,
+      provider: "aws",
+      mutating: true,
+    });
     if (createRes.code !== 0) {
       if (isAwsPodIdentityCliUnsupported(createRes.stderr)) {
         throw new Error(awsPodIdentityUnsupportedMessage(createRes.stderr));
@@ -1193,6 +1244,10 @@ async function ensureAws(
         existing.push(subject);
         continue;
       }
+      if (isCloudAuthorizationError(createRes.stderr)) {
+        denied.push({ subject: `${namespace}/${binding.serviceAccount}`, command: createCommand });
+        continue;
+      }
       throw new Error(
         `Failed to create Pod Identity association for ${subject}: ${createRes.stderr.trim()}`,
       );
@@ -1200,7 +1255,7 @@ async function ensureAws(
     created.push(subject);
   }
 
-  return { created, existing };
+  return { created, existing, ...(denied.length > 0 ? { denied } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1219,6 +1274,7 @@ async function ensureGcp(
   }
 
   const created: string[] = [];
+  const denied: DeniedBinding[] = [];
   const intent = "Configure workload identity (GCP)";
 
   // Preflight: the GKE cluster must have a Workload Identity pool. Without it
@@ -1256,13 +1312,23 @@ async function ensureGcp(
     const member = `serviceAccount:${project}.svc.id.goog[${namespace}/${binding.serviceAccount}]`;
 
     // add-iam-policy-binding is idempotent; re-adding an existing member is a no-op.
-    const res = await run(
+    const bindCommand =
       `gcloud iam service-accounts add-iam-policy-binding ${shq(gsa)} ` +
-        `--project ${shq(project)} --role roles/iam.workloadIdentityUser ` +
-        `--member ${shq(member)} --quiet`,
-      { intent, provider: "gcp", mutating: true },
-    );
+      `--project ${shq(project)} --role roles/iam.workloadIdentityUser ` +
+      `--member ${shq(member)} --quiet`;
+    const res = await run(bindCommand, {
+      intent,
+      provider: "gcp",
+      mutating: true,
+    });
     if (res.code !== 0) {
+      if (isCloudAuthorizationError(res.stderr)) {
+        denied.push({
+          subject: `${namespace}/${binding.serviceAccount}`,
+          command: bindCommand,
+        });
+        continue;
+      }
       throw new Error(
         `Failed to bind Workload Identity for ${namespace}/${binding.serviceAccount}: ${res.stderr.trim()}`,
       );
@@ -1270,5 +1336,5 @@ async function ensureGcp(
     created.push(`${namespace}/${binding.serviceAccount}`);
   }
 
-  return { created, existing: [] };
+  return { created, existing: [], ...(denied.length > 0 ? { denied } : {}) };
 }

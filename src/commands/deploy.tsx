@@ -48,6 +48,7 @@ import {
   deriveConventionalAzureExternalDnsClientId,
   detectProvisionedSecretsBackend,
   ensureWorkloadIdentityFederation,
+  formatFederationDeniedWarning,
   verifyClusterAutoscalerIdentity,
   verifyManualKafkaAssociations,
   wantsManagedDns,
@@ -146,6 +147,7 @@ function DeployCommandInner({
   const [autoscalerWarning, setAutoscalerWarning] = useState<string | null>(null);
   const [dnsWarning, setDnsWarning] = useState<string | null>(null);
   const [secretsWarning, setSecretsWarning] = useState<string | null>(null);
+  const [smtpWarning, setSmtpWarning] = useState<string | null>(null);
   const [status, setStatus] = useState<StepStatus>({
     preflight: "pending",
     federation: "pending",
@@ -322,9 +324,17 @@ function DeployCommandInner({
       markRunning("federation");
       try {
         const federation = await ensureWorkloadIdentityFederation(cfg);
+        // Cloud IAM refused some creates: continue (matching the approval-
+        // denied path below) and hand the exact commands to the operator.
+        if (federation.denied && federation.denied.length > 0) {
+          setFederationWarning(formatFederationDeniedWarning(federation.denied));
+        }
         setStatus((s) => ({
           ...s,
-          federation: federation.skipped ? "skipped" : "success",
+          federation:
+            federation.skipped || (federation.denied?.length ?? 0) > 0
+              ? "skipped"
+              : "success",
         }));
       } catch (federationError) {
         if (!(federationError instanceof CommandDeniedError)) {
@@ -368,10 +378,18 @@ function DeployCommandInner({
         );
         if (mirror.failed.length > 0) {
           throw new Error(
-            `Mirroring images into ${cfg.imageRegistry} failed for:\n` +
-              mirror.failed.map((ref) => `  - ${ref}`).join("\n") +
-              "\nFix registry access (or switch imageRegistryMode to " +
-              '"pull-through") and redeploy.',
+            [
+              `Mirroring images into ${cfg.imageRegistry} failed for:`,
+              ...mirror.failed.map(
+                (f) => `  - ${f.ref}${f.detail ? ` (${f.detail})` : ""}`,
+              ),
+              "Ask a registry admin (AcrPush or Contributor on the registry) to import them:",
+              ...mirror.failed.map(
+                (f) =>
+                  `  az acr import --name ${registryName} --source "${f.source}" --image "${f.ref}" --username rulebricks --password <docker PAT from your license key> --force`,
+              ),
+              'Or set imageRegistryMode: "pull-through" in the deployment config, then redeploy.',
+            ].join("\n"),
           );
         }
       }
@@ -542,7 +560,16 @@ function DeployCommandInner({
             }
           },
           setupExternalSecrets: async () => {
-            await setupExternalSecrets(cfg, { overwriteSecrets: syncSecrets });
+            const { seeded } = await setupExternalSecrets(cfg, {
+              overwriteSecrets: syncSecrets,
+            });
+            // Sync succeeded, so the entries exist (pre-seeded by the
+            // platform); just flag that this machine could not write them.
+            if (seeded.denied.length > 0) {
+              setSecretsWarning(
+                `${seeded.denied.length} secret entr${seeded.denied.length === 1 ? "y was" : "ies were"} not writable from this machine (access denied); existing platform values were used: ${seeded.denied.join(", ")}`,
+              );
+            }
             // external-dns's azure.json is provider plumbing, not an
             // application secret - the chart mounts it unconditionally when
             // Azure DNS is auto-managed, so skipping it here leaves the
@@ -791,6 +818,14 @@ function DeployCommandInner({
       // how SSO and workload identity are wired at deploy time.
       if (cfg.smtp.user) {
         const role = await ensureAcsSmtpRoleAssignment(cfg.smtp.user);
+        // No rights to create the role assignment: continue (SMTP is not
+        // deploy-critical) but say so, with the exact grant an admin can run.
+        if (role.status === "denied" && role.detail) {
+          setSmtpWarning(
+            "Email sends may fail: could not grant the SMTP app access to the communication service (access denied). Ask an admin to run:\n" +
+              `  ${role.detail}`,
+          );
+        }
         if (role.status === "no-app") {
           throw new Error(
             `The email SMTP app (client ID ${role.detail}) was not found in this tenant. ` +
@@ -1001,6 +1036,11 @@ function DeployCommandInner({
                 <Text color={colors.warning}>⚠ {secretsWarning}</Text>
               </Box>
             )}
+            {smtpWarning && (
+              <Box marginTop={1}>
+                <Text color={colors.warning}>⚠ {smtpWarning}</Text>
+              </Box>
+            )}
           </Box>
 
           <Box marginTop={1} flexDirection="column">
@@ -1074,6 +1114,11 @@ function DeployCommandInner({
         {secretsWarning && (
           <Box marginLeft={2}>
             <Text color={colors.warning}>{secretsWarning}</Text>
+          </Box>
+        )}
+        {smtpWarning && (
+          <Box marginLeft={2}>
+            <Text color={colors.warning}>{smtpWarning}</Text>
           </Box>
         )}
         <StatusLine status={status.helmInstall} label={helmInstallLabel} />
