@@ -453,23 +453,35 @@ export async function deriveConventionalAzureExternalDnsClientId(
 /**
  * Azure counterpart of deriveConventionalAwsRole: resolve the client ID of a
  * cluster-setup user-assigned identity by its `<cluster>-<suffix>` naming
- * convention. Undefined when the identity does not exist.
+ * convention. The lookup is subscription-wide: the prerequisites template may
+ * place an identity (external-dns) in a platform team's resource group, not
+ * the deployment's own. The deployment's resource group wins when the name
+ * appears in several. Undefined when the identity does not exist.
  */
 export async function deriveConventionalAzureIdentityClientId(
   config: DeploymentConfig,
   suffix: string,
 ): Promise<string | undefined> {
   const cluster = config.infrastructure.clusterName;
-  const rg = config.infrastructure.azureResourceGroup;
-  if (!cluster || !rg) return undefined;
+  if (!cluster) return undefined;
   const res = await run(
-    `az identity show --name ${shq(`${cluster}-${suffix}`)} ` +
-      `--resource-group ${shq(rg)} --query clientId --output tsv`,
+    `az identity list --query ${shq(
+      `[?name=='${cluster}-${suffix}'].{clientId:clientId,resourceGroup:resourceGroup}`,
+    )} --output json`,
     { intent: "Configure workload identity (Azure)", provider: "azure" },
   );
   if (res.code !== 0) return undefined;
-  const clientId = res.stdout.trim();
-  return clientId || undefined;
+  let identities: Array<{ clientId?: string; resourceGroup?: string }>;
+  try {
+    identities = JSON.parse(res.stdout || "[]");
+  } catch {
+    return undefined;
+  }
+  const rg = (config.infrastructure.azureResourceGroup || "").toLowerCase();
+  const preferred =
+    identities.find((i) => (i.resourceGroup || "").toLowerCase() === rg) ??
+    identities[0];
+  return preferred?.clientId || undefined;
 }
 
 /**

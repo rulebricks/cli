@@ -1,6 +1,11 @@
 // ============================================================================
 // Rulebricks AKS cluster-setup parameters
 //   Find all "REQUIRED" to review each value you must provide before deploying
+//
+// Deploy prerequisites.bicep FIRST (see parameters.prerequisites.bicepparam):
+// it provisions key org-gated resources this template consumes: the DNS
+// zone, the external-dns identity, and the ACS email service with its sender
+// domains.
 // ============================================================================
 
 using 'main.bicep'
@@ -10,6 +15,12 @@ using 'main.bicep'
 // ---------------------------------------------------------------------------
 
 param clusterName = 'rulebricks'
+
+// Resource group of the prerequisites.bicep deployment. Empty = this resource
+// group (the default flow); set it when a platform team deployed the
+// prerequisites into their own - this template only READS them, so Reader
+// there is enough.
+param prerequisitesResourceGroup = ''
 
 // Region for every resource, review quota and availability
 param location = 'eastus'
@@ -172,19 +183,16 @@ param enableManagedGrafana = true
 // ---------------------------------------------------------------------------
 // DNS (delegated-subdomain model)
 // ---------------------------------------------------------------------------
-// The template creates the DNS zone below and outputs dnsZoneNameServers.
-// Hand those NS records to whoever controls the parent domain for a ONE-TIME
-// delegation; afterwards external-dns manages every record and Let's Encrypt
-// HTTP-01 issues certificates
+// The zone and the external-dns identity come from prerequisites.bicep.
+// Hand its dnsZoneNameServers output to whoever controls the parent domain
+// for a ONE-TIME delegation; afterwards external-dns manages every record and
+// Let's Encrypt HTTP-01 issues certificates.
 // Set your deployment's domain in the Rulebricks CLI to match this zone.
 
 param enableExternalDns = true
-// REQUIRED: the deployment's subdomain, e.g. 'rb.corp.com'.
+// REQUIRED: the deployment's subdomain, e.g. 'rb.corp.com' - the same value
+// as the prerequisites deployment's dnsZoneName.
 param dnsZoneName = ''
-// false = target a pre-existing zone instead (see dnsZoneResourceGroup).
-param createDnsZone = true
-// Resource group of a PRE-EXISTING zone (createDnsZone=false only).
-param dnsZoneResourceGroup = ''
 
 // ---------------------------------------------------------------------------
 // Key Vault (External Secrets Operator backend)
@@ -246,20 +254,34 @@ param redisSkuName = 'Balanced_B1'
 // SMTP credentials (retired in Exchange Online). ACS is Microsoft's
 // replacement: plain SMTP (smtp.azurecomm.net:587) authenticated with an
 // Entra app registration. The Rulebricks CLI wires that app up at deploy time
-// (it grants the app access to this service, assembles the SMTP username, and
-// takes the client secret as the password) - the same model as SSO, so no app
-// IDs are needed here. Set false if you already have an SMTP provider
-// (Resend, SES, ...).
+// (it grants the app access to the communication service created here,
+// assembles the SMTP username, and takes the client secret as the password) -
+// the same model as SSO, so no app IDs are needed here. The email service and
+// sender domains themselves come from prerequisites.bicep. Set false if you
+// already have an SMTP provider (Resend, SES, ...).
 
 param enableManagedEmail = true
+// Must match the prerequisites deployment's emailDataLocation.
 param emailDataLocation = 'United States'
-// Optional branded sender: a domain under dnsZoneName (or the zone itself),
-// e.g. 'rb.corp.com' -> DoNotReply@rb.corp.com. Verification DNS records are
-// created in the delegated zone automatically; after the first deploy, run
-// the emailInitiateVerificationCommands outputs, wait for Verified, and rerun
-// the deployment - linking is automatic. Empty = send from the
-// instantly-working Azure-managed azurecomm.net address.
-param emailCustomDomain = ''
+// The prerequisites deployment's email service. Empty = derived by
+// convention, which resolves only when the prerequisites deployed into THIS
+// resource group with the same clusterName; otherwise copy the value from its
+// emailServiceNameOut / mainDeploymentParameters output.
+param emailServiceName = ''
+// Only when the email service lives in yet another resource group (an
+// organization-run messaging service) - empty = prerequisitesResourceGroup.
+param emailServiceResourceGroup = ''
+// The always-verified Azure-managed fallback sender on the email service.
+// Set '' when the service has none (an organization service carrying only
+// its own verified domain).
+param emailFallbackDomainName = 'AzureManagedDomain'
+// Branded sender domain on the email service (the prerequisites deployment's
+// emailSenderDomain), e.g. 'rb.corp.com' -> DoNotReply@rb.corp.com. Linked
+// and used as the sender once verified - finish verification in the
+// prerequisites step so it sends from day one; an unfinished verification
+// just means the fallback sender is used instead.
+// Empty = the Azure-managed azurecomm.net address only.
+param emailBrandedDomainName = ''
 
 // ---------------------------------------------------------------------------
 // Managed PostgreSQL (Flexible Server, private access)

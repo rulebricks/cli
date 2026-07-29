@@ -539,6 +539,24 @@ test("ClickHouse bootstrap ships a disk-pressure-bounded hot tier over the archi
   assert.match(defaults, /CREATE TABLE IF NOT EXISTS rulebricks\.decision_logs_recent/);
   assert.match(defaults, /PARTITION BY toYYYYMMDD\(timestamp\)/);
   assert.match(defaults, /min_free_disk_ratio_to_perform_insert/);
+  // path_trace: present in every structure define + select list, migrated
+  // onto existing hot tiers by an idempotent ALTER on each upgrade job run,
+  // and normalized by the Vector VRL.
+  assert.match(defaults, /path_trace Nullable\(String\)/);
+  assert.match(
+    defaults,
+    /ALTER TABLE rulebricks\.decision_logs_recent ADD COLUMN IF NOT EXISTS path_trace Nullable\(String\)/,
+  );
+  assert.match(defaults, /\.path_trace = to_string\(\.path_trace\) \?\? null/);
+  // log_id: internal-only unique record id (deterministic ORDER BY
+  // tiebreaker / dedup key). Same trailing-Nullable migration pattern as
+  // path_trace, with Vector minting ids for legacy producers.
+  assert.match(defaults, /log_id Nullable\(String\)/);
+  assert.match(
+    defaults,
+    /ALTER TABLE rulebricks\.decision_logs_recent ADD COLUMN IF NOT EXISTS log_id Nullable\(String\)/,
+  );
+  assert.match(defaults, /\.log_id = to_string\(\.log_id\) \?\? uuid_v4\(\)/);
   assert.match(defaults, /minOrNull\(toUInt32\(partition\)\)/);
   assert.match(defaults, /FROM system\.parts/);
   // The hot tier is bounded by disk pressure, NEVER by a time TTL: an
@@ -1125,6 +1143,10 @@ test("vector normalize VRL promotes flow correlation fields from the decision bl
     ".flow_node_id = to_string(.flow_node_id) ?? to_string(_decision.flowNodeId) ?? null",
     ".parallel_execution_id = to_string(.parallel_execution_id) ?? to_string(_decision.parallelExecutionId) ?? null",
     ".parallel_path = to_string(.parallel_path) ?? to_string(_decision.parallelPath) ?? null",
+    // Compressed path traces stored on flows-shaped / flow-trace records
+    ".path_trace = to_string(.path_trace) ?? null",
+    // Internal-only unique record id; Vector mints it for legacy producers
+    ".log_id = to_string(.log_id) ?? uuid_v4()",
   ]) {
     assert.ok(source.includes(line), `normalize VRL missing: ${line}`);
   }
@@ -1551,7 +1573,27 @@ test("k8s secret mode: SSO + AI configs validate against the chart schema", () =
   assert.equal(values.global.sso.clientId, undefined);
   assert.equal(values.global.sso.clientSecret, undefined);
   assert.equal(values.global.ai.openaiApiKey, undefined);
+  // The base URL is non-secret config and must survive redaction (it lands in
+  // the app ConfigMap as OPENAI_BASE_URL, not in the app Secret).
+  assert.equal(
+    values.global.ai.openaiBaseUrl,
+    "https://openai-gw.example.com/v1",
+  );
   assert.equal(values.global.secrets.secretRef, `${getReleaseName(config.name)}-app-secrets`);
+});
+
+test("inline mode emits the optional OpenAI base URL only when set", () => {
+  const withUrl = cloneFixture("aws-all-features");
+  const values = buildHelmValues(withUrl) as Record<string, any>;
+  assert.equal(
+    values.global.ai.openaiBaseUrl,
+    "https://openai-gw.example.com/v1",
+  );
+
+  const withoutUrl = cloneFixture("aws-all-features");
+  delete withoutUrl.features.ai.openaiBaseUrl;
+  const bare = buildHelmValues(withoutUrl) as Record<string, any>;
+  assert.equal(bare.global.ai.openaiBaseUrl, undefined);
 });
 
 test("k8s secret mode: managed Supabase config validates against the chart schema", () => {

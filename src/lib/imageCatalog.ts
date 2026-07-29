@@ -136,6 +136,14 @@ export class ImageCatalog {
     }
     return digests;
   }
+
+  /**
+   * Every manifest entry, for consumers that operate on the whole pin set at
+   * once (the ACR mirror imports each of these into the private registry).
+   */
+  entries(): ManifestImage[] {
+    return [...this.byName.values()];
+  }
 }
 
 /**

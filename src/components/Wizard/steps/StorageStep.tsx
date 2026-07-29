@@ -30,6 +30,7 @@ import {
 import {
   findClusterSetupDefaultIndex,
   isAwsInfrastructureRoleName,
+  sortRelevantFirst,
 } from "../../../lib/clusterSetupDefaults.js";
 
 interface StorageStepProps {
@@ -211,9 +212,9 @@ export function StorageStep({
     String(state.backupRetentionDays || 7),
   );
 
-  // Narrow huge account-wide lists to the Rulebricks workload identity from
-  // cluster-setup (by cluster name or the "rulebricks" marker), falling back to
-  // the full list when nothing matches.
+  // Sorts the Rulebricks workload identity from cluster-setup (by cluster name
+  // or the "rulebricks" marker) to the top of huge account-wide lists. Ordering
+  // only - a BYO identity following another naming scheme stays selectable.
   const relevantToRulebricks = (name: string): boolean => {
     const n = name.toLowerCase();
     const clusterName = (state.clusterName || "").toLowerCase();
@@ -427,8 +428,9 @@ export function StorageStep({
             const roles = (await listIamRoles()).filter(
               (r) => !isAwsInfrastructureRoleName(r.name),
             );
-            const narrowed = roles.filter((r) => relevantToRulebricks(r.name));
-            return (narrowed.length > 0 ? narrowed : roles).map((r) => ({
+            return sortRelevantFirst(roles, (r) =>
+              relevantToRulebricks(r.name),
+            ).map((r) => ({
               label: r.name,
               value: r.arn,
             }));
@@ -490,10 +492,9 @@ export function StorageStep({
           emptyHint="None found. Press R to refresh or enter an email manually."
           load={async () => {
             const accounts = await listGcpServiceAccounts();
-            const narrowed = accounts.filter((a) =>
+            return sortRelevantFirst(accounts, (a) =>
               relevantToRulebricks(a.email),
-            );
-            return (narrowed.length > 0 ? narrowed : accounts).map((a) => ({
+            ).map((a) => ({
               label: a.email,
               value: a.email,
             }));

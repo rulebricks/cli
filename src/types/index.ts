@@ -1051,6 +1051,9 @@ export const DeploymentConfigSchema = z.object({
     ai: z.object({
       enabled: z.boolean(),
       openaiApiKey: z.string().optional(),
+      // Optional OpenAI-compatible endpoint (e.g. an enterprise gateway).
+      // Empty means OpenAI's public API.
+      openaiBaseUrl: z.string().url().optional(),
     }),
     sso: z.object({
       enabled: z.boolean(),
@@ -1140,6 +1143,17 @@ export const DeploymentConfigSchema = z.object({
   // global.imageRegistry and into each Tier-2 chart's native image keys, keeping
   // the rulebricks/<name> path. See the helm chart's global.imageRegistry knob.
   imageRegistry: z.string().optional(),
+
+  // How imageRegistry is kept populated (Azure ACR):
+  //   "pull-through" - the registry's cache rule fetches docker.io/rulebricks/*
+  //     on first pull; nothing for the CLI to do beyond pointing images at it.
+  //   "mirror" - the CLI copies every image (the chart manifest's pins plus
+  //     the app/hps images for the selected version) into the registry with
+  //     `az acr import` at deploy time, and again on version or chart
+  //     upgrades. For registries without pull-through (Basic/Standard ACR) or
+  //     policies that forbid on-demand egress.
+  // Unset with imageRegistry set = a registry populated outside the CLI.
+  imageRegistryMode: z.enum(["pull-through", "mirror"]).optional(),
 
   // Legacy chart version (deprecated, kept for backwards compatibility)
   chartVersion: z.string().optional(),
@@ -1247,6 +1261,7 @@ export const ProfileConfigSchema = z.object({
 
   // API Keys
   openaiApiKey: z.string().optional(),
+  openaiBaseUrl: z.string().optional(),
   licenseKey: z.string().optional(),
 
   // Preferences

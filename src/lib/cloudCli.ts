@@ -954,6 +954,7 @@ export async function ensureAzurePostgresLogicalReplication(
 export async function ensureAcsCustomEmailDomainLinked(
   fromAddress: string,
   resourceGroup: string,
+  smtpUsername?: string,
 ): Promise<{
   status: "ok" | "linked" | "not-verified" | "unknown";
   domain?: string;
@@ -962,56 +963,157 @@ export async function ensureAcsCustomEmailDomainLinked(
   const domain = fromAddress.split("@")[1]?.toLowerCase();
   if (!domain || domain.endsWith(".azurecomm.net")) return { status: "ok" };
   try {
-    const svcRes = await execCommand(
-      `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/emailServices --query "[0].name" --output tsv`,
+    // The communication service the deployment actually uses: named in the
+    // SMTP username the operator configured, resolved subscription-wide (its
+    // resource group is not necessarily the deployment's). Fallback: the
+    // deployment resource group's only communication service.
+    const smtpAcsName = smtpUsername
+      ? parseAcsSmtpResourceName(smtpUsername)
+      : null;
+    let commService = "";
+    let commResourceGroup = resourceGroup;
+    if (smtpAcsName) {
+      const commRes = await execCommand(
+        `az resource list --resource-type Microsoft.Communication/communicationServices --query "[?name=='${smtpAcsName}'].{name:name,resourceGroup:resourceGroup}" --output json`,
+        { intent: "Verify email domain", provider: "azure" },
+      );
+      const matches = JSON.parse(commRes.stdout || "[]") as Array<{
+        name?: string;
+        resourceGroup?: string;
+      }>;
+      if (matches[0]?.name && matches[0]?.resourceGroup) {
+        commService = matches[0].name;
+        commResourceGroup = matches[0].resourceGroup;
+      }
+    }
+    if (!commService) {
+      const commRes = await execCommand(
+        `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/communicationServices --query "[0].name" --output tsv`,
+        { intent: "Verify email domain", provider: "azure" },
+      );
+      commService = commRes.stdout.trim();
+      commResourceGroup = resourceGroup;
+    }
+    if (!commService) return { status: "unknown" };
+
+    const linkedRes = await execCommand(
+      `az communication show --name ${commService} --resource-group ${commResourceGroup} --query linkedDomains --output json`,
       { intent: "Verify email domain", provider: "azure" },
     );
-    const emailService = svcRes.stdout.trim();
-    if (!emailService) return { status: "unknown" };
+    let linked: string[] = [];
+    try {
+      linked = JSON.parse(linkedRes.stdout || "[]");
+    } catch {
+      return { status: "unknown" };
+    }
+
+    // Already linked: nothing to heal. Matching by the domain segment of the
+    // resource ID avoids a lookup round-trip.
+    if (
+      linked.some(
+        (id) => parseAcsEmailDomainId(id)?.domain.toLowerCase() === domain,
+      )
+    ) {
+      return { status: "ok", domain };
+    }
+
+    // Locate the email service carrying the sender domain. The services
+    // behind the already-linked domains are checked first (the branded domain
+    // normally sits next to the azurecomm.net fallback, wherever the
+    // prerequisites deployment put them), then the deployment resource
+    // group's own email services.
+    const candidates: Array<{ resourceGroup: string; name: string }> = [];
+    const seenSvc = new Set<string>();
+    const addCandidate = (rg: string, name: string) => {
+      const key = `${rg}/${name}`.toLowerCase();
+      if (seenSvc.has(key)) return;
+      seenSvc.add(key);
+      candidates.push({ resourceGroup: rg, name });
+    };
+    for (const id of linked) {
+      const parsed = parseAcsEmailDomainId(id);
+      if (parsed) addCandidate(parsed.resourceGroup, parsed.emailService);
+    }
+    try {
+      const svcRes = await execCommand(
+        `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/emailServices --query "[].name" --output json`,
+        { intent: "Verify email domain", provider: "azure" },
+      );
+      for (const name of JSON.parse(svcRes.stdout || "[]") as string[]) {
+        if (name) addCandidate(resourceGroup, name);
+      }
+    } catch {
+      // The deployment resource group may hold no email service at all when
+      // the prerequisites live elsewhere; the linked-domain candidates above
+      // still stand.
+    }
+    if (candidates.length === 0) return { status: "unknown" };
 
     const showDomain = async (): Promise<{
       id?: string;
+      resourceGroup?: string;
+      emailService?: string;
       verificationStates?: Record<string, { status?: string }>;
     } | null> => {
-      const res = await execCommand(
-        `az communication email domain show --domain-name ${domain} --email-service-name ${emailService} --resource-group ${resourceGroup} --output json`,
-        { intent: "Verify email domain", provider: "azure" },
-      );
-      try {
-        return JSON.parse(res.stdout || "null");
-      } catch {
-        return null;
+      for (const svc of candidates) {
+        const res = await execCommand(
+          `az communication email domain show --domain-name ${domain} --email-service-name ${svc.name} --resource-group ${svc.resourceGroup} --output json`,
+          { intent: "Verify email domain", provider: "azure" },
+        );
+        try {
+          const parsed = JSON.parse(res.stdout || "null");
+          if (parsed?.id) {
+            return {
+              ...parsed,
+              resourceGroup: svc.resourceGroup,
+              emailService: svc.name,
+            };
+          }
+        } catch {
+          // Not on this service; try the next candidate.
+        }
       }
+      return null;
     };
-    // The four states that gate linking (dmarc is reported but not required).
-    const REQUIRED_CHECKS = ["domain", "spf", "dkim", "dkim2"];
+    // The four states that gate linking (DMARC is reported but not required),
+    // named as the API reports them - verificationStates keys come back in
+    // PascalCase (Domain, SPF, ...), and these same names are what
+    // initiate-verification takes as --verification-type. The lookup is
+    // case-normalized so an API casing change degrades gracefully instead of
+    // reporting a verified domain as forever pending.
+    const REQUIRED_CHECKS = ["Domain", "SPF", "DKIM", "DKIM2"];
     const unverified = (info: {
       verificationStates?: Record<string, { status?: string }>;
-    }) =>
-      REQUIRED_CHECKS.filter(
-        (k) => info.verificationStates?.[k]?.status !== "Verified",
+    }) => {
+      const statusByCheck = new Map(
+        Object.entries(info.verificationStates ?? {}).map(([key, state]) => [
+          key.toLowerCase(),
+          state?.status,
+        ]),
       );
+      return REQUIRED_CHECKS.filter(
+        (check) => statusByCheck.get(check.toLowerCase()) !== "Verified",
+      );
+    };
 
     let info = await showDomain();
     if (!info?.id) return { status: "unknown" };
 
     if (unverified(info).length > 0) {
-      // initiate-verification is idempotent for InProgress checks; the
-      // verification-type argument uses the API's capitalized names.
-      const typeName: Record<string, string> = {
-        domain: "Domain",
-        spf: "SPF",
-        dkim: "DKIM",
-        dkim2: "DKIM2",
-      };
+      // initiate-verification is idempotent for InProgress checks. It is a
+      // write on the domain, which a deployer working against a platform
+      // team's prerequisites may not hold - the command then fails and the
+      // poll below reports not-verified with the pending checks, which is
+      // the right outcome (verification belongs to the prerequisites step).
       for (const check of unverified(info)) {
         await execCommand(
-          `az communication email domain initiate-verification --domain-name ${domain} --email-service-name ${emailService} --resource-group ${resourceGroup} --verification-type ${typeName[check]}`,
+          `az communication email domain initiate-verification --domain-name ${domain} --email-service-name ${info.emailService} --resource-group ${info.resourceGroup} --verification-type ${check}`,
           { intent: "Verify email domain", provider: "azure", mutating: true, timeout: 120000 },
         );
       }
-      // DNS records were created with the zone in the same deployment, so
-      // verification normally lands within a couple of minutes.
+      // DNS records were created with the zone by the prerequisites
+      // deployment, so verification normally lands within a couple of
+      // minutes.
       const deadline = Date.now() + 6 * 60 * 1000;
       while (Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 15000));
@@ -1027,31 +1129,14 @@ export async function ensureAcsCustomEmailDomainLinked(
       }
     }
 
-    const commRes = await execCommand(
-      `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/communicationServices --query "[0].name" --output tsv`,
-      { intent: "Verify email domain", provider: "azure" },
-    );
-    const commService = commRes.stdout.trim();
-    if (!commService) return { status: "unknown" };
-    const linkedRes = await execCommand(
-      `az communication show --name ${commService} --resource-group ${resourceGroup} --query linkedDomains --output json`,
-      { intent: "Verify email domain", provider: "azure" },
-    );
-    let linked: string[] = [];
-    try {
-      linked = JSON.parse(linkedRes.stdout || "[]");
-    } catch {
-      return { status: "unknown" };
-    }
-    const alreadyLinked = linked.some(
-      (id) => id.toLowerCase() === info!.id!.toLowerCase(),
-    );
-    if (alreadyLinked) return { status: "ok", domain };
+    // Linking is a write on the communication service plus a READ on the
+    // domain, so it works even when the domain lives in a resource group the
+    // deployer cannot modify.
     const allDomains = [...linked, info.id]
       .map((id) => `"${id}"`)
       .join(" ");
     await execCommand(
-      `az communication update --name ${commService} --resource-group ${resourceGroup} --linked-domains ${allDomains}`,
+      `az communication update --name ${commService} --resource-group ${commResourceGroup} --linked-domains ${allDomains}`,
       { intent: "Link email domain", provider: "azure", mutating: true, timeout: 120000 },
     );
     return { status: "linked", domain };
@@ -1070,41 +1155,59 @@ export async function ensureAcsCustomEmailDomainLinked(
  * deploy. Idempotent (a re-grant is a no-op); fail-open ("unknown") on
  * anything ambiguous so a probe quirk never blocks a deploy.
  */
+export interface AzureAcsResource {
+  name: string;
+  resourceGroup: string;
+  id: string;
+}
+
 /**
- * Discover the ACS communication service name in a resource group, so the
- * wizard can assemble the SMTP username (<acs>.<appClientId>.<tenant>) from
- * the deployment instead of asking the operator to paste the whole triplet.
- * Null when none exists (BYO ACS elsewhere, or non-Azure) - the wizard then
- * falls back to a free-text username field.
+ * List the ACS communication services in the subscription, so the wizard can
+ * assemble the SMTP username (<acs>.<appClientId>.<tenant>) from a resource
+ * the operator picked rather than one guessed for them. Deliberately NOT
+ * scoped to the deployment's resource group: a bring-your-own ACS commonly
+ * lives in a shared messaging resource group, and scoping it away made that
+ * resource unselectable. Empty list on any failure so the wizard falls back to
+ * the free-text username field.
  */
-export async function getAzureAcsResourceName(
-  resourceGroup: string,
-): Promise<string | null> {
-  if (!resourceGroup) return null;
+export async function listAzureAcsResources(): Promise<AzureAcsResource[]> {
   try {
     const res = await execCommand(
-      `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/communicationServices --query "[0].name" --output tsv`,
+      `az resource list --resource-type Microsoft.Communication/communicationServices --query "[].{name:name, resourceGroup:resourceGroup, id:id}" --output json`,
       { intent: "Discover managed email", provider: "azure" },
     );
-    return res.stdout.trim() || null;
+    const rows = JSON.parse(res.stdout || "[]") as Array<{
+      name?: string;
+      resourceGroup?: string;
+      id?: string;
+    }>;
+    return rows
+      .filter((row) => row.name && row.id)
+      .map((row) => ({
+        name: row.name!,
+        resourceGroup: row.resourceGroup || "",
+        id: row.id!,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
   } catch {
-    return null;
+    return [];
   }
 }
 
 /**
- * True when a user-assigned managed identity of the given name exists in the
- * resource group - used to confirm the cluster-setup external-dns identity is
- * present before the wizard commits to auto-managed DNS.
+ * True when a user-assigned managed identity of the given name exists
+ * anywhere in the subscription - used to confirm the cluster-setup
+ * external-dns identity is present before the wizard commits to auto-managed
+ * DNS. Subscription-wide because the prerequisites template may place the
+ * identity in a platform team's resource group, not the deployment's own.
  */
 export async function azureManagedIdentityExists(
   name: string,
-  resourceGroup: string,
 ): Promise<boolean> {
-  if (!name || !resourceGroup) return false;
+  if (!name) return false;
   try {
     const res = await execCommand(
-      `az identity show --name ${name} --resource-group ${resourceGroup} --query id --output tsv`,
+      `az identity list --query "[?name=='${name}'].id" --output tsv`,
       { intent: "Discover DNS zones", provider: "azure" },
     );
     return res.stdout.trim().length > 0;
@@ -1200,43 +1303,138 @@ export async function findAzureDnsZone(
 
 export interface AcsSenderAddress {
   address: string;
-  /** True for a customer-verified domain (a branded sender). */
+  /** True for a customer-managed domain (a branded sender). */
   branded: boolean;
+  /**
+   * True once ACS has verified ownership of the domain. A branded domain is
+   * created by cluster-setup in the NotStarted state and only becomes sendable
+   * after the emailInitiateVerificationCommands outputs are run and the DNS
+   * records propagate, so this is what separates "offered" from "usable".
+   */
+  verified: boolean;
+}
+
+/**
+ * Parse an ACS email-domain resource ID into the coordinates needed to query
+ * it. The IDs come from a communication service's linkedDomains and are the
+ * one authoritative pointer to where the sender domains actually live - which
+ * may be a platform team's resource group, not the deployment's own.
+ */
+export function parseAcsEmailDomainId(
+  id: string,
+): { resourceGroup: string; emailService: string; domain: string } | null {
+  const match = id.match(
+    /\/resourceGroups\/([^/]+)\/providers\/Microsoft\.Communication\/emailServices\/([^/]+)\/domains\/([^/]+)$/i,
+  );
+  if (!match) return null;
+  return { resourceGroup: match[1], emailService: match[2], domain: match[3] };
 }
 
 /**
  * List the sender addresses available on the deployment's ACS email service.
  * Every provisioned domain has a DoNotReply MailFrom, so the wizard can offer
- * the branded sender (when emailCustomDomain was set) and the Azure-managed
- * one as choices instead of asking the operator to type an address. Branded
- * domains sort first - if one exists, it is the intended sender.
+ * the branded sender (when one was provisioned) and the Azure-managed one as
+ * choices instead of asking the operator to type an address.
+ *
+ * When the communication service is known, its linkedDomains point at the
+ * exact email services carrying the senders - including ones in a different
+ * resource group (the prerequisites template's, or a central messaging
+ * team's). Every domain on those services is offered, not just the linked
+ * ones: a branded domain awaiting verification is not linked yet but should
+ * still appear (labeled) in the list. Without a communication service, every
+ * email service in the resource group is queried as before.
+ *
+ * Verified addresses sort first, branded ahead of Azure-managed within each
+ * group. An unverified branded domain must NOT outrank a working one: the
+ * cluster-setup template creates it unverified, and choosing it there makes
+ * every send fail with an unhelpful ACS error.
  */
 export async function listAcsSenderAddresses(
   resourceGroup: string,
+  acsResourceName?: string,
 ): Promise<AcsSenderAddress[]> {
   if (!resourceGroup) return [];
   try {
-    const svcRes = await execCommand(
-      `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/emailServices --query "[0].name" --output tsv`,
-      { intent: "Discover managed email", provider: "azure" },
+    // (resource group, email service) pairs to pull domains from.
+    let emailServices: Array<{ resourceGroup: string; name: string }> = [];
+
+    if (acsResourceName) {
+      try {
+        const linkedRes = await execCommand(
+          `az communication show --name ${acsResourceName} --resource-group ${resourceGroup} --query linkedDomains --output json`,
+          { intent: "Discover managed email", provider: "azure" },
+        );
+        const linked = JSON.parse(linkedRes.stdout || "[]") as string[];
+        const seenSvc = new Set<string>();
+        for (const id of linked) {
+          const parsed = parseAcsEmailDomainId(id);
+          if (!parsed) continue;
+          const key = `${parsed.resourceGroup}/${parsed.emailService}`.toLowerCase();
+          if (seenSvc.has(key)) continue;
+          seenSvc.add(key);
+          emailServices.push({
+            resourceGroup: parsed.resourceGroup,
+            name: parsed.emailService,
+          });
+        }
+      } catch {
+        emailServices = [];
+      }
+    }
+
+    if (emailServices.length === 0) {
+      const svcRes = await execCommand(
+        `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/emailServices --query "[].name" --output json`,
+        { intent: "Discover managed email", provider: "azure" },
+      );
+      // Every email service in the group is queried, not just the first: a
+      // resource group holding a second (staging, legacy) email service would
+      // otherwise hide the domains of whichever one did not sort first.
+      emailServices = (JSON.parse(svcRes.stdout || "[]") as string[])
+        .filter(Boolean)
+        .map((name) => ({ resourceGroup, name }));
+    }
+    if (emailServices.length === 0) return [];
+
+    const perService = await Promise.all(
+      emailServices.map(async (svc) => {
+        try {
+          const res = await execCommand(
+            `az communication email domain list --email-service-name ${svc.name} --resource-group ${svc.resourceGroup} --output json`,
+            { intent: "Discover managed email", provider: "azure" },
+          );
+          return JSON.parse(res.stdout || "[]") as Array<{
+            fromSenderDomain?: string;
+            domainManagement?: string;
+            verificationStates?: { Domain?: { status?: string } };
+          }>;
+        } catch {
+          return [];
+        }
+      }),
     );
-    const emailService = svcRes.stdout.trim();
-    if (!emailService) return [];
-    const res = await execCommand(
-      `az communication email domain list --email-service-name ${emailService} --resource-group ${resourceGroup} --output json`,
-      { intent: "Discover managed email", provider: "azure" },
-    );
-    const domains = JSON.parse(res.stdout || "[]") as Array<{
-      fromSenderDomain?: string;
-      domainManagement?: string;
-    }>;
-    return domains
+
+    const seen = new Set<string>();
+    return perService
+      .flat()
       .filter((d) => d.fromSenderDomain)
       .map((d) => ({
         address: `DoNotReply@${d.fromSenderDomain}`,
         branded: d.domainManagement === "CustomerManaged",
+        // Domain ownership is the gate on sending; SPF/DKIM only affect
+        // deliverability, so they do not decide usability here.
+        verified: d.verificationStates?.Domain?.status === "Verified",
       }))
-      .sort((a, b) => Number(b.branded) - Number(a.branded));
+      .filter((sender) => {
+        if (seen.has(sender.address)) return false;
+        seen.add(sender.address);
+        return true;
+      })
+      .sort(
+        (a, b) =>
+          Number(b.verified) - Number(a.verified) ||
+          Number(b.branded) - Number(a.branded),
+      );
   } catch {
     return [];
   }
@@ -1268,6 +1466,20 @@ export function parseAcsSmtpAppClientId(smtpUsername: string): string | null {
   return appClientId;
 }
 
+/**
+ * Extract the ACS resource name (the leading segment) from an ACS SMTP
+ * username. This is how the deploy-time role grant finds the exact resource
+ * the operator selected in the wizard. Returns null on the placeholder or a
+ * value that is not the <acs>.<appClientId>.<tenant> shape.
+ */
+export function parseAcsSmtpResourceName(smtpUsername: string): string | null {
+  const parts = smtpUsername.split(".");
+  if (parts.length < 3) return null;
+  const acsResource = parts[0];
+  if (!acsResource || acsResource.startsWith("<")) return null;
+  return acsResource;
+}
+
 export interface AzureEntraApp {
   name: string;
   appId: string;
@@ -1295,36 +1507,50 @@ const ENTRA_APP_PROJECTION =
 
 /**
  * List Entra app registrations so the wizard can offer the SSO app as a
- * selection instead of asking for a pasted client ID. Owned apps first (fast,
- * needs no tenant-wide Graph read - the operator running the wizard usually
- * created the SSO app); falls back to the tenant-wide listing with a hard
- * timeout since large tenants can hold thousands of registrations. Empty list
- * on any failure so callers fall back to manual entry.
+ * selection instead of asking for a pasted client ID. Owned apps are listed
+ * first (the operator running the wizard usually created the SSO app), then
+ * every other app in the tenant. Both listings always run: an SSO app created
+ * by a colleague, by Terraform, or with no owner at all is invisible to
+ * --show-mine, and hiding it leaves the operator picking from a list that
+ * cannot contain the right answer. The tenant-wide query carries a hard
+ * timeout since large tenants can hold thousands of registrations, and either
+ * listing may fail independently (no tenant-wide Graph read, for instance)
+ * without losing the other. Empty list when both fail so callers fall back to
+ * manual entry.
  */
 export async function listAzureEntraApps(): Promise<AzureEntraApp[]> {
-  try {
-    const mine = await execCommand(
-      `az ad app list --show-mine --query ${ENTRA_APP_PROJECTION} --output json`,
-      { intent: "Discover Entra applications", provider: "azure" },
-    );
-    const owned = parseEntraApps(mine.stdout);
-    if (owned.length > 0) return owned;
-  } catch {
-    // Fall through to the tenant-wide listing.
+  const listApps = async (
+    scope: "--show-mine" | "--all",
+    timeout?: number,
+  ): Promise<AzureEntraApp[]> => {
+    try {
+      const result = await execCommand(
+        `az ad app list ${scope} --query ${ENTRA_APP_PROJECTION} --output json`,
+        {
+          intent: "Discover Entra applications",
+          provider: "azure",
+          ...(timeout ? { timeout } : {}),
+        },
+      );
+      return parseEntraApps(result.stdout);
+    } catch {
+      return [];
+    }
+  };
+
+  const [owned, all] = await Promise.all([
+    listApps("--show-mine"),
+    listApps("--all", 30000),
+  ]);
+
+  const merged: AzureEntraApp[] = [];
+  const seen = new Set<string>();
+  for (const app of [...owned, ...all]) {
+    if (seen.has(app.appId)) continue;
+    seen.add(app.appId);
+    merged.push(app);
   }
-  try {
-    const all = await execCommand(
-      `az ad app list --all --query ${ENTRA_APP_PROJECTION} --output json`,
-      {
-        intent: "Discover Entra applications",
-        provider: "azure",
-        timeout: 30000,
-      },
-    );
-    return parseEntraApps(all.stdout);
-  } catch {
-    return [];
-  }
+  return merged;
 }
 
 /**
@@ -1385,16 +1611,22 @@ export function recommendSmtpAppIndex(
 
 export async function ensureAcsSmtpRoleAssignment(
   smtpUsername: string,
-  resourceGroup: string,
 ): Promise<{
   status: "ok" | "granted" | "no-app" | "unknown";
   detail?: string;
 }> {
   const appClientId = parseAcsSmtpAppClientId(smtpUsername);
   if (!appClientId) return { status: "unknown" };
+  // The username's leading segment is the ACS resource the operator selected,
+  // so the grant lands on that exact resource. Taking the first ACS in the
+  // resource group instead would silently grant Contributor on the wrong
+  // service whenever the deployment uses a BYO or secondary ACS, and SMTP
+  // would still fail with a permissions error pointing nowhere useful.
+  const acsResource = parseAcsSmtpResourceName(smtpUsername);
+  if (!acsResource) return { status: "unknown" };
   try {
     const acsRes = await execCommand(
-      `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/communicationServices --query "[0].id" --output tsv`,
+      `az resource list --resource-type Microsoft.Communication/communicationServices --query "[?name=='${acsResource}'].id | [0]" --output tsv`,
       { intent: "Verify email domain", provider: "azure" },
     );
     const acsId = acsRes.stdout.trim();
@@ -1819,6 +2051,192 @@ export async function listAllAksClusters(): Promise<DiscoveredCluster[]> {
   } catch {
     return [];
   }
+}
+
+export interface AzureContainerRegistry {
+  name: string;
+  loginServer: string;
+  resourceGroup: string;
+  sku: string;
+}
+
+/**
+ * List Azure Container Registries across the subscription. The wizard's
+ * image-source step offers the deployment's registry (cluster-setup
+ * provisions one with a docker.io/rulebricks/* pull-through cache rule) as
+ * the image host; subscription-wide because it may live in another resource
+ * group.
+ */
+export async function listAzureContainerRegistries(): Promise<
+  AzureContainerRegistry[]
+> {
+  try {
+    const res = await execCommand(
+      `az acr list --query "[].{name:name,loginServer:loginServer,resourceGroup:resourceGroup,sku:sku.name}" --output json`,
+      { intent: "Discover container registries", provider: "azure" },
+    );
+    const rows = JSON.parse(res.stdout || "[]") as Array<{
+      name?: string;
+      loginServer?: string;
+      resourceGroup?: string;
+      sku?: string;
+    }>;
+    return rows
+      .filter((row) => row.name && row.loginServer)
+      .map((row) => ({
+        name: row.name!,
+        loginServer: row.loginServer!,
+        resourceGroup: row.resourceGroup || "",
+        sku: row.sku || "",
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * True when the registry carries a pull-through cache rule for the
+ * docker.io/rulebricks/* repositories (cluster-setup provisions one). Decides
+ * whether the wizard recommends pull-through (rule present: pulls populate
+ * the cache on demand) or mirroring (no rule: something must copy the images
+ * in).
+ */
+export async function acrHasRulebricksCacheRule(
+  registryName: string,
+): Promise<boolean> {
+  try {
+    const res = await execCommand(
+      `az acr cache list --registry ${registryName} --query "[].sourceRepository" --output json`,
+      { intent: "Discover container registries", provider: "azure" },
+    );
+    const sources = JSON.parse(res.stdout || "[]") as string[];
+    return sources.some((source) =>
+      /^docker\.io\/rulebricks\//i.test(source || ""),
+    );
+  } catch {
+    return false;
+  }
+}
+
+export interface AcrImportSpec {
+  /** Source reference on Docker Hub, digest-pinned when the pin is known. */
+  source: string;
+  /** Repository path inside the registry (rulebricks/<name>). */
+  repository: string;
+  /** Tag to apply inside the registry. */
+  tag: string;
+  /** Expected sha256 digest, when the manifest pins one. */
+  digest?: string;
+  /**
+   * Re-import even when the tag already exists. Set for the app-tier tags,
+   * which are MUTABLE upstream: Rulebricks republishes hps/hps-worker under
+   * the same version tag (the "same-version patch" rulebricks upgrade
+   * detects), and a skip-if-present mirror would pin the registry to the
+   * stale build forever.
+   */
+  force?: boolean;
+}
+
+/**
+ * The full image set a mirrored registry must carry: every chart-manifest pin
+ * (imported by digest when one is recorded, so the mirror can never drift
+ * from global.imageDigests) plus the app-tier images governed by the selected
+ * product version - app and hps at the version tag, and the worker, which is
+ * the `worker-<version>` TAG on rulebricks/hps (there is no hps-worker
+ * repository). Pure so the plan is testable; mirrorImagesToAcr executes it.
+ */
+export function planAcrImports(
+  entries: Array<{ name: string; tag: string; target?: string; digest?: string }>,
+  appVersion?: string,
+): AcrImportSpec[] {
+  const specs: AcrImportSpec[] = entries.map((entry) => {
+    const repository = entry.target || `rulebricks/${entry.name}`;
+    return {
+      source: entry.digest
+        ? `docker.io/${repository}@${entry.digest}`
+        : `docker.io/${repository}:${entry.tag}`,
+      repository,
+      tag: entry.tag,
+      ...(entry.digest ? { digest: entry.digest } : {}),
+    };
+  });
+  if (appVersion) {
+    const appTier: Array<{ repository: string; tag: string }> = [
+      { repository: "rulebricks/app", tag: appVersion },
+      { repository: "rulebricks/hps", tag: appVersion },
+      { repository: "rulebricks/hps", tag: `worker-${appVersion}` },
+    ];
+    for (const { repository, tag } of appTier) {
+      specs.push({
+        source: `docker.io/${repository}:${tag}`,
+        repository,
+        tag,
+        force: true,
+      });
+    }
+  }
+  return specs;
+}
+
+/**
+ * Copy the planned images into an ACR with `az acr import` - the CLI-driven
+ * alternative to the pull-through cache for registries that cannot use one
+ * (Basic/Standard SKUs, or egress policies that forbid on-demand upstream
+ * pulls). Idempotent: a tag already present with the expected digest (or any
+ * digest, when the plan has no pin - release tags are immutable) is skipped;
+ * mismatches are re-imported with --force so digest pins in the values always
+ * resolve. Source auth is the same Docker Hub PAT the license key backs
+ * everywhere else. Failures are collected, not thrown: the caller decides
+ * whether missing mirrors block the deploy.
+ */
+export async function mirrorImagesToAcr(
+  registryName: string,
+  licenseKey: string,
+  specs: AcrImportSpec[],
+): Promise<{ imported: string[]; skipped: string[]; failed: string[] }> {
+  const { formatDockerPat } = await import("./dockerHub.js");
+  const pat = formatDockerPat(licenseKey);
+  const imported: string[] = [];
+  const skipped: string[] = [];
+  const failed: string[] = [];
+
+  for (const spec of specs) {
+    const ref = `${spec.repository}:${spec.tag}`;
+    try {
+      // Mutable-tag images (force) are always re-imported; the check below
+      // would wrongly skip a tag whose upstream content changed.
+      if (!spec.force) {
+        const existing = await execCommand(
+          `az acr manifest show --registry ${registryName} --name "${ref}" --query digest --output tsv`,
+          { intent: "Mirror images to registry", provider: "azure" },
+        );
+        const currentDigest = existing.stdout.trim();
+        if (currentDigest && (!spec.digest || currentDigest === spec.digest)) {
+          skipped.push(ref);
+          continue;
+        }
+      }
+      const importRes = await execCommand(
+        `az acr import --name ${registryName} --source "${spec.source}" --image "${ref}" --username rulebricks --password "${pat}" --force --output none`,
+        {
+          intent: "Mirror images to registry",
+          provider: "azure",
+          mutating: true,
+          // Large multi-arch images take a while to copy server-side.
+          timeout: 600000,
+        },
+      );
+      if (importRes.stderr && /error/i.test(importRes.stderr)) {
+        failed.push(`${ref}: ${importRes.stderr.split("\n")[0]}`);
+      } else {
+        imported.push(ref);
+      }
+    } catch {
+      failed.push(ref);
+    }
+  }
+  return { imported, skipped, failed };
 }
 
 /**

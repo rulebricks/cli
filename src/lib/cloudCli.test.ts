@@ -6,9 +6,53 @@ import {
   parseAcsSmtpAppClientId,
   expectedSsoRedirectUri,
   hasSsoRedirectUri,
+  planAcrImports,
   recommendEntraAppIndex,
   recommendSmtpAppIndex,
 } from "./cloudCli.js";
+
+test("ACR import plan pins digests, honors targets, and appends app-tier images", () => {
+  const specs = planAcrImports(
+    [
+      {
+        name: "curl",
+        tag: "8.1.0",
+        digest: "sha256:abc",
+      },
+      // Explicit target repository and no digest: import by tag.
+      { name: "supabase-postgres", tag: "15.8", target: "rulebricks/pg" },
+    ],
+    "2.0.19",
+  );
+
+  // Manifest pins are content-addressed, never forced.
+  assert.equal(specs[0].force, undefined);
+  assert.deepEqual(specs[0], {
+    source: "docker.io/rulebricks/curl@sha256:abc",
+    repository: "rulebricks/curl",
+    tag: "8.1.0",
+    digest: "sha256:abc",
+  });
+  assert.deepEqual(specs[1], {
+    source: "docker.io/rulebricks/pg:15.8",
+    repository: "rulebricks/pg",
+    tag: "15.8",
+  });
+  // The app tier follows the selected product version, not the manifest. The
+  // worker is a TAG on rulebricks/hps (no hps-worker repository), and all
+  // three are force entries: the tags are mutable upstream (same-version hps
+  // patches), so a skip-if-present mirror would stay stale forever.
+  assert.deepEqual(
+    specs.slice(2).map((spec) => ({ source: spec.source, force: spec.force })),
+    [
+      { source: "docker.io/rulebricks/app:2.0.19", force: true },
+      { source: "docker.io/rulebricks/hps:2.0.19", force: true },
+      { source: "docker.io/rulebricks/hps:worker-2.0.19", force: true },
+    ],
+  );
+  // No version (chart-only re-mirror): manifest pins only.
+  assert.equal(planAcrImports([{ name: "curl", tag: "8" }]).length, 1);
+});
 
 test("recommends the SMTP-named Entra app for ACS email", () => {
   const apps = [

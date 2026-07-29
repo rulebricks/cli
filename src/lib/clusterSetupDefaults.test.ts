@@ -81,6 +81,9 @@ test("filters Azure infra identities and keeps workload identities", () => {
   const identities = [
     { name: "rulebricks-cluster-agentpool" },
     { name: "rulebricks-cluster-identity" },
+    // The Azure Policy add-on identity, created whenever enableAzurePolicy is
+    // on - federating it would fail at runtime.
+    { name: "azurepolicy-rulebricks-cluster" },
     { name: "rulebricks-cluster-rulebricks" },
     { name: "rulebricks-cluster-decision-logs" },
   ];

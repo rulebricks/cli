@@ -109,6 +109,9 @@ function applyHelmValuesToConfig(
       next.features.ai.openaiApiKey =
         stringValue(global.ai.openaiApiKey) ??
         next.features.ai.openaiApiKey;
+      next.features.ai.openaiBaseUrl =
+        stringValue(global.ai.openaiBaseUrl) ??
+        next.features.ai.openaiBaseUrl;
     }
 
     if (isRecord(global.sso)) {

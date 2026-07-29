@@ -141,6 +141,26 @@ export function findClusterSetupDefault(
 }
 
 /**
+ * Stable-partitions picker candidates so the likely matches sort to the top
+ * while the rest stay reachable below them. Discovery narrowing must never
+ * decide on the operator's behalf: a bring-your-own role, service account, or
+ * app whose name follows none of our conventions still has to be selectable,
+ * so the full set always comes back and only the order changes. Relative order
+ * within each group is preserved.
+ */
+export function sortRelevantFirst<T>(
+  items: T[],
+  isRelevant: (item: T) => boolean,
+): T[] {
+  const relevant: T[] = [];
+  const rest: T[] = [];
+  for (const item of items) {
+    (isRelevant(item) ? relevant : rest).push(item);
+  }
+  return [...relevant, ...rest];
+}
+
+/**
  * Cluster-infrastructure IAM roles that must never back a workload identity:
  * EKS control-plane and nodegroup roles (Terraform name_prefix, CloudFormation
  * logical-ID, and eksctl naming conventions) plus AWS service-linked roles.
@@ -174,11 +194,14 @@ export function isAwsInfrastructureRoleName(name: string): boolean {
 
 /**
  * Narrows Azure user-assigned identities to workload-identity candidates by
- * dropping AKS infrastructure identities: kubelet agentpool identities and the
+ * dropping AKS infrastructure identities: kubelet agentpool identities, the
  * cluster's own control-plane identity (`<cluster>-identity` in our
- * cluster-setup templates). Never falls back to the unfiltered list - offering
- * an infra identity would succeed at federation time and then fail at runtime
- * with authorization errors, which is far harder to diagnose.
+ * cluster-setup templates), and the add-on identities AKS provisions into the
+ * same resource group (the Azure Policy add-on creates `azurepolicy-<cluster>`
+ * when enableAzurePolicy is on, which our templates default to). Never falls
+ * back to the unfiltered list - offering an infra identity would succeed at
+ * federation time and then fail at runtime with authorization errors, which is
+ * far harder to diagnose.
  */
 export function filterAzureWorkloadIdentities<T extends { name: string }>(
   identities: T[],
@@ -188,6 +211,7 @@ export function filterAzureWorkloadIdentities<T extends { name: string }>(
   return identities.filter((identity) => {
     const name = identity.name.toLowerCase();
     if (name.endsWith("-agentpool")) return false;
+    if (name.startsWith("azurepolicy-")) return false;
     if (cluster && name === `${cluster}-identity`) return false;
     return true;
   });

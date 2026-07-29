@@ -104,7 +104,8 @@ export interface FeatureConfigFlowState {
 export function featureConfigFieldOrder(s: FeatureConfigFlowState): string[] {
   const fields: string[] = [];
 
-  if (s.needs.ai) fields.push("openai-key");
+  // The key and optional base URL share one consolidated screen.
+  if (s.needs.ai) fields.push("openai-config");
 
   if (s.needs.sso) {
     fields.push("sso-provider");

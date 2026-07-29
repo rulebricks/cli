@@ -38,6 +38,7 @@ import {
   rolloutRestart,
   type DeployedVersions,
 } from "../lib/kubernetes.js";
+import { mirrorImagesToAcr, planAcrImports } from "../lib/cloudCli.js";
 import fs from "fs/promises";
 import YAML from "yaml";
 
@@ -226,6 +227,36 @@ function UpgradeCommandInner({
 
     setStep("upgrading");
     try {
+      // ACR-backed registry (either mode): import the target version's
+      // app-tier tags BEFORE the upgrade rolls pods to them. Mirror mode
+      // needs it to exist at all (or every restart lands in
+      // ImagePullBackOff). Pull-through mode needs it for freshness: the
+      // artifact cache serves an already-cached tag without re-checking
+      // upstream, so a same-version hps patch would otherwise never reach
+      // the cluster. The tags are force entries, so both modes get the
+      // current upstream content.
+      if (
+        config.imageRegistryMode &&
+        config.imageRegistry &&
+        config.infrastructure.provider === "azure"
+      ) {
+        const mirror = await mirrorImagesToAcr(
+          config.imageRegistry.split(".")[0],
+          config.licenseKey,
+          planAcrImports([], selectedVersion.version),
+        );
+        if (mirror.failed.length > 0 && config.imageRegistryMode === "mirror") {
+          // Mirror mode has no other image source - block with the refs.
+          // Pull-through degrades gracefully (the cache rule still serves,
+          // at worst the pre-patch content), so a failed freshen never
+          // blocks an upgrade there.
+          throw new Error(
+            `Mirroring ${selectedVersion.version} images into ${config.imageRegistry} failed for:\n` +
+              mirror.failed.map((ref) => `  - ${ref}`).join("\n"),
+          );
+        }
+      }
+
       // Update Helm values with the unified product version
       await updateHelmValuesWithVersion(selectedVersion);
 

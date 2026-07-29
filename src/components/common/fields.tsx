@@ -125,6 +125,12 @@ export interface TextFieldProps {
   onSubmit: () => void;
   placeholder?: string;
   mask?: boolean;
+  /**
+   * When false, the input renders but ignores keystrokes. Lets a field show
+   * multiple inputs on one screen with only one active (e.g. the consolidated
+   * OpenAI key + base URL prompt).
+   */
+  focus?: boolean;
 }
 
 export function TextField({
@@ -135,6 +141,7 @@ export function TextField({
   onSubmit,
   placeholder,
   mask,
+  focus = true,
 }: TextFieldProps) {
   return (
     <Box flexDirection="column" marginY={1}>
@@ -146,6 +153,7 @@ export function TextField({
           onSubmit={onSubmit}
           placeholder={placeholder}
           mask={mask ? "*" : undefined}
+          focus={focus}
         />
       </Box>
     </Box>

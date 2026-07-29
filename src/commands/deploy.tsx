@@ -38,8 +38,11 @@ import {
   ensureAcsCustomEmailDomainLinked,
   ensureAcsSmtpRoleAssignment,
   ensureAzurePostgresLogicalReplication,
+  findAzureDnsZone,
   getAzureSubscriptionId,
   getAzureTenantId,
+  mirrorImagesToAcr,
+  planAcrImports,
 } from "../lib/cloudCli.js";
 import {
   deriveConventionalAzureExternalDnsClientId,
@@ -348,6 +351,31 @@ function DeployCommandInner({
       // once so both TLS generation phases use the same catalog.
       const imageCatalog = await resolveImageCatalog(version);
 
+      // Mirrored registry: copy the full image set (this catalog's pins plus
+      // the app-tier images for the configured version) into the registry
+      // before anything references it. Missing images block the deploy here
+      // with the failed refs instead of surfacing as ImagePullBackOff.
+      if (
+        cfg.imageRegistryMode === "mirror" &&
+        cfg.imageRegistry &&
+        cfg.infrastructure.provider === "azure"
+      ) {
+        const registryName = cfg.imageRegistry.split(".")[0];
+        const mirror = await mirrorImagesToAcr(
+          registryName,
+          cfg.licenseKey,
+          planAcrImports(imageCatalog.entries(), cfg.version),
+        );
+        if (mirror.failed.length > 0) {
+          throw new Error(
+            `Mirroring images into ${cfg.imageRegistry} failed for:\n` +
+              mirror.failed.map((ref) => `  - ${ref}`).join("\n") +
+              "\nFix registry access (or switch imageRegistryMode to " +
+              '"pull-through") and redeploy.',
+          );
+        }
+      }
+
       // The config's secrets backend decides the mode (ESO by default);
       // --inline-secrets remains the explicit dev/direct-chart escape hatch.
       const secretMode: SecretMode = inlineSecrets
@@ -457,12 +485,18 @@ function DeployCommandInner({
         | undefined;
       if (externalDnsEnabled && wantsManagedDns(cfg, "azure")) {
         try {
-          const [clientId, subscriptionId, tenantId] = await Promise.all([
+          const [clientId, subscriptionId, tenantId, zone] = await Promise.all([
             deriveConventionalAzureExternalDnsClientId(cfg),
             getAzureSubscriptionId(),
             getAzureTenantId(),
+            findAzureDnsZone(cfg.domain?.toLowerCase() ?? ""),
           ]);
-          const resourceGroup = cfg.infrastructure.azureResourceGroup;
+          // azure.json's resourceGroup is where external-dns writes RECORDS,
+          // i.e. the zone's own resource group - the prerequisites template
+          // may have placed it outside the deployment's. Fall back to the
+          // deployment group when zone discovery came up empty.
+          const resourceGroup =
+            zone?.resourceGroup || cfg.infrastructure.azureResourceGroup;
           if (clientId && subscriptionId && tenantId && resourceGroup) {
             externalDnsAzureClientId = clientId;
             externalDnsAzureConfig = { tenantId, subscriptionId, resourceGroup };
@@ -509,6 +543,14 @@ function DeployCommandInner({
           },
           setupExternalSecrets: async () => {
             await setupExternalSecrets(cfg, { overwriteSecrets: syncSecrets });
+            // external-dns's azure.json is provider plumbing, not an
+            // application secret - the chart mounts it unconditionally when
+            // Azure DNS is auto-managed, so skipping it here leaves the
+            // external-dns pod stuck in ContainerCreating on a missing
+            // Secret until the helm --wait times out.
+            if (externalDnsAzureConfig) {
+              await applyExternalDnsAzureConfig(namespace, externalDnsAzureConfig);
+            }
             // TLS material is ingress plumbing, not an application secret -
             // it goes straight to Kubernetes even in ESO mode.
             if (tlsSecretPlan.entries.length > 0) {
@@ -748,10 +790,7 @@ function DeployCommandInner({
       // this (the app is created out-of-band), so the CLI owns it, matching
       // how SSO and workload identity are wired at deploy time.
       if (cfg.smtp.user) {
-        const role = await ensureAcsSmtpRoleAssignment(
-          cfg.smtp.user,
-          cfg.infrastructure.azureResourceGroup,
-        );
+        const role = await ensureAcsSmtpRoleAssignment(cfg.smtp.user);
         if (role.status === "no-app") {
           throw new Error(
             `The email SMTP app (client ID ${role.detail}) was not found in this tenant. ` +
@@ -767,13 +806,14 @@ function DeployCommandInner({
       const acs = await ensureAcsCustomEmailDomainLinked(
         cfg.smtp.from,
         cfg.infrastructure.azureResourceGroup,
+        cfg.smtp.user,
       );
       if (acs.status === "not-verified") {
         throw new Error(
           `The email sender domain "${acs.domain}" is not verified with Azure Communication Services (pending: ${acs.detail}). ` +
-            "Verification was initiated and usually completes within minutes of the DNS records resolving.\n" +
-            "  • If the domain is under the deployment's delegated zone, wait a few minutes and re-run this deploy.\n" +
-            "  • Otherwise, publish the emailCustomDomainVerificationRecords deployment output at your DNS provider first.\n" +
+            "Verification belongs to the prerequisites deployment (cluster-setup/azure/prerequisites.bicep):\n" +
+            "  • Run its emailInitiateVerificationCommands outputs (or ask whoever deployed the prerequisites to), wait for Verified, then re-run this deploy.\n" +
+            "  • If the domain is hosted outside the delegated zone, publish its emailVerificationRecords output at your DNS provider first.\n" +
             "  • Or set smtp.from back to the Azure-managed sender (the emailSenderAddress output) to send immediately.",
         );
       }

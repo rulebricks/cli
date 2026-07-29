@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Box, Text } from "ink";
 import { useWizard } from "../WizardContext.js";
 import { useFieldFlow, FlowField, FlowController } from "../fieldFlow.js";
 import {
   BorderBox,
   CheckRows,
+  DiscoveredSelect,
   FieldError,
   StepFooter,
   TextField,
@@ -20,6 +21,11 @@ import {
 } from "../../../types/index.js";
 import { formatVersionDisplay } from "../../../lib/dockerHub.js";
 import { inferClusterCapabilities } from "../../../lib/kubernetes.js";
+import {
+  listAzureContainerRegistries,
+  acrHasRulebricksCacheRule,
+  AzureContainerRegistry,
+} from "../../../lib/cloudCli.js";
 
 interface VersionStepProps {
   onComplete: () => void;
@@ -186,6 +192,11 @@ export function VersionStep({
   const { state, dispatch } = useWizard();
   const [error, setError] = useState<string | null>(null);
   const [licenseKey, setLicenseKey] = useState(state.licenseKey || "");
+  // The registry offered by the image-source picker, and whether it carries
+  // the docker.io/rulebricks/* pull-through rule (drives the recommendation:
+  // pull-through only works when the rule exists; mirroring always works).
+  const acrRef = useRef<AzureContainerRegistry | null>(null);
+  const acrHasCacheRef = useRef(false);
 
   const fields: FlowField[] = [
     {
@@ -217,6 +228,87 @@ export function VersionStep({
     {
       id: "version",
       render: (flow) => <VersionPicker flow={flow} />,
+    },
+    {
+      // Optional: point every image at an Azure Container Registry instead of
+      // the Rulebricks Docker Hub repository. cluster-setup provisions one
+      // with a pull-through cache rule (images cache on first pull); mirror
+      // mode copies them in at deploy time instead, for registries without a
+      // rule or clusters whose nodes cannot reach Docker Hub.
+      id: "image-source",
+      when: () => state.provider === "azure",
+      render: (flow) => (
+        <DiscoveredSelect
+          label="Container image source"
+          hint="Where cluster nodes pull Rulebricks images from. Mirroring re-runs automatically when versions or the chart change."
+          loadingLabel="Looking for container registries..."
+          emptyHint="No Azure Container Registry found in this subscription."
+          manualLabel="Use the Rulebricks repository (docker.io)"
+          initialValue={
+            state.imageRegistry
+              ? state.imageRegistryMode || "pull-through"
+              : "docker"
+          }
+          preferRecommended={!state.configLoaded}
+          recommendIndex={(items) => {
+            if (!acrRef.current) return -1;
+            const recommended = acrHasCacheRef.current
+              ? "pull-through"
+              : "mirror";
+            return items.findIndex((item) => item.value === recommended);
+          }}
+          load={async () => {
+            const registries = await listAzureContainerRegistries();
+            const preferred =
+              registries.find(
+                (r) =>
+                  r.resourceGroup.toLowerCase() ===
+                  (state.azureResourceGroup || "").toLowerCase(),
+              ) ??
+              registries[0] ??
+              null;
+            acrRef.current = preferred;
+            acrHasCacheRef.current = preferred
+              ? await acrHasRulebricksCacheRule(preferred.name)
+              : false;
+            const items = [
+              { label: "Rulebricks repository (docker.io)", value: "docker" },
+            ];
+            if (preferred) {
+              items.push(
+                {
+                  label: `${preferred.loginServer} - pull-through cache${
+                    acrHasCacheRef.current ? "" : "  - no cache rule configured"
+                  }`,
+                  value: "pull-through",
+                },
+                {
+                  label: `${preferred.loginServer} - mirror all images into it`,
+                  value: "mirror",
+                },
+              );
+            }
+            return items;
+          }}
+          onSelect={(value) => {
+            if (value === "docker" || !acrRef.current) {
+              dispatch({ type: "SET_IMAGE_REGISTRY", registry: "", mode: "" });
+            } else {
+              dispatch({
+                type: "SET_IMAGE_REGISTRY",
+                registry: acrRef.current.loginServer,
+                mode: value === "mirror" ? "mirror" : "pull-through",
+              });
+            }
+            setError(null);
+            flow.next();
+          }}
+          onManual={() => {
+            dispatch({ type: "SET_IMAGE_REGISTRY", registry: "", mode: "" });
+            flow.next();
+          }}
+        />
+      ),
     },
   ];
 

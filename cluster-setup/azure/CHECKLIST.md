@@ -12,7 +12,11 @@ To deploy Rulebricks, your workflow will be:
  - Prepare the machine that will deploy the infrastructure and Rulebricks application.
    - Have the Azure CLI, the Rulebricks CLI, and helm installed
    - Know if you have a network path to the VNet (true/false)
- - Create a copy of, review, and configure the bicep parameters file, then deploy the cluster.
+ - Deploy `prerequisites.bicep` (DNS zone, external-dns identity, email
+   service), or by hand it to/request it from the team that controls DNS and
+   email at your organization. See steps 3 and 5.
+ - Create a copy of, review, and configure the bicep parameters file, then
+   deploy `main.bicep`.
  - Wait for all resources to be deployed successfully, debug any issues (permissions, quota, etc.)
  - Using the Rulebricks CLI, run `rulebricks init` to fully configure your Rulebricks instance.
  - Run `rulebricks deploy` to deploy the Rulebricks application.
@@ -48,15 +52,25 @@ network, the ranges must not overlap anything routable on that network.
 
 ## 3. DNS
 
-Rulebricks needs its own DNS subdomain delegated, e.g. `rb.mycorp.com`. The deployment
-creates an Azure DNS zone for it; your organization then points the parent
-domain at that zone once, and all records and TLS certificates are automatic
-afterward.
+Rulebricks needs its own DNS subdomain delegated, e.g. `rb.mycorp.com`.
+[prerequisites.bicep](prerequisites.bicep) creates an Azure DNS zone for it,
+plus the identity external-dns runs as (granted DNS Zone Contributor on that
+zone); your organization then points the parent domain at the zone once, and
+all records and TLS certificates are automatic afterward.
 
-- [ ] Decide the subdomain name. This becomes `dnsZoneName`.
+- [ ] Decide the subdomain name. This becomes `dnsZoneName` in both parameter
+      files.
+- [ ] Deploy the prerequisites - or, if creating DNS zones is gated at your
+      organization, hand `prerequisites.bicep` to the team that owns DNS. They
+      deploy it into any resource group they like with your Entra object ID in
+      `deployerPrincipalIds`, which grants you the read (and one
+      federated-credential write) access the main deployment needs there -
+      nothing else to request. You then set `prerequisitesResourceGroup` and
+      the values from their `mainDeploymentParameters` output in your
+      parameters file.
 - [ ] Identify who controls the parent domain's DNS and confirm they can add
-      NS records after you deploy (the name servers appear in the
-      `dnsZoneNameServers` deployment output).
+      NS records after the prerequisites deploy (the name servers appear in
+      its `dnsZoneNameServers` output).
 - [ ] If the parent domain publishes a CAA record, confirm it permits
       Let's Encrypt (`letsencrypt.org`).
 
@@ -101,9 +115,41 @@ afterward.
 - [ ] Rulebricks supports Azure Communication Services for email. An Entra app
       should be provisioned for this, with the app ID and client secret on
       hand.
-- [ ] Decide whether to also use a branded sender address:
-      pick a name under the subdomain from step 3 (nothing else is needed),
-      or keep the default azurecomm.net sender.
+- [ ] Decide the sender address: the Azure-managed `azurecomm.net` one, which
+      works as soon as the deployment finishes, or a branded address on a
+      domain you own (`DoNotReply@mycorp.com`).
+
+**Already have email?** If your organization gives you SMTP credentials from
+any provider (Exchange with SMTP AUTH, SES, SendGrid, Resend, ...), set
+`enableManagedEmail = false` and hand those credentials to `rulebricks init`
+instead. Nothing else in this section applies.
+
+### Branded sender
+
+Proving you own a domain is a DNS round-trip on Azure's schedule, which is why
+the email service and its domains live in the prerequisites deployment: verify
+once there, and the main deployment (and every redeploy) simply links the
+already-verified domain.
+
+- [ ] Set `emailSenderDomain` in the prerequisites parameters to a name under
+      the zone from step 3 (or the zone itself). The verification DNS records
+      are published into the zone automatically.
+- [ ] After the prerequisites deploy, run its
+      `emailInitiateVerificationCommands` outputs (four short `az` commands)
+      and wait until its `emailVerificationStatusCommand` reports all four
+      checks Verified - typically a couple of minutes. If a platform team ran
+      the prerequisites, this is theirs to run too.
+- [ ] Set `emailBrandedDomainName` to the same domain in the main parameters.
+      Branded email then works on the first run; if verification is still
+      pending when main deploys, the deployment does not fail - the
+      `azurecomm.net` sender works immediately and the Rulebricks CLI links
+      the branded domain automatically once verification lands.
+
+**Organization already runs ACS with a verified domain?** No new email service
+is needed: point `emailServiceName`, `emailServiceResourceGroup`, and
+`emailBrandedDomainName` in the main parameters at theirs (set
+`emailFallbackDomainName = ''` if that service has no Azure-managed domain).
+Linking only READS the domain, so Reader on it is all you need to ask for.
 
 ## 6. Component decisions
 
@@ -121,9 +167,18 @@ Confirm the defaults are what you want; each flips with one parameter:
 
 ## 8. Access and values to have on hand
 
-Whoever runs the deployment needs rights to create resources AND role
-assignments in the target resource group (Owner, or Contributor + User Access
+Whoever runs a deployment needs rights to create resources AND role
+assignments in its target resource group (Owner, or Contributor + User Access
 Administrator), plus permission to create an Entra app registration for email.
+Most privileged, org-gated pieces are in `prerequisites.bicep`.
+
+- **Prerequisites deployer** (you, or a platform team): Owner or
+  Contributor + User Access Administrator on the prerequisites resource group.
+- **Main deployer**: the same, but only on the workload resource group. When
+  the prerequisites live in a different resource group, the two grants the
+  main deployment needs there (Reader, plus federated-credential write on the
+  external-dns identity) are made automatically by listing your object ID in
+  the prerequisites' `deployerPrincipalIds`.
 
 These ensure you can authenticate to the cluster and seed secrets:
 
@@ -143,12 +198,17 @@ These need to be provisioned before deployment:
       and ID token issuance enabled; the default `User.Read` permission is
       sufficient. To create:
       `az ad app create --display-name "Rulebricks SSO" --sign-in-audience AzureADMyOrg --web-redirect-uris "https://supabase.<subdomain>/auth/v1/callback" --enable-id-token-issuance true`,
-      then `az ad app credential reset --id <appId>`.
+      then `az ad sp create --id <appId>` and `az ad app credential reset --id <appId>`.
+      The service principal is required: an app registration without one is not
+      a sign-in target, and SSO fails at login even though every other setting
+      looks correct. The redirect URI must match the deployment's subdomain
+      exactly - an app reused from an earlier deployment still carries the old
+      one, and the mismatch surfaces only as a redirect_uri error at Entra.
 
 These are provided by Rulebricks or generated by you:
 
 - [ ] `LICENSE_KEY` | your Rulebricks license key
 - [ ] `POSTGRES_ADMIN_PASSWORD` | a strong password for the managed
       PostgreSQL instance
-- [ ] Admin email | the Entra account email address that should have admin
+- [ ] Rulebricks admin email | the Entra account email address that should have admin
       privileges on the Rulebricks workspace.

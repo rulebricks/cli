@@ -146,14 +146,18 @@ param existingDataCollectionRuleResourceGroup string = ''
 param enableManagedGrafana bool = false
 param grafanaName string = take('rbgraf${take(uniqueString(resourceGroup().id), 6)}', 23)
 
+// The DNS zone, external-dns identity, and ACS email service are org-gated
+// and provisioned by prerequisites.bicep (run it first - same resource group
+// by default, or a platform team's own). This template only READS them, so
+// the deployer needs no write access to the prerequisites resource group.
+@description('Resource group of the prerequisites.bicep deployment. Empty = this resource group.')
+param prerequisitesResourceGroup string = ''
+
 param enableExternalDns bool = false
-@description('DNS zone for the deployment, e.g. rb.corp.com. With createDnsZone the template creates it and outputs the NS records for a one-time parent-domain delegation; otherwise it must already exist (see dnsZoneResourceGroup).')
+@description('The delegated DNS zone created by prerequisites.bicep, e.g. rb.corp.com. Required when enableExternalDns is true.')
 param dnsZoneName string = ''
-// Create the zone here (delegated-subdomain model) instead of requiring a
-// pre-existing zone. Ignored when enableExternalDns is false.
-param createDnsZone bool = true
-// Resource group of a PRE-EXISTING zone (createDnsZone=false only).
-param dnsZoneResourceGroup string = ''
+@description('Name of the external-dns identity created by prerequisites.bicep. Empty = the <clusterName>-external-dns convention.')
+param externalDnsIdentityName string = ''
 
 param enableKeyVaultIntegration bool = false
 param createKeyVault bool = true
@@ -231,19 +235,25 @@ param redisSkuName string = 'Balanced_B1'
 
 // Azure Communication Services Email: SMTP-compatible email for tenants where
 // Exchange Online basic-auth SMTP is retired (the app keeps plain SMTP config;
-// credentials come from an Entra app registration).
+// credentials come from an Entra app registration the Rulebricks CLI wires up
+// at deploy time - it grants the app access on the communication service
+// created here, the same model as SSO, so no app IDs are needed).
+// The email service and its verified sender domains are prerequisites; this
+// template creates the per-deployment communication service and links the
+// domains (a read on the domains, so they may live in a resource group the
+// deployer cannot modify).
 param enableManagedEmail bool = false
-// ACS data-at-rest region; independent of `location`.
+// ACS data-at-rest region; must match the email service's (prerequisites.bicep
+// emailDataLocation).
 param emailDataLocation string = 'United States'
-// SMTP authentication uses an Entra app the Rulebricks CLI wires up at deploy
-// time (it grants the app Contributor on the communication service) - the
-// same model as SSO. No app IDs are needed here.
-// Branded sender domain (e.g. rb.corp.com), normally the delegated DNS zone
-// or a subdomain of it - the verification records are then created in that
-// zone automatically. Empty = the Azure-managed azurecomm.net sender. After
-// the first deploy, run the emailInitiateVerificationCommands outputs, wait
-// for Verified, then rerun the same deployment - it links automatically.
-param emailCustomDomain string = ''
+@description('ACS email service created by prerequisites.bicep. Empty = the rbemail<hash> convention, which only resolves when prerequisites deployed into this same resource group with the same clusterName.')
+param emailServiceName string = ''
+@description('Resource group of the email service. Empty = prerequisitesResourceGroup. Set it only when the email service lives in yet another resource group (an organization-run messaging service).')
+param emailServiceResourceGroup string = ''
+@description('The always-verified Azure-managed fallback domain on the email service. Set \'\' when the service has none (an organization service carrying only its own verified domain).')
+param emailFallbackDomainName string = 'AzureManagedDomain'
+@description('Branded sender domain on the email service (prerequisites.bicep emailSenderDomain), e.g. rb.corp.com. Linked and used as the sender once its verification reads Verified; until then the fallback domain sends. Empty = fallback only.')
+param emailBrandedDomainName string = ''
 
 param enableManagedDatabase bool = false
 param postgresServerName string = '${toLower(clusterName)}-pg-${take(uniqueString(resourceGroup().id), 6)}'
@@ -269,7 +279,20 @@ param postgresHighAvailability bool = true
 @maxValue(35)
 param postgresBackupRetentionDays int = 7
 
-var effectiveDnsZoneResourceGroup = empty(dnsZoneResourceGroup) ? resourceGroup().name : dnsZoneResourceGroup
+var effectivePrerequisitesResourceGroup = empty(prerequisitesResourceGroup)
+  ? resourceGroup().name
+  : prerequisitesResourceGroup
+var effectiveExternalDnsIdentityName = empty(externalDnsIdentityName)
+  ? '${clusterName}-external-dns'
+  : externalDnsIdentityName
+// Mirrors prerequisites.bicep's derivation, so the default same-resource-group
+// flow needs no name handoff.
+var effectiveEmailServiceName = empty(emailServiceName)
+  ? take('rbemail${uniqueString(resourceGroup().id, clusterName)}', 63)
+  : emailServiceName
+var effectiveEmailServiceResourceGroup = empty(emailServiceResourceGroup)
+  ? effectivePrerequisitesResourceGroup
+  : emailServiceResourceGroup
 var effectiveStorageResourceGroup = empty(existingStorageAccountResourceGroup)
   ? resourceGroup().name
   : existingStorageAccountResourceGroup
@@ -344,31 +367,22 @@ module identity 'modules/identity.bicep' = {
     clusterName: clusterName
     location: location
     tags: resourceTags
-    enableExternalDns: enableExternalDns
     enableExternalSecrets: enableKeyVaultIntegration
   }
 }
 
-// Delegated-subdomain model: create the zone alongside the cluster and grant
-// the external-dns identity on it. The dnsZoneNameServers output feeds the
-// one-time NS delegation at the parent domain.
-module dnsZone 'modules/dns-zone.bicep' = if (enableExternalDns && createDnsZone) {
-  name: '${clusterName}-dns-zone'
-  params: {
-    dnsZoneName: dnsZoneName
-    tags: resourceTags
-    principalId: identity.outputs.externalDnsPrincipalId
-  }
+// The zone and the external-dns identity (with its zone-scoped grant) come
+// from prerequisites.bicep; read-only references here surface their outputs
+// (NS delegation records, the client ID the CLI binds) without needing any
+// write access to the prerequisites resource group.
+resource dnsZone 'Microsoft.Network/dnsZones@2018-05-01' existing = if (enableExternalDns) {
+  name: dnsZoneName
+  scope: resourceGroup(effectivePrerequisitesResourceGroup)
 }
 
-// Pre-existing zone (customer-owned): grant only.
-module externalDnsRole 'modules/dns-role.bicep' = if (enableExternalDns && !createDnsZone) {
-  name: '${clusterName}-external-dns-role'
-  scope: resourceGroup(effectiveDnsZoneResourceGroup)
-  params: {
-    dnsZoneName: dnsZoneName
-    principalId: identity.outputs.externalDnsPrincipalId
-  }
+resource externalDnsIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = if (enableExternalDns) {
+  name: effectiveExternalDnsIdentityName
+  scope: resourceGroup(effectivePrerequisitesResourceGroup)
 }
 
 module keyVault 'modules/key-vault.bicep' = if (enableKeyVaultIntegration && createKeyVault) {
@@ -517,14 +531,11 @@ module email 'modules/email.bicep' = if (enableManagedEmail) {
     clusterName: clusterName
     tags: resourceTags
     dataLocation: emailDataLocation
-    customDomain: emailCustomDomain
-    // Verification records can only be created here when this deployment
-    // owns the zone; BYO zones get the records via output instead.
-    dnsZoneName: (enableExternalDns && createDnsZone) ? dnsZoneName : ''
+    emailServiceName: effectiveEmailServiceName
+    emailServiceResourceGroup: effectiveEmailServiceResourceGroup
+    fallbackDomainName: emailFallbackDomainName
+    brandedDomainName: emailBrandedDomainName
   }
-  dependsOn: [
-    dnsZone
-  ]
 }
 
 module postgres 'modules/postgres.bicep' = if (enableManagedDatabase) {
@@ -585,13 +596,16 @@ output dataContainer string = storage.outputs.dataContainer
 // ----- DNS ------------------------------------------------------------------
 
 @description('Client ID of the external-dns identity; the CLI binds it so DNS records are managed automatically.')
-output externalDnsClientId string = identity.outputs.externalDnsClientId
+output externalDnsClientId string = enableExternalDns ? externalDnsIdentity!.properties.clientId : ''
 
 @description('The delegated DNS zone for this deployment (empty when external DNS is disabled).')
 output dnsZoneNameOut string = enableExternalDns ? dnsZoneName : ''
 
+@description('Resource group holding the DNS zone (the prerequisites deployment).')
+output dnsZoneResourceGroup string = enableExternalDns ? effectivePrerequisitesResourceGroup : ''
+
 @description('Hand these to whoever controls the parent domain: one NS record set for the zone delegating to them, and DNS is done forever - records and TLS certificates are automatic afterward.')
-output dnsZoneNameServers array = enableExternalDns && createDnsZone ? dnsZone!.outputs.nameServers : []
+output dnsZoneNameServers array = enableExternalDns ? dnsZone!.properties.nameServers : []
 
 // ----- Secrets (Key Vault) --------------------------------------------------
 
@@ -688,15 +702,8 @@ output emailSmtpPort int = enableManagedEmail ? email!.outputs.smtpPort : 0
 @description('ACS communication service name; the CLI uses it to assemble the SMTP username.')
 output emailAcsResourceName string = enableManagedEmail ? email!.outputs.acsResourceName : ''
 
-@description('Branded sender domain only: run these once, wait for Verified, then rerun this same deployment - it reads the verification state and links the domain automatically.')
-output emailInitiateVerificationCommands array = enableManagedEmail
-  ? email!.outputs.initiateVerificationCommands
-  : []
-
-@description('Verification DNS records to publish manually when the branded domain is hosted OUTSIDE the delegated zone.')
-output emailCustomDomainVerificationRecords object = enableManagedEmail
-  ? email!.outputs.customDomainVerificationRecords
-  : {}
+@description('False only while the branded sender domain has verification pending: finish it (see the prerequisites deployment outputs), then rerun this deployment - or let `rulebricks deploy` link it automatically.')
+output emailBrandedDomainLinked bool = enableManagedEmail ? email!.outputs.brandedDomainLinked : true
 
 // ----- Database (PostgreSQL Flexible Server, when managed) -------------------
 

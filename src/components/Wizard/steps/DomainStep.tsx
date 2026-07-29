@@ -115,10 +115,11 @@ export function DomainStep({
         ),
       ]);
       let identityPresent = false;
-      if (zone && state.clusterName && state.azureResourceGroup) {
+      if (zone && state.clusterName) {
+        // Subscription-wide: the prerequisites template may have placed the
+        // identity next to the zone in a platform resource group.
         identityPresent = await azureManagedIdentityExists(
           `${state.clusterName}-external-dns`,
-          state.azureResourceGroup,
         );
       }
       if (zone && identityPresent) {

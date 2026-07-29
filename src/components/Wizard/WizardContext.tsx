@@ -130,6 +130,7 @@ export interface WizardState {
   // Features - AI
   aiEnabled: boolean;
   openaiApiKey: string;
+  openaiBaseUrl: string;
 
   // Features - SSO
   ssoEnabled: boolean;
@@ -253,6 +254,11 @@ export interface WizardState {
   // Version - unified product version
   version: string;
 
+  // Image source: registry host override + how it stays populated
+  // ("" = the Rulebricks Docker Hub repository directly).
+  imageRegistry: string;
+  imageRegistryMode: "" | "pull-through" | "mirror";
+
   // Legacy chart version (deprecated)
   chartVersion: string;
 }
@@ -326,6 +332,7 @@ type WizardAction =
     }
   | { type: "SET_AI_ENABLED"; enabled: boolean }
   | { type: "SET_OPENAI_KEY"; key: string }
+  | { type: "SET_OPENAI_BASE_URL"; url: string }
   | { type: "SET_SSO_ENABLED"; enabled: boolean }
   | {
       type: "SET_SSO_CONFIG";
@@ -500,7 +507,12 @@ type WizardAction =
   | { type: "SET_EMAIL_TEMPLATES"; templates: Partial<EmailTemplates> }
   | { type: "SET_LICENSE_KEY"; key: string }
   | { type: "SET_VERSION"; version: string }
-  | { type: "SET_CHART_VERSION"; version: string };
+  | { type: "SET_CHART_VERSION"; version: string }
+  | {
+      type: "SET_IMAGE_REGISTRY";
+      registry: string;
+      mode: "" | "pull-through" | "mirror";
+    };
 
 /**
  * Creates the initial wizard state, optionally pre-populated from a user profile.
@@ -604,6 +616,7 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     // Features - AI - pre-populate from profile
     aiEnabled: !!profile?.openaiApiKey,
     openaiApiKey: profile?.openaiApiKey ?? "",
+    openaiBaseUrl: profile?.openaiBaseUrl ?? "",
 
     // Features - SSO - pre-populate from profile
     ssoEnabled: !!profile?.ssoProvider,
@@ -724,6 +737,10 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     // Version
     version: "",
     chartVersion: "",
+
+    // Image source
+    imageRegistry: "",
+    imageRegistryMode: "",
   };
 }
 
@@ -1334,6 +1351,7 @@ export function configToWizardState(
       config.secrets?.byo?.storeKind ?? base.secretsByoStoreKind,
     aiEnabled: config.features.ai.enabled,
     openaiApiKey: config.features.ai.openaiApiKey ?? "",
+    openaiBaseUrl: config.features.ai.openaiBaseUrl ?? "",
     ssoEnabled: config.features.sso.enabled,
     ssoProvider: config.features.sso.provider ?? null,
     ssoUrl: config.features.sso.url ?? "",
@@ -1504,6 +1522,8 @@ export function configToWizardState(
     licenseKey: config.licenseKey,
     version: config.version,
     chartVersion: config.chartVersion ?? "",
+    imageRegistry: config.imageRegistry ?? "",
+    imageRegistryMode: config.imageRegistryMode ?? "",
   };
 }
 
@@ -1650,6 +1670,8 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, aiEnabled: action.enabled };
     case "SET_OPENAI_KEY":
       return { ...state, openaiApiKey: action.key };
+    case "SET_OPENAI_BASE_URL":
+      return { ...state, openaiBaseUrl: action.url };
     case "SET_SSO_ENABLED":
       return { ...state, ssoEnabled: action.enabled };
     case "SET_SSO_CONFIG":
@@ -1737,6 +1759,12 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return {
         ...state,
         version: action.version,
+      };
+    case "SET_IMAGE_REGISTRY":
+      return {
+        ...state,
+        imageRegistry: action.registry,
+        imageRegistryMode: action.mode,
       };
     case "SET_CHART_VERSION":
       return { ...state, chartVersion: action.version };
@@ -1987,6 +2015,7 @@ export function WizardProvider({
         ai: {
           enabled: state.aiEnabled,
           openaiApiKey: state.openaiApiKey || undefined,
+          openaiBaseUrl: state.openaiBaseUrl || undefined,
         },
         sso: {
           enabled: state.ssoEnabled,
@@ -2148,6 +2177,14 @@ export function WizardProvider({
       licenseKey: state.licenseKey,
       version: state.version,
       chartVersion: state.chartVersion || undefined,
+      ...(state.imageRegistry
+        ? {
+            imageRegistry: state.imageRegistry,
+            ...(state.imageRegistryMode
+              ? { imageRegistryMode: state.imageRegistryMode }
+              : {}),
+          }
+        : {}),
     };
   };
 

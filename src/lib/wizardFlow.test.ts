@@ -331,6 +331,13 @@ function featureState(
 
 const needsNone = featureState().needs;
 
+test("AI collects the API key and optional base URL in one consolidated field", () => {
+  const order = featureConfigFieldOrder(
+    featureState({ needs: { ...needsNone, ai: true } }),
+  );
+  assert.deepEqual(order, ["openai-config"]);
+});
+
 test("google SSO skips the provider URL prompt", () => {
   const order = featureConfigFieldOrder(
     featureState({ needs: { ...needsNone, sso: true }, ssoProvider: "google" }),
@@ -523,7 +530,7 @@ test("sections run in AI, SSO, monitoring, logging, tracing, app-logs, valkey, e
     }),
   );
   const anchors = [
-    "openai-key",
+    "openai-config",
     "sso-provider",
     "monitoring-destination",
     "logging-sink",

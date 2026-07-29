@@ -27,6 +27,7 @@ import {
   generateHelmValuesPreservingEdits,
 } from "../lib/helmValues.js";
 import { resolveImageCatalog } from "../lib/imageCatalog.js";
+import { mirrorImagesToAcr, planAcrImports } from "../lib/cloudCli.js";
 import { ensureNamespace, applyDeploymentSecrets } from "../lib/secrets.js";
 import { setupExternalSecrets } from "../lib/eso.js";
 import { secretModeForConfig } from "../lib/deploySequence.js";
@@ -162,6 +163,29 @@ function ChartUpgradeCommandInner({
       // that chart is incompatible with this CLI; generation then validates
       // the merged values against the chart schema before helm ever runs.
       const images = await resolveImageCatalog(target.version);
+
+      // Mirrored registry: the target chart's manifest carries new image
+      // pins (tags and digests); re-mirror them into the registry before the
+      // upgrade rolls pods to references that would otherwise not exist
+      // there. Already-mirrored pins are skipped.
+      if (
+        cfg.imageRegistryMode === "mirror" &&
+        cfg.imageRegistry &&
+        cfg.infrastructure.provider === "azure"
+      ) {
+        const mirror = await mirrorImagesToAcr(
+          cfg.imageRegistry.split(".")[0],
+          cfg.licenseKey,
+          planAcrImports(images.entries()),
+        );
+        if (mirror.failed.length > 0) {
+          throw new Error(
+            `Mirroring chart ${target.version} image pins into ${cfg.imageRegistry} failed for:\n` +
+              mirror.failed.map((ref) => `  - ${ref}`).join("\n"),
+          );
+        }
+      }
+
       await generateHelmValuesPreservingEdits(cfg, {
         tlsEnabled,
         secretMode: secretModeForConfig(cfg),

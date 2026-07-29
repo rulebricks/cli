@@ -397,6 +397,7 @@ export function extractProfileFromConfig(
 
     // API Keys
     openaiApiKey: config.features.ai.openaiApiKey,
+    openaiBaseUrl: config.features.ai.openaiBaseUrl,
     licenseKey: config.licenseKey,
 
     // Preferences

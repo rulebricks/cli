@@ -171,7 +171,11 @@ function build(options: MatrixOptions): DeploymentConfig {
         : undefined,
     features: {
       ai: options.ai
-        ? { enabled: true, openaiApiKey: "sk-test-openai-key" }
+        ? {
+            enabled: true,
+            openaiApiKey: "sk-test-openai-key",
+            openaiBaseUrl: "https://openai-gw.example.com/v1",
+          }
         : { enabled: false },
       sso: options.sso
         ? {

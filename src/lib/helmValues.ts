@@ -145,6 +145,10 @@ const VECTOR_NORMALIZE_LOGS_VRL = [
   ".error = to_string(.error) ?? null",
   ".trace_id = to_string(.trace_id) ?? null",
   ".span_id = to_string(.span_id) ?? null",
+  // Internal-only unique record id (ORDER BY tiebreaker / dedup key).
+  // Minted by HPS at produce time; generated here for legacy producers.
+  ".log_id = to_string(.log_id) ?? uuid_v4()",
+  ".path_trace = to_string(.path_trace) ?? null",
   '.request = to_string(.request) ?? "null"',
   '.response = to_string(.response) ?? "null"',
   '.decision = to_string(.decision) ?? "{}"',
@@ -1960,6 +1964,11 @@ export function buildHelmValues(
         openaiApiKey: config.features.ai.enabled
           ? config.features.ai.openaiApiKey
           : undefined,
+        // Non-secret: survives secret redaction and lands in the app
+        // ConfigMap as OPENAI_BASE_URL. Empty means OpenAI's public API.
+        openaiBaseUrl: config.features.ai.enabled
+          ? config.features.ai.openaiBaseUrl || undefined
+          : undefined,
       },
 
       // SSO configuration
@@ -2203,9 +2212,27 @@ export function buildHelmValues(
     },
 
     // Strimzi operator: pull secret so the operator pod pulls the private
-    // rulebricks/* image from index.docker.io.
+    // rulebricks/* image from index.docker.io. Strimzi does NOT read the
+    // parent global.imageRegistry (see the chart values comment), so a
+    // registry override is rewritten into every one of its native image
+    // keys: the parent chart pins each component's image.registry to
+    // docker.io, and those per-component pins beat defaultImageRegistry in
+    // strimzi's env templates, so defaultImageRegistry alone moves nothing.
     "strimzi-kafka-operator": {
-      image: { imagePullSecrets: rulebricksPullSecret },
+      image: {
+        imagePullSecrets: rulebricksPullSecret,
+        ...(config.imageRegistry ? { registry: config.imageRegistry } : {}),
+      },
+      ...(config.imageRegistry
+        ? {
+            defaultImageRegistry: config.imageRegistry,
+            topicOperator: { image: { registry: config.imageRegistry } },
+            userOperator: { image: { registry: config.imageRegistry } },
+            kafkaInit: { image: { registry: config.imageRegistry } },
+            kafka: { image: { registry: config.imageRegistry } },
+            kafkaConnect: { image: { registry: config.imageRegistry } },
+          }
+        : {}),
     },
 
     // =============================================================================
@@ -2241,10 +2268,30 @@ export function buildHelmValues(
             requests: { cpu: "500m", memory: "2Gi" },
             limits: { cpu: "2", memory: "6Gi" },
           },
+      // AKS workload identity: ClickHouse reads the decision-log archive
+      // straight from Blob storage (the named-collection views), so like
+      // Vector it needs the webhook-injected credentials - SA annotation plus
+      // pod label. The federated credential on the storage identity is
+      // created by deploy (plannedBindings includes the clickhouse SA); on
+      // AWS/GCP the control-plane association alone suffices, which is why
+      // only Azure needs pod-level wiring here.
       serviceAccount: {
         create: true,
-        annotations: {},
+        annotations:
+          config.storage?.provider === "azure-blob" &&
+          config.storage.cloudAuthMode !== "secret" &&
+          config.storage.azureBlobClientId
+            ? {
+                "azure.workload.identity/client-id":
+                  config.storage.azureBlobClientId,
+              }
+            : {},
       },
+      ...(config.storage?.provider === "azure-blob" &&
+      config.storage.cloudAuthMode !== "secret" &&
+      config.storage.azureBlobClientId
+        ? { podLabels: { "azure.workload.identity/use": "true" } }
+        : {}),
       metrics: {
         enabled: true,
         serviceMonitor: {

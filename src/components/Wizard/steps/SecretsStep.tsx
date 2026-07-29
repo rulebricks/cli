@@ -24,6 +24,7 @@ import { listSecretStores } from "../../../lib/eso.js";
 import {
   findClusterSetupDefaultIndex,
   isAwsInfrastructureRoleName,
+  sortRelevantFirst,
 } from "../../../lib/clusterSetupDefaults.js";
 
 interface SecretsStepProps {
@@ -102,7 +103,7 @@ export function SecretsStep({
   const [byoStore, setByoStore] = useState(state.secretsByoStoreName || "");
   const [byoManual, setByoManual] = useState(false);
 
-  // Same relevance narrowing the storage step uses for cluster-setup resources.
+  // Same relevance ordering the storage step uses for cluster-setup resources.
   const relevantToRulebricks = (name: string): boolean => {
     const n = name.toLowerCase();
     const clusterName = (state.clusterName || "").toLowerCase();
@@ -184,8 +185,9 @@ export function SecretsStep({
             const roles = (await listIamRoles()).filter(
               (r) => !isAwsInfrastructureRoleName(r.name),
             );
-            const narrowed = roles.filter((r) => relevantToRulebricks(r.name));
-            return (narrowed.length > 0 ? narrowed : roles).map((r) => ({
+            return sortRelevantFirst(roles, (r) =>
+              relevantToRulebricks(r.name),
+            ).map((r) => ({
               label: r.name,
               value: r.arn,
             }));
@@ -376,10 +378,9 @@ export function SecretsStep({
           emptyHint="None found. Press R to refresh or enter an email manually."
           load={async () => {
             const accounts = await listGcpServiceAccounts();
-            const narrowed = accounts.filter((a) =>
+            return sortRelevantFirst(accounts, (a) =>
               relevantToRulebricks(a.email),
-            );
-            return (narrowed.length > 0 ? narrowed : accounts).map((a) => ({
+            ).map((a) => ({
               label: a.email,
               value: a.email,
             }));

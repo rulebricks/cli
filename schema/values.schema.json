@@ -202,7 +202,11 @@
           "description": "AI Features Configuration",
           "properties": {
             "enabled": { "type": "boolean" },
-            "openaiApiKey": { "type": "string" }
+            "openaiApiKey": { "type": "string" },
+            "openaiBaseUrl": {
+              "type": "string",
+              "description": "Optional OpenAI-compatible API base URL (defaults to OpenAI's public API when empty)"
+            }
           }
         },
         "secrets": {
