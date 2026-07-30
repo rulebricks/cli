@@ -3,17 +3,21 @@
 To deploy Rulebricks, your workflow will be:
 
  - Go through this checklist, please ensure you have any required resources provisioned.
-   - **Delegated DNS subdomain** (e.g. `rb.mycorp.com`)
+   - **Delegated DNS subdomain** (e.g. `rb.mycorp.com`) and parent-domain NS
+     delegation capability
    - **Approved IP ranges** (VNet address space and subnets)
-   - **Entra app for email** (Client ID and client secret)
-   - **Entra app for SSO** (Client ID and client secret)
-   - **TLS certificates** (Only if your organization issues its own)
-   - **Rulebricks license key** (Request from Rulebricks)
+   - **Owner** (or Contributor + User Access Administrator) on the workload
+     resource group
+   - **Entra app for email** (client ID and client secret), or BYO SMTP
+     credentials
+   - **Entra app for SSO** (optional: client ID, client secret, and tenant ID)
+   - **TLS certificates** (only if your organization issues its own)
+   - **Rulebricks license key** (request from Rulebricks)
  - Prepare the machine that will deploy the infrastructure and Rulebricks application.
    - Have the Azure CLI, the Rulebricks CLI, and helm installed
-   - Know if you have a network path to the VNet (true/false)
+   - Confirm whether that machine can reach the VNet (VPN, peering, or jump host)
  - Deploy `prerequisites.bicep` (DNS zone, external-dns identity, email
-   service), or by hand it to/request it from the team that controls DNS and
+   service), or hand it to / request it from the team that controls DNS and
    email at your organization. See steps 3 and 5.
  - Create a copy of, review, and configure the bicep parameters file, then
    deploy `main.bicep`.
@@ -26,8 +30,14 @@ This checklist continues with what to confirm you have on hand before deploying 
 ## 1. Region and capacity
 
 - [ ] Pick a region.
-- [ ] Ensure vCPU quota for the node SKUs there: the defaults (Dasv6 family) need
-      16-34 vCPUs at launch, 94 at full autoscale (configurable).
+- [ ] Ensure vCPU / memory / disk quota for the node SKUs there: the defaults
+      (Dasv6 family) need ~38 vCPUs and ~152 GiB RAM at launch. Chart request
+      floor is ~10 vCPU / ~23 GiB on the core pool, plus a warm worker fleet
+      (28 × 500m CPU / 1Gi) and HPS gather (4 × 1 CPU / 1Gi). PVC baselines:
+      Kafka 50Gi, ClickHouse 100Gi (plus Redis 4Gi, Prometheus 50Gi); node OS
+      disks default to 64 GiB each. Lower capacity can work if you reduce
+      `rulebricks.hps.keda.minReplicaCount` and
+      `rulebricks.hps.workers.keda.minReplicaCount` in Helm values.
       Check: `az vm list-usage --location <region> -o table`
 - [ ] PostgreSQL Flexible Server is available to your subscription there.
       Check: `az postgres flexible-server list-skus --location <region>`
@@ -94,8 +104,8 @@ all records and TLS certificates are automatic afterward.
    - [ ] `valkey.<sub>` | only if the optional Valkey admin UI is enabled
 
    One wildcard certificate covering `<sub>` and `*.<sub>` works for all of
-   them; otherwise four individual certificates. 
-   
+   them; otherwise one certificate per hostname you enable.
+
    **It will also be useful to know if the issuing CA is publicly trusted, or
     a private/corporate CA.** Both are supported.
 
@@ -112,8 +122,8 @@ all records and TLS certificates are automatic afterward.
 ## 5. Email / SMTP
 
 - [ ] Email is required for Rulebricks to function.
-- [ ] Rulebricks supports Azure Communication Services for email. An Entra app
-      should be provisioned for this, with the app ID and client secret on
+- [ ] Rulebricks supports Azure Communication Services for email. For that
+      path, provision an Entra app and have its app ID and client secret on
       hand.
 - [ ] Decide the sender address: the Azure-managed `azurecomm.net` one, which
       works as soon as the deployment finishes, or a branded address on a
@@ -134,7 +144,7 @@ already-verified domain.
 - [ ] Set `emailSenderDomain` in the prerequisites parameters to a name under
       the zone from step 3 (or the zone itself). The verification DNS records
       are published into the zone automatically.
-- [ ] After the prerequisites deploy, run its
+- [ ] After the prerequisites deploy and NS delegation is live, run its
       `emailInitiateVerificationCommands` outputs (four short `az` commands)
       and wait until its `emailVerificationStatusCommand` reports all four
       checks Verified - typically a couple of minutes. If a platform team ran
@@ -169,8 +179,7 @@ Confirm the defaults are what you want; each flips with one parameter:
 
 Whoever runs a deployment needs rights to create resources AND role
 assignments in its target resource group (Owner, or Contributor + User Access
-Administrator), plus permission to create an Entra app registration for email.
-Most privileged, org-gated pieces are in `prerequisites.bicep`.
+Administrator). Most privileged, org-gated pieces are in `prerequisites.bicep`.
 
 - **Prerequisites deployer** (you, or a platform team): Owner or
   Contributor + User Access Administrator on the prerequisites resource group.
@@ -186,29 +195,30 @@ These ensure you can authenticate to the cluster and seed secrets:
 - [ ] `keyVaultWriterPrincipalIds` | Entra object IDs allowed to seed secrets
       (include whoever runs the Rulebricks deploy)
 
-These need to be provisioned before deployment:
+For the ACS email path, provision before deployment:
 
 - [ ] An Entra app for email: `az ad app create --display-name "Rulebricks SMTP"`
       then `az ad sp create --id <appId>` and `az ad app credential reset`.
       The CLI takes the app's client ID (`<appId>`) and its client secret
       (`<clientSecret>`), and grants the app access to the email service
       during deploy.
-- [ ] An Entra app for SSO. Have on hand: its client ID, a client secret, and your tenant ID. The app needs one web
-      redirect URI - `https://supabase.<subdomain-from-step-3>/auth/v1/callback`, 
-      and ID token issuance enabled; the default `User.Read` permission is
-      sufficient. To create:
+
+Optional, only if enabling Entra SSO:
+
+- [ ] An Entra app for SSO. Have on hand: its client ID, a client secret, and
+      your tenant ID. The app needs one web redirect URI -
+      `https://supabase.<subdomain-from-step-3>/auth/v1/callback` - and ID
+      token issuance enabled; the default `User.Read` permission is
+      sufficient. Create the app and its service principal (required for
+      sign-in), and keep the redirect URI exact for this deployment's
+      subdomain:
       `az ad app create --display-name "Rulebricks SSO" --sign-in-audience AzureADMyOrg --web-redirect-uris "https://supabase.<subdomain>/auth/v1/callback" --enable-id-token-issuance true`,
       then `az ad sp create --id <appId>` and `az ad app credential reset --id <appId>`.
-      The service principal is required: an app registration without one is not
-      a sign-in target, and SSO fails at login even though every other setting
-      looks correct. The redirect URI must match the deployment's subdomain
-      exactly - an app reused from an earlier deployment still carries the old
-      one, and the mismatch surfaces only as a redirect_uri error at Entra.
 
 These are provided by Rulebricks or generated by you:
 
 - [ ] `LICENSE_KEY` | your Rulebricks license key
 - [ ] `POSTGRES_ADMIN_PASSWORD` | a strong password for the managed
       PostgreSQL instance
-- [ ] Rulebricks admin email | the Entra account email address that should have admin
+- [ ] Rulebricks admin email | the email address that should have admin
       privileges on the Rulebricks workspace.
