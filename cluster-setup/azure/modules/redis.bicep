@@ -1,7 +1,6 @@
 // Azure Managed Redis uses TLS on port 10000. EnterpriseCluster preserves the
 // single-endpoint client behavior expected by the chart.
 
-param clusterName string
 param location string
 param tags object
 
@@ -15,9 +14,11 @@ param skuName string = 'Balanced_B1'
 param enablePrivateEndpoint bool
 
 param privateEndpointsSubnetId string
-param vnetId string
+@description('Attach the endpoint to an organization-owned private DNS zone. False leaves registration to Azure Policy.')
+param createPrivateDnsZoneGroup bool = false
+param privateDnsZoneId string = ''
 
-resource redis 'Microsoft.Cache/redisEnterprise@2025-04-01' = {
+resource redis 'Microsoft.Cache/redisEnterprise@2025-07-01' = {
   name: redisName
   location: location
   tags: tags
@@ -26,6 +27,7 @@ resource redis 'Microsoft.Cache/redisEnterprise@2025-04-01' = {
   }
   properties: {
     minimumTlsVersion: '1.2'
+    publicNetworkAccess: enablePrivateEndpoint ? 'Disabled' : 'Enabled'
   }
 }
 
@@ -40,24 +42,6 @@ resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-04-01' = 
     persistence: {
       aofEnabled: false
       rdbEnabled: false
-    }
-  }
-}
-
-resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (enablePrivateEndpoint) {
-  name: 'privatelink.redis.azure.net'
-  location: 'global'
-  tags: tags
-}
-
-resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (enablePrivateEndpoint) {
-  parent: privateDnsZone
-  name: '${clusterName}-redis'
-  location: 'global'
-  properties: {
-    registrationEnabled: false
-    virtualNetwork: {
-      id: vnetId
     }
   }
 }
@@ -84,7 +68,7 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (e
   }
 }
 
-resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (enablePrivateEndpoint) {
+resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (enablePrivateEndpoint && createPrivateDnsZoneGroup) {
   parent: privateEndpoint
   name: 'default'
   properties: {
@@ -92,7 +76,7 @@ resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGr
       {
         name: 'redis'
         properties: {
-          privateDnsZoneId: privateDnsZone!.id
+          privateDnsZoneId: privateDnsZoneId
         }
       }
     ]

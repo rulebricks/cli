@@ -232,6 +232,8 @@ interface SubjectBinding {
   serviceAccount: string;
   // The cloud principal backing this SA: azure UAMI clientId, AWS role ARN, or GCP SA email.
   principal: string;
+  /** Exact Azure UAMI ID when the identity lives outside the active subscription. */
+  resourceId?: string;
 }
 
 /**
@@ -470,6 +472,17 @@ export async function deriveConventionalAwsExternalDnsRole(
 export async function deriveConventionalAzureExternalDnsClientId(
   config: DeploymentConfig,
 ): Promise<string | undefined> {
+  const exactIdentityId =
+    config.infrastructure.azureExternalDnsIdentityId;
+  if (exactIdentityId) {
+    const result = await run(
+      `az identity show --ids ${shq(exactIdentityId)} --query clientId --output tsv`,
+      { intent: "Configure workload identity (Azure)", provider: "azure" },
+    );
+    if (result.code === 0 && result.stdout.trim()) {
+      return result.stdout.trim();
+    }
+  }
   return deriveConventionalAzureIdentityClientId(config, "external-dns");
 }
 
@@ -635,7 +648,16 @@ export async function ensureWorkloadIdentityFederation(
   if (provider === "azure" && wantsManagedDns(config, "azure")) {
     const dnsClientId = await deriveConventionalAzureExternalDnsClientId(config);
     if (dnsClientId) {
-      bindings.push({ serviceAccount: "external-dns", principal: dnsClientId });
+      bindings.push({
+        serviceAccount: "external-dns",
+        principal: dnsClientId,
+        ...(config.infrastructure.azureExternalDnsIdentityId
+          ? {
+              resourceId:
+                config.infrastructure.azureExternalDnsIdentityId,
+            }
+          : {}),
+      });
     }
   }
 
@@ -891,12 +913,25 @@ async function removeAzure(
   const removed: string[] = [];
   const identityByClientId = new Map<
     string,
-    { name: string; resourceGroup: string } | null
+    { name: string; resourceGroup: string; subscriptionId?: string } | null
   >();
 
   for (const binding of bindings) {
     const clientId = binding.principal;
     let identity = identityByClientId.get(clientId);
+    if (identity === undefined && binding.resourceId) {
+      const exact = binding.resourceId.match(
+        /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.ManagedIdentity\/userAssignedIdentities\/([^/]+)$/i,
+      );
+      if (exact) {
+        identity = {
+          subscriptionId: exact[1],
+          resourceGroup: exact[2],
+          name: exact[3],
+        };
+        identityByClientId.set(clientId, identity);
+      }
+    }
     if (identity === undefined) {
       const lookupRes = await run(
         `az identity list --query "[?clientId=='${clientId}'].{name: name, resourceGroup: resourceGroup} | [0]" --output json`,
@@ -922,7 +957,8 @@ async function removeAzure(
     const ficName = `${namespace}-${binding.serviceAccount}`.slice(0, 120);
     const deleteRes = await run(
       `az identity federated-credential delete --name ${shq(ficName)} ` +
-        `--identity-name ${shq(identity.name)} --resource-group ${shq(identity.resourceGroup)}`,
+        `--identity-name ${shq(identity.name)} --resource-group ${shq(identity.resourceGroup)}` +
+        `${identity.subscriptionId ? ` --subscription ${shq(identity.subscriptionId)}` : ""}`,
       { intent, provider: "azure", mutating: true },
     );
     if (deleteRes.code === 0) {
@@ -1040,6 +1076,7 @@ async function ensureAzure(
   interface ResolvedIdentity {
     name: string;
     resourceGroup: string;
+    subscriptionId?: string;
   }
   const identityByClientId = new Map<string, ResolvedIdentity>();
   // clientIds whose lookup was refused by RBAC: skip repeat lookups and
@@ -1056,6 +1093,19 @@ async function ensureAzure(
     const ficName = `${namespace}-${binding.serviceAccount}`.slice(0, 120);
 
     let identity = identityByClientId.get(clientId);
+    if (!identity && binding.resourceId) {
+      const exact = binding.resourceId.match(
+        /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.ManagedIdentity\/userAssignedIdentities\/([^/]+)$/i,
+      );
+      if (exact) {
+        identity = {
+          subscriptionId: exact[1],
+          resourceGroup: exact[2],
+          name: exact[3],
+        };
+        identityByClientId.set(clientId, identity);
+      }
+    }
     if (!identity && !lookupDenied.has(clientId)) {
       const lookupRes = await run(
         `az identity list --query "[?clientId=='${clientId}'].{name: name, resourceGroup: resourceGroup} | [0]" --output json`,
@@ -1094,7 +1144,7 @@ async function ensureAzure(
     }
 
     const listRes = await run(
-      `az identity federated-credential list --identity-name ${shq(identity.name)} --resource-group ${shq(identity.resourceGroup)} --query "[?subject=='${subject}'] | length(@)" --output tsv`,
+      `az identity federated-credential list --identity-name ${shq(identity.name)} --resource-group ${shq(identity.resourceGroup)}${identity.subscriptionId ? ` --subscription ${shq(identity.subscriptionId)}` : ""} --query "[?subject=='${subject}'] | length(@)" --output tsv`,
       { intent, provider: "azure" },
     );
     if (listRes.stdout.trim() !== "0" && listRes.stdout.trim() !== "") {
@@ -1105,6 +1155,7 @@ async function ensureAzure(
     const createCommand =
       `az identity federated-credential create --name ${shq(ficName)} ` +
       `--identity-name ${shq(identity.name)} --resource-group ${shq(identity.resourceGroup)} ` +
+      `${identity.subscriptionId ? `--subscription ${shq(identity.subscriptionId)} ` : ""}` +
       `--issuer ${shq(issuer)} --subject ${shq(subject)} ` +
       `--audiences api://AzureADTokenExchange`;
     const createRes = await run(createCommand, {

@@ -250,8 +250,9 @@ export const SMTP_PROVIDERS = {
   // Azure Communication Services Email: Microsoft's replacement for retired
   // Exchange Online basic-auth SMTP. Username is
   // <acs-resource>.<entra-app-client-id>.<tenant-id>; password is the Entra
-  // app's client secret. Provision via cluster-setup enableManagedEmail (the
-  // emailSmtp* deployment outputs carry these values).
+  // app's client secret. Provision via cluster-setup createAcsEmail in
+  // prerequisites.bicep, or point at an ACS resource the organization already
+  // runs (the emailSmtp* deployment outputs carry these values).
   "azure-acs": { host: "smtp.azurecomm.net", port: 587, user: "" },
   custom: { host: "", port: 587, user: "" },
 };
@@ -717,6 +718,8 @@ export const DeploymentConfigSchema = z.object({
     clusterName: z.string().optional(),
     gcpProjectId: z.string().optional(),
     azureResourceGroup: z.string().optional(),
+    azureDnsZoneId: z.string().optional(),
+    azureExternalDnsIdentityId: z.string().optional(),
     nodeArchitecture: z
       .enum(["amd64", "arm64", "mixed", "unknown"])
       .optional(),
@@ -811,6 +814,13 @@ export const DeploymentConfigSchema = z.object({
     pass: z.string().min(1),
     from: z.string().email(),
     fromName: z.string().min(1),
+    azure: z
+      .object({
+        communicationServiceId: z.string().min(1),
+        entraApplicationId: z.string().uuid(),
+        tenantId: z.string().uuid().optional(),
+      })
+      .optional(),
   }),
 
   // Database
@@ -1162,17 +1172,18 @@ export const DeploymentConfigSchema = z.object({
   // global.imageRegistry and into each Tier-2 chart's native image keys, keeping
   // the rulebricks/<name> path. See the helm chart's global.imageRegistry knob.
   imageRegistry: z.string().optional(),
+  /** Full Azure resource ID used for cross-subscription ACR operations. */
+  imageRegistryResourceId: z.string().optional(),
 
   // How imageRegistry is kept populated (Azure ACR):
-  //   "pull-through" - the registry's cache rule fetches docker.io/rulebricks/*
-  //     on first pull; nothing for the CLI to do beyond pointing images at it.
-  //   "mirror" - the CLI copies every image (the chart manifest's pins plus
-  //     the app/hps images for the selected version) into the registry with
-  //     `az acr import` at deploy time, and again on version or chart
-  //     upgrades. For registries without pull-through (Basic/Standard ACR) or
-  //     policies that forbid on-demand egress.
+  //   "mirror" - full mirror: the CLI copies every image (the chart
+  //     manifest's pins plus the app/hps images for the selected version)
+  //     AND the helm chart itself into the registry with `az acr import`
+  //     at deploy time, and again on version or chart upgrades. Helm
+  //     install/upgrade/dry-run then pull the chart from the registry
+  //     (oci://<registry>/rulebricks/helm/stack) instead of ghcr.io.
   // Unset with imageRegistry set = a registry populated outside the CLI.
-  imageRegistryMode: z.enum(["pull-through", "mirror"]).optional(),
+  imageRegistryMode: z.enum(["mirror"]).optional(),
 
   // Legacy chart version (deprecated, kept for backwards compatibility)
   chartVersion: z.string().optional(),
@@ -1325,6 +1336,12 @@ export type ProfileConfig = z.infer<typeof ProfileConfigSchema>;
 // Constants
 export const CHANGELOG_URL = "https://rulebricks.com/docs/changelog";
 export const HELM_CHART_OCI = "oci://ghcr.io/rulebricks/helm/stack";
+// The same chart as a bare source ref for `az acr import` (no oci:// scheme).
+export const HELM_CHART_OCI_SOURCE = HELM_CHART_OCI.replace(/^oci:\/\//, "");
+// Repository path the chart is mirrored to inside a customer registry
+// (imageRegistryMode "mirror"); the mirrored chart ref is
+// oci://<registry>/<MIRRORED_CHART_REPOSITORY>.
+export const MIRRORED_CHART_REPOSITORY = "rulebricks/helm/stack";
 
 // Legacy namespace/release name - kept for backwards compatibility with existing deployments
 export const DEFAULT_NAMESPACE = "rulebricks";

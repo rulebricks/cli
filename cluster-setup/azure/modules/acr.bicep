@@ -1,4 +1,3 @@
-param clusterName string
 param location string
 param tags object
 
@@ -7,43 +6,34 @@ param registryName string
 
 @description('ACR SKU.')
 @allowed(['Basic', 'Standard', 'Premium'])
-param skuName string = 'Premium'
+param skuName string = 'Standard'
 
 @description('Object ID of the AKS kubelet identity.')
 param kubeletIdentityObjectId string
 
+// False defers AcrPull to a platform owner using main.bicep principalIds.
+param assignRoles bool = false
+param importerPrincipalIds array = []
+param importerPrincipalType string = 'User'
+param assignImporterRole bool = false
+
 @description('Use a private endpoint for registry access.')
 param enablePrivateEndpoint bool
-param allowPublicNetworkAccess bool
 
 param privateEndpointsSubnetId string
-param vnetId string
-
-// Key Vault (in this resource group) that stores the Docker Hub pull
-// credentials for the cache. Empty = registry only, no upstream cache.
-param vaultName string = ''
-
-// Docker Hub credential tied to the Rulebricks license: the username is a
-// fixed convention, the token is dckr_pat_<license-key> (assembled by
-// main.bicep). ACR fetches images from docker.io/rulebricks/* on first pull
-// and serves them from cache afterward - no seeding step, and only the
-// registry (not the nodes) needs Docker Hub egress.
-param dockerHubUsername string = 'rulebricks'
-@secure()
-param dockerHubToken string = ''
-
-var cacheEnabled = vaultName != '' && dockerHubToken != ''
+@description('Attach the endpoint to an organization-owned private DNS zone. False leaves registration to Azure Policy.')
+param createPrivateDnsZoneGroup bool = false
+param privateDnsZoneId string = ''
 
 var acrPullRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 )
-var keyVaultSecretsUserRoleId = subscriptionResourceId(
+var importerRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
-  '4633458b-17de-408a-b874-0445c86b69e6'
+  '577a9874-89fd-4f24-9dbd-b5034d0ad23a'
 )
-
-resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+resource registry 'Microsoft.ContainerRegistry/registries@2025-11-01' = {
   name: registryName
   location: location
   tags: tags
@@ -52,12 +42,19 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   }
   properties: {
     adminUserEnabled: false
-    publicNetworkAccess: allowPublicNetworkAccess ? 'Enabled' : 'Disabled'
+    publicNetworkAccess: enablePrivateEndpoint ? 'Disabled' : 'Enabled'
     networkRuleBypassOptions: 'AzureServices'
+    // Keep template-created registries deterministic: AcrPull remains valid
+    // for the kubelet. Organization-owned ABAC registries are still supported
+    // by assigning Container Registry Repository Reader out of band.
+    roleAssignmentMode: 'LegacyRegistryPermissions'
   }
 }
 
-resource acrPullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+// Required before rulebricks deploy: AcrPull for the AKS kubelet identity on
+// this registry. The CLI mirrors images and the helm chart into this plain
+// registry.
+resource acrPullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (assignRoles) {
   name: guid(registry.id, kubeletIdentityObjectId, 'AcrPull')
   scope: registry
   properties: {
@@ -67,93 +64,17 @@ resource acrPullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-// ----------------------------------------------------------------------------
-// Pull-through cache: docker.io/rulebricks/* -> <registry>/rulebricks/*.
-// Credential sets can only read credentials from a Key Vault, so the two
-// values land there first and the set's system identity is granted read.
-// ----------------------------------------------------------------------------
-
-resource vault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
-  name: vaultName == '' ? 'placeholder-vault' : vaultName
-}
-
-resource dockerHubUsernameSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (cacheEnabled) {
-  parent: vault
-  name: 'acr-dockerhub-username'
-  properties: {
-    value: dockerHubUsername
-  }
-}
-
-resource dockerHubTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (cacheEnabled) {
-  parent: vault
-  name: 'acr-dockerhub-token'
-  properties: {
-    value: dockerHubToken
-  }
-}
-
-resource dockerHubCredentials 'Microsoft.ContainerRegistry/registries/credentialSets@2025-11-01' = if (cacheEnabled) {
-  parent: registry
-  name: 'dockerhub'
-  identity: {
-    type: 'SystemAssigned'
-  }
-  properties: {
-    loginServer: 'docker.io'
-    authCredentials: [
-      {
-        // ACR requires this literal credential name.
-        name: 'Credential1'
-        usernameSecretIdentifier: dockerHubUsernameSecret!.properties.secretUri
-        passwordSecretIdentifier: dockerHubTokenSecret!.properties.secretUri
-      }
-    ]
-  }
-}
-
-resource credentialSetVaultAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (cacheEnabled) {
-  name: guid(registry.id, 'dockerhub-credential-set', 'Key Vault Secrets User')
-  scope: vault
-  properties: {
-    roleDefinitionId: keyVaultSecretsUserRoleId
-    principalId: dockerHubCredentials!.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// Wildcard rule: preserves the rulebricks/<name> path, so the deployment's
-// single imageRegistry host swap resolves every image.
-resource dockerHubCache 'Microsoft.ContainerRegistry/registries/cacheRules@2025-11-01' = if (cacheEnabled) {
-  parent: registry
-  name: 'rulebricks-dockerhub'
-  properties: {
-    sourceRepository: 'docker.io/rulebricks/*'
-    targetRepository: 'rulebricks/*'
-    credentialSetResourceId: dockerHubCredentials!.id
-  }
-  dependsOn: [
-    credentialSetVaultAccess
-  ]
-}
-
-resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (enablePrivateEndpoint) {
-  name: 'privatelink.azurecr.io'
-  location: 'global'
-  tags: tags
-}
-
-resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (enablePrivateEndpoint) {
-  parent: privateDnsZone
-  name: '${clusterName}-acr'
-  location: 'global'
-  properties: {
-    registrationEnabled: false
-    virtualNetwork: {
-      id: vnetId
+resource importerRoles 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for principalId in importerPrincipalIds: if (assignImporterRole) {
+    name: guid(registry.id, principalId, 'Container Registry Data Importer and Data Reader')
+    scope: registry
+    properties: {
+      roleDefinitionId: importerRoleId
+      principalId: principalId
+      principalType: importerPrincipalType
     }
   }
-}
+]
 
 resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (enablePrivateEndpoint) {
   name: '${registryName}-pe'
@@ -177,7 +98,7 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (e
   }
 }
 
-resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (enablePrivateEndpoint) {
+resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (enablePrivateEndpoint && createPrivateDnsZoneGroup) {
   parent: privateEndpoint
   name: 'default'
   properties: {
@@ -185,7 +106,7 @@ resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGr
       {
         name: 'registry'
         properties: {
-          privateDnsZoneId: privateDnsZone!.id
+          privateDnsZoneId: privateDnsZoneId
         }
       }
     ]
@@ -193,4 +114,5 @@ resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGr
 }
 
 output registryName string = registry.name
+output registryId string = registry.id
 output loginServer string = registry.properties.loginServer

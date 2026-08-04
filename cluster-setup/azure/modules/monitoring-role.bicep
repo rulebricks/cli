@@ -3,6 +3,7 @@ targetScope = 'resourceGroup'
 param dataCollectionRuleName string
 param principalId string
 param identityId string
+param assignPublisherRole bool = false
 
 var monitoringMetricsPublisherRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
@@ -13,7 +14,9 @@ resource dcr 'Microsoft.Insights/dataCollectionRules@2023-03-11' existing = {
   name: dataCollectionRuleName
 }
 
-resource metricsPublisherRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+// Optional feature grant: Monitoring Metrics Publisher for the data-access
+// identity on this existing DCR.
+resource metricsPublisherRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (assignPublisherRole) {
   name: guid(dcr.id, identityId, 'Monitoring Metrics Publisher')
   scope: dcr
   properties: {

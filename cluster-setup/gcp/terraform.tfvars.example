@@ -22,7 +22,7 @@ cluster_name = "rulebricks-cluster"
 # enable_managed_redis = true
 # redis_memory_size_gb = 4
 
-# --- Managed database (Cloud SQL for PostgreSQL 17) ----------------------------
+# --- Managed database (Cloud SQL for PostgreSQL 18) ----------------------------
 # enable_managed_database = true
 # db_tier                 = "db-custom-2-8192"
 # db_high_availability    = true

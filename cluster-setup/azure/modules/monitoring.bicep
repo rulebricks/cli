@@ -8,6 +8,8 @@ param grafanaName string
 
 param rulebricksPrincipalId string
 param rulebricksIdentityId string
+param assignPublisherRole bool = false
+param assignGrafanaReaderRole bool = false
 
 var monitoringMetricsPublisherRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
@@ -71,7 +73,9 @@ resource dcr 'Microsoft.Insights/dataCollectionRules@2023-03-11' = if (createMon
   }
 }
 
-resource metricsPublisherRoleCreated 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createMonitorWorkspace) {
+// Optional feature grant: Monitoring Metrics Publisher lets the data-access
+// identity send Prometheus remote-write traffic to the DCR.
+resource metricsPublisherRoleCreated 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createMonitorWorkspace && assignPublisherRole) {
   name: guid(dcr!.id, rulebricksIdentityId, 'Monitoring Metrics Publisher')
   scope: dcr
   properties: {
@@ -102,7 +106,9 @@ resource grafana 'Microsoft.Dashboard/grafana@2023-09-01' = if (enableManagedGra
   }
 }
 
-resource grafanaAmwReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableManagedGrafana && createMonitorWorkspace) {
+// Optional feature grant: Monitoring Data Reader lets Managed Grafana query
+// the Azure Monitor workspace.
+resource grafanaAmwReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableManagedGrafana && createMonitorWorkspace && assignGrafanaReaderRole) {
   name: guid(monitorWorkspace!.id, grafanaName, 'Monitoring Data Reader')
   scope: monitorWorkspace
   properties: {
@@ -115,4 +121,6 @@ resource grafanaAmwReader 'Microsoft.Authorization/roleAssignments@2022-04-01' =
 output dceMetricsIngestionEndpoint string = createMonitorWorkspace ? dce!.properties.metricsIngestion.endpoint : ''
 output dcrImmutableId string = createMonitorWorkspace ? dcr!.properties.immutableId : ''
 output dataCollectionRuleId string = dcr!.id
+output monitorWorkspaceId string = createMonitorWorkspace ? monitorWorkspace!.id : ''
 output grafanaEndpoint string = enableManagedGrafana ? grafana!.properties.endpoint : ''
+output grafanaPrincipalId string = enableManagedGrafana ? grafana!.identity.principalId : ''

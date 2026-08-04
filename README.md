@@ -27,9 +27,9 @@ Finally, you will need to have the following tools installed and ready on your m
 - **kubectl** - Kubernetes CLI
 - **Helm** >= 3.0
 - Cloud CLI (`aws`, `gcloud`, or `az`) configured for your provider if you want the wizard to discover clusters or refresh kubeconfig
-- **kubelogin** (Azure only, when the cluster uses Entra ID RBAC - the cluster-setup production default): `brew install Azure/kubelogin/kubelogin`
+- **kubelogin** (Azure only, when you enable Entra ID RBAC): `brew install Azure/kubelogin/kubelogin`
 
-Enterprise network posture note: with the cluster-setup production defaults, the AKS API server is **private** and the Key Vault allows **no public access**. Run the CLI from a network that can reach the cluster's VNet (VPN, peering, or a jump host) - the deploy preflight checks both and tells you exactly what is unreachable.
+Enterprise network posture note: if you select a private AKS API server or disable public Key Vault access, run the CLI from a network that can reach the cluster's VNet (VPN, peering, or a jump host). The deploy preflight checks both and reports what is unreachable.
 
 ## Cluster Setup
 
@@ -45,23 +45,32 @@ aws cloudformation create-stack \
   --parameters file://cluster-setup/aws/parameters.json \
   --capabilities CAPABILITY_NAMED_IAM
 
-# Azure: optional access check, then deploy AKS with Bicep
+# Azure: create/use the resource group, then prerequisites -> access -> main
 az login
-# See cluster-setup/azure/CHECKLIST.md for what to confirm first
 az account set --subscription <subscription-id>
+# Run this only when you have subscription-level resourceGroups/write.
+# Otherwise use the resource group supplied by your platform team.
 az group create --name rulebricks-rg --location eastus
-export POSTGRES_ADMIN_PASSWORD='<strong-password>'
+# Fill the required network/identity choices in this file before deploying.
 az deployment group create \
+  --name rulebricks-prerequisites \
+  --resource-group rulebricks-rg \
+  --parameters cluster-setup/azure/parameters.prerequisites.bicepparam
+# Complete the roleRequirements handoff, then copy mainDeploymentParameters.
+# Fill the required output IDs and API-server CIDRs before deploying main.
+az deployment group create \
+  --name rulebricks \
   --resource-group rulebricks-rg \
   --parameters cluster-setup/azure/parameters.bicepparam
+# See cluster-setup/azure/CHECKLIST.md for the pre-CLI access handoff.
 
 # GCP: optional access check, then create GKE with Terraform
 GCP_REGION=us-central1 bash cluster-setup/gcp/check-gke-prereqs.sh
 # Follow cluster-setup/gcp/README.md for the terraform commands.
 ```
 
-Each cloud's README documents parameters, every resource deployed, remaining
-manual steps, and thorough take-down commands.
+Each cloud's README documents parameters, deployed resources, operator
+handoffs, and cleanup guidance where applicable.
 
 After the cluster exists, update kubeconfig, then run `rulebricks init`. The wizard can also refresh kubeconfig for EKS, GKE, or AKS when provider details are available.
 
@@ -92,8 +101,21 @@ worker images together.
 | `rulebricks open [name]`    | Open the generated configuration files   |
 | `rulebricks backup [name]`  | Run an on-demand database backup         |
 | `rulebricks restore [name]` | Restore the database from object storage |
+| `rulebricks values import <file>` | Bulk-import a JSON dictionary of vocabulary values |
 
 Use `rulebricks -h` to explore all commands, and add `-h` to any command to learn more about a particular command's options.
+
+### Importing vocabulary at scale
+
+`rulebricks values import` streams a large (flat or nested) JSON dictionary into an instance's bulk values API in idempotent chunks, with progress and throughput reporting:
+
+```bash
+rulebricks values import vocabulary.json \
+  --url https://rulebricks.example.com \
+  --api-key $RULEBRICKS_API_KEY
+```
+
+Chunks upsert by value name, so re-running an interrupted import is always safe. Million-scale imports typically complete in minutes.
 
 ## Monitoring
 

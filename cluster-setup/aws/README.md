@@ -103,8 +103,8 @@ are ignored unless that toggle is `"true"`, so they cannot create a bad state):
 | `KafkaVersion` / `KafkaInstanceType` / `KafkaBrokerNodes` / `KafkaVolumeSizeGiB` | `3.9.x` / `kafka.m7g.large` / `3` / `100` | MSK sizing (brokers must be a multiple of 3) |
 | `EnableManagedRedis` | `"false"` | ElastiCache for Valkey (TLS + AUTH) instead of in-cluster Valkey |
 | `RedisNodeType` / `RedisEngineVersion` / `RedisMultiAz` | `cache.m7g.large` / `8.2` / `"true"` | ElastiCache sizing / HA |
-| `EnableManagedDatabase` | `"false"` | RDS for PostgreSQL 17 instead of in-cluster Postgres |
-| `DbInstanceClass` / `DbEngineVersion` / `DbMasterUsername` | `db.m7g.large` / `17` / `postgres` | RDS instance |
+| `EnableManagedDatabase` | `"false"` | RDS for PostgreSQL 18 instead of in-cluster Postgres |
+| `DbInstanceClass` / `DbEngineVersion` / `DbMasterUsername` | `db.m7g.large` / `18` / `postgres` | RDS instance |
 | `DbAllocatedStorageGiB` / `DbMaxAllocatedStorageGiB` | `100` / `500` | Storage + autoscaling ceiling |
 | `DbMultiAz` / `DbBackupRetentionDays` / `DbDeletionProtection` | `"true"` / `7` / `"true"` | HA / backups / delete guard |
 | `EnableManagedPrometheus` | `"false"` | Amazon Managed Prometheus workspace for remote write |

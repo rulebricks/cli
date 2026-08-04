@@ -1,7 +1,6 @@
 // PostgreSQL is VNet-only. Supabase Realtime requires wal_level=logical, which
 // takes effect after the one-time restart returned by this module.
 
-param clusterName string
 param location string
 param tags object
 
@@ -9,7 +8,7 @@ param tags object
 param serverName string
 
 @description('PostgreSQL major version.')
-param postgresVersion string = '17'
+param postgresVersion string = '18'
 
 @description('Administrator login used for initial application bootstrap.')
 param administratorLogin string = 'rbadmin'
@@ -39,27 +38,10 @@ param backupRetentionDays int = 7
 @description('Delegated subnet for PostgreSQL Flexible Server.')
 param postgresSubnetId string
 
-param vnetId string
+@description('Organization-owned private DNS zone ID already linked to the VNet. Flexible Server VNet injection requires this.')
+param privateDnsZoneId string
 
-resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = {
-  name: '${serverName}.private.postgres.database.azure.com'
-  location: 'global'
-  tags: tags
-}
-
-resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
-  parent: privateDnsZone
-  name: '${clusterName}-postgres'
-  location: 'global'
-  properties: {
-    registrationEnabled: false
-    virtualNetwork: {
-      id: vnetId
-    }
-  }
-}
-
-resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
+resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
   name: serverName
   location: location
   tags: tags
@@ -77,7 +59,7 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
     }
     network: {
       delegatedSubnetResourceId: postgresSubnetId
-      privateDnsZoneArmResourceId: privateDnsZone.id
+      privateDnsZoneArmResourceId: privateDnsZoneId
     }
     highAvailability: {
       mode: enableHighAvailability ? 'ZoneRedundant' : 'Disabled'
@@ -87,9 +69,6 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
       geoRedundantBackup: 'Disabled'
     }
   }
-  dependsOn: [
-    privateDnsZoneLink
-  ]
 }
 
 resource walLevel 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2024-08-01' = {

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useApp } from "ink";
 import { platform } from "os";
 import { readFileSync } from "fs";
@@ -21,6 +21,7 @@ import {
   updateDeploymentStatus,
 } from "../lib/config.js";
 import {
+  fetchChartVersions,
   installOrUpgradeChart,
   upgradeChart,
   isHelmInstalled,
@@ -35,14 +36,20 @@ import {
   updateKubeconfig,
   checkAuroraLogicalReplication,
   checkAzureKeyVaultDataPlaneAccess,
-  ensureAcsCustomEmailDomainLinked,
-  ensureAcsSmtpRoleAssignment,
+  checkAcsCustomEmailDomainLinked,
+  checkAcsSmtpRoleAssignment,
   ensureAzurePostgresLogicalReplication,
   findAzureDnsZone,
+  resolveAzureExternalDnsReferences,
   getAzureSubscriptionId,
   getAzureTenantId,
   mirrorImagesToAcr,
+  mirrorChartToAcr,
   planAcrImports,
+  assertAcrMirrorSucceeded,
+  chartOciRef,
+  helmRegistryLoginToAcr,
+  shouldMirrorToAcr,
 } from "../lib/cloudCli.js";
 import {
   deriveConventionalAzureExternalDnsClientId,
@@ -157,6 +164,15 @@ function DeployCommandInner({
     dnsConfig: "pending",
     helmUpgradeTls: "pending",
   });
+  // Chart source for this run: OCI ref + pinned version. In full-mirror mode
+  // the chart is imported into the deployment's registry and installed from
+  // there, pinned to the resolved version (an unpinned install would take the
+  // registry's highest tag, which a shared ACR may carry from another
+  // deployment). A ref, not state: it's resolved mid-run and read by later
+  // callbacks (the TLS-flip upgrade) without re-rendering.
+  const chartSourceRef = useRef<{ chartRef?: string; version?: string }>({
+    version,
+  });
 
   useEffect(() => {
     runDeployment();
@@ -208,7 +224,25 @@ function DeployCommandInner({
       const namespace = getNamespace(config.name);
       const releaseName = getReleaseName(config.name);
 
-      await upgradeChart(name, { releaseName, namespace, version, wait: true });
+      // Manual DNS setup can leave this process waiting longer than ACR's
+      // short-lived exposed token remains valid. Refresh the helm registry
+      // login immediately before the delayed TLS upgrade.
+      if (shouldMirrorToAcr(config)) {
+        const registry = config.imageRegistry!;
+        await helmRegistryLoginToAcr(
+          registry.split(".")[0],
+          registry,
+          config.imageRegistryResourceId,
+        );
+      }
+
+      await upgradeChart(name, {
+        releaseName,
+        namespace,
+        version: chartSourceRef.current.version,
+        chartRef: chartSourceRef.current.chartRef,
+        wait: true,
+      });
 
       setStatus((s) => ({ ...s, helmUpgradeTls: "success", certCheck: "running" }));
       setStep("cert-check");
@@ -237,7 +271,7 @@ function DeployCommandInner({
     await updateDeploymentStatus(name, "waiting-dns", {
       application: {
         version: productVersion,
-        chartVersion: version || "latest",
+        chartVersion: chartSourceRef.current.version || "latest",
         namespace,
         url: `https://${config.domain}`,
       },
@@ -362,36 +396,58 @@ function DeployCommandInner({
       const imageCatalog = await resolveImageCatalog(version);
 
       // Mirrored registry: copy the full image set (this catalog's pins plus
-      // the app-tier images for the configured version) into the registry
-      // before anything references it. Missing images block the deploy here
-      // with the failed refs instead of surfacing as ImagePullBackOff.
-      if (
-        cfg.imageRegistryMode === "mirror" &&
-        cfg.imageRegistry &&
-        cfg.infrastructure.provider === "azure"
-      ) {
-        const registryName = cfg.imageRegistry.split(".")[0];
+      // the app-tier images for the configured version) AND the helm chart
+      // into the registry before anything references it. Missing artifacts
+      // block the deploy here with the failed refs instead of surfacing as
+      // ImagePullBackOff or a failed chart pull.
+      if (shouldMirrorToAcr(cfg)) {
+        const registry = cfg.imageRegistry!;
+        const registryName = registry.split(".")[0];
         const mirror = await mirrorImagesToAcr(
           registryName,
           cfg.licenseKey,
           planAcrImports(imageCatalog.entries(), cfg.version),
+          cfg.imageRegistryResourceId,
         );
-        if (mirror.failed.length > 0) {
+        assertAcrMirrorSucceeded(
+          registry,
+          mirror,
+          "Mirroring deployment images",
+        );
+
+        // Pin the chart to a concrete release: resolve "latest" upstream,
+        // import exactly that version, and install it from the registry.
+        const helmChartVersion =
+          version ||
+          imageCatalog.chartVersion ||
+          (await fetchChartVersions())[0]?.version;
+        if (!helmChartVersion || helmChartVersion === "unknown") {
           throw new Error(
-            [
-              `Mirroring images into ${cfg.imageRegistry} failed for:`,
-              ...mirror.failed.map(
-                (f) => `  - ${f.ref}${f.detail ? ` (${f.detail})` : ""}`,
-              ),
-              "Ask a registry admin (AcrPush or Contributor on the registry) to import them:",
-              ...mirror.failed.map(
-                (f) =>
-                  `  az acr import --name ${registryName} --source "${f.source}" --image "${f.ref}" --username rulebricks --password <docker PAT from your license key> --force`,
-              ),
-              'Or set imageRegistryMode: "pull-through" in the deployment config, then redeploy.',
-            ].join("\n"),
+            `Could not resolve the chart version to mirror into ${registry}. ` +
+              "Retry with --chart-version <version>.",
           );
         }
+        const chartMirror = await mirrorChartToAcr(
+          registryName,
+          helmChartVersion,
+          cfg.imageRegistryResourceId,
+        );
+        assertAcrMirrorSucceeded(
+          registry,
+          chartMirror,
+          `Mirroring helm chart ${helmChartVersion}`,
+        );
+        // helm pulls the mirrored chart from this machine, so log its
+        // registry client in (cluster nodes use the kubelet identity).
+        await helmRegistryLoginToAcr(
+          registryName,
+          registry,
+          cfg.imageRegistryResourceId,
+        );
+        chartSourceRef.current = {
+          chartRef: chartOciRef(cfg),
+          version: helmChartVersion,
+        };
       }
 
       // The config's secrets backend decides the mode (ESO by default);
@@ -503,25 +559,38 @@ function DeployCommandInner({
         | undefined;
       if (externalDnsEnabled && wantsManagedDns(cfg, "azure")) {
         try {
-          const [clientId, subscriptionId, tenantId, zone] = await Promise.all([
-            deriveConventionalAzureExternalDnsClientId(cfg),
-            getAzureSubscriptionId(),
+          const exactReferences =
+            cfg.infrastructure.azureDnsZoneId &&
+            cfg.infrastructure.azureExternalDnsIdentityId
+              ? await resolveAzureExternalDnsReferences(
+                  cfg.infrastructure.azureDnsZoneId,
+                  cfg.infrastructure.azureExternalDnsIdentityId,
+                )
+              : null;
+          const [tenantId, fallback] = await Promise.all([
             getAzureTenantId(),
-            findAzureDnsZone(cfg.domain?.toLowerCase() ?? ""),
+            exactReferences
+              ? Promise.resolve(null)
+              : Promise.all([
+                  deriveConventionalAzureExternalDnsClientId(cfg),
+                  getAzureSubscriptionId(),
+                  findAzureDnsZone(cfg.domain?.toLowerCase() ?? ""),
+                ]),
           ]);
-          // azure.json's resourceGroup is where external-dns writes RECORDS,
-          // i.e. the zone's own resource group - the prerequisites template
-          // may have placed it outside the deployment's. Fall back to the
-          // deployment group when zone discovery came up empty.
+          const clientId = exactReferences?.clientId || fallback?.[0];
+          const subscriptionId =
+            exactReferences?.subscriptionId || fallback?.[1];
           const resourceGroup =
-            zone?.resourceGroup || cfg.infrastructure.azureResourceGroup;
+            exactReferences?.resourceGroup ||
+            fallback?.[2]?.resourceGroup ||
+            cfg.infrastructure.azureResourceGroup;
           if (clientId && subscriptionId && tenantId && resourceGroup) {
             externalDnsAzureClientId = clientId;
             externalDnsAzureConfig = { tenantId, subscriptionId, resourceGroup };
           } else {
             setDnsWarning(
-              `Automatic DNS may not work: the ${cfg.infrastructure.clusterName}-external-dns identity ` +
-                `was not found (enable external-dns in cluster-setup, or manage records manually).`,
+              "Automatic DNS may not work: the selected Azure DNS zone or external-dns identity could not be resolved. " +
+                "Copy their full IDs from the prerequisites handoff into infrastructure.azureDnsZoneId and infrastructure.azureExternalDnsIdentityId, or manage records manually.",
             );
           }
         } catch (dnsError) {
@@ -588,7 +657,8 @@ function DeployCommandInner({
             installOrUpgradeChart(name, {
               releaseName,
               namespace,
-              version,
+              version: chartSourceRef.current.version,
+              chartRef: chartSourceRef.current.chartRef,
               wait: true,
             }),
         },
@@ -645,7 +715,7 @@ function DeployCommandInner({
         await updateDeploymentStatus(name, "waiting-dns", {
           application: {
             version: productVersion,
-            chartVersion: version || "latest",
+            chartVersion: chartSourceRef.current.version || "latest",
             namespace,
             url: `https://${cfg.domain}`,
           },
@@ -779,7 +849,8 @@ function DeployCommandInner({
     // static parameters only apply after a server restart that ARM cannot
     // perform. Self-heal instead of documenting a manual step: restart when
     // the change is pending (the database is idle on a first deploy; no-op on
-    // every later one). Only a definitively wrong value blocks the deploy.
+    // every later one). A denied or unconfirmed restart blocks the deploy
+    // rather than leaving Realtime on a pending static parameter.
     if (
       pg?.mode === "external" &&
       pg.external?.provider === "azure" &&
@@ -799,49 +870,75 @@ function DeployCommandInner({
             `  az postgres flexible-server restart --resource-group ${cfg.infrastructure.azureResourceGroup} --name ${serverName}`,
         );
       }
+      if (wal.status === "restart-required") {
+        throw new Error(
+          `Azure Postgres has wal_level=logical but still requires a successful server restart. ` +
+            `Ask an operator with Microsoft.DBforPostgreSQL/flexibleServers/restart/action on the server to restart it before deploying.` +
+            (wal.detail ? ` Azure said: ${wal.detail}` : ""),
+        );
+      }
+      if (wal.status === "unknown") {
+        throw new Error(
+          `The CLI could not verify the Azure Postgres wal_level restart state.` +
+            (wal.detail ? ` Azure said: ${wal.detail}` : "") +
+            " Confirm wal_level=logical with no pending restart before deploying.",
+        );
+      }
     }
 
-    // ACS branded email sender: verification and linking are control-plane
-    // actions ARM cannot sequence, so self-heal here (same pattern as the
-    // wal_level restart). Emails from an unlinked domain fail at send time
-    // with no obvious cause, so a domain that cannot be verified blocks the
-    // deploy with the fix instead.
+    // ACS branded-domain verification/linking belongs to the prerequisite
+    // owner. The CLI checks readiness without mutating shared messaging
+    // resources and blocks before an unhelpful send-time failure.
     if (
       cfg.infrastructure.provider === "azure" &&
       cfg.smtp?.host === "smtp.azurecomm.net" &&
       cfg.smtp.from &&
       cfg.infrastructure.azureResourceGroup
     ) {
-      // Grant the SMTP Entra app access to the communication service FIRST -
-      // without it every send is unauthorized. cluster-setup no longer does
-      // this (the app is created out-of-band), so the CLI owns it, matching
-      // how SSO and workload identity are wired at deploy time.
+      // Verify the SMTP Entra app access before continuing. The CLI never
+      // writes this organization-owned role assignment.
       if (cfg.smtp.user) {
-        const role = await ensureAcsSmtpRoleAssignment(cfg.smtp.user);
-        // No rights to create the role assignment: continue (SMTP is not
-        // deploy-critical) but say so, with the exact grant an admin can run.
-        if (role.status === "denied" && role.detail) {
+        const role = await checkAcsSmtpRoleAssignment(cfg.smtp.user, {
+          communicationServiceId:
+            cfg.smtp.azure?.communicationServiceId,
+          entraApplicationId: cfg.smtp.azure?.entraApplicationId,
+        });
+        if (role.status === "needs-review" && role.requirement) {
           setSmtpWarning(
-            "Email sends may fail: could not grant the SMTP app access to the communication service (access denied). Ask an admin to run:\n" +
-              `  ${role.detail}`,
+            `Email sends may fail: the built-in ACS SMTP role was not found. Ask the platform team to confirm whether ` +
+              `service principal ${role.requirement.principalId} already has a custom role with ` +
+              `${role.requirement.customRoleActions.join(", ")} on ${role.requirement.scope}; if not, grant ` +
+              `"${role.requirement.builtInRole}" or that custom role.`,
+          );
+        }
+        if (role.status === "unknown") {
+          const requirement = role.requirement
+            ? ` Confirm that service principal ${role.requirement.principalId} has "${role.requirement.builtInRole}" or the documented custom permissions on ${role.requirement.scope}.`
+            : ' Confirm the SMTP username, ACS resource, and Entra application, then have the platform team verify "Communication and Email Service Owner" or an equivalent custom role.';
+          setSmtpWarning(
+            `Email sends may fail: the CLI could not verify ACS SMTP access.${requirement}` +
+              (role.detail ? ` Azure said: ${role.detail}` : ""),
           );
         }
         if (role.status === "no-app") {
           throw new Error(
             `The email SMTP app (client ID ${role.detail}) was not found in this tenant. ` +
-              "Create it before deploying:\n" +
-              '  APP_ID=$(az ad app create --display-name "Rulebricks SMTP" --sign-in-audience AzureADMyOrg --query appId -o tsv)\n' +
-              "  az ad sp create --id $APP_ID\n" +
-              "  az ad app credential reset --id $APP_ID   # this secret is the SMTP password\n" +
-              "Then set the SMTP username's app-ID segment to $APP_ID and redeploy.",
+              "Ask the platform team to create or approve the Entra application and its service principal, then create an ACS SMTP Username linked to it and select that username in Rulebricks.",
+          );
+        }
+        if (role.status === "no-service-principal") {
+          throw new Error(
+            `The email SMTP Entra application (client ID ${role.detail}) exists, but its service principal is missing from this tenant. ` +
+              "Ask the platform team to provision the enterprise application/service principal, grant its documented ACS role, and confirm the selected SMTP Username is Ready to use.",
           );
         }
       }
 
-      const acs = await ensureAcsCustomEmailDomainLinked(
+      const acs = await checkAcsCustomEmailDomainLinked(
         cfg.smtp.from,
         cfg.infrastructure.azureResourceGroup,
         cfg.smtp.user,
+        cfg.smtp.azure?.communicationServiceId,
       );
       if (acs.status === "not-verified") {
         throw new Error(
@@ -850,6 +947,19 @@ function DeployCommandInner({
             "  • Run its emailInitiateVerificationCommands outputs (or ask whoever deployed the prerequisites to), wait for Verified, then re-run this deploy.\n" +
             "  • If the domain is hosted outside the delegated zone, publish its emailVerificationRecords output at your DNS provider first.\n" +
             "  • Or set smtp.from back to the Azure-managed sender (the emailSenderAddress output) to send immediately.",
+        );
+      }
+      if (acs.status === "not-linked") {
+        throw new Error(
+          `The verified email sender domain "${acs.domain}" is not linked to the selected Azure Communication Services resource. ` +
+            "Ask the platform team to run the prerequisites deployment's emailLinkBrandedDomainCommand, then re-run this deploy.",
+        );
+      }
+      if (acs.status === "unknown") {
+        throw new Error(
+          `The CLI could not verify that the ACS sender domain is ready.${
+            acs.detail ? ` Azure said: ${acs.detail}` : ""
+          } Ask the platform team to confirm that the domain is verified and linked before deploying.`,
         );
       }
     }
@@ -912,7 +1022,7 @@ function DeployCommandInner({
     await updateDeploymentStatus(name, "running", {
       application: {
         version: productVersion,
-        chartVersion: version || "latest",
+        chartVersion: chartSourceRef.current.version || "latest",
         namespace,
         url: `https://${cfg.domain}`,
       },

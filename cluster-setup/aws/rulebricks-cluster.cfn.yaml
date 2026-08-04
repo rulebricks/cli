@@ -396,11 +396,11 @@ Parameters:
     Default: db.m7g.large
   DbEngineVersion:
     Type: String
-    Default: "17"
+    Default: "18"
     Description: >-
-      PostgreSQL engine version. Major version only ("17") lets RDS pick the
-      current default minor. Must stay on major 17 unless you also change the
-      parameter group family (postgres17).
+      PostgreSQL engine version. Major version only ("18") lets RDS pick the
+      current default minor. Must stay on major 18 unless you also change the
+      parameter group family (postgres18).
   DbMasterUsername:
     Type: String
     Default: postgres
@@ -1560,9 +1560,9 @@ Resources:
     Type: AWS::RDS::DBParameterGroup
     Condition: ManagedDatabaseEnabled
     Properties:
-      DBParameterGroupName: !Sub "${ClusterName}-pg17"
-      Description: Rulebricks PostgreSQL 17 - logical replication for Supabase Realtime
-      Family: postgres17
+      DBParameterGroupName: !Sub "${ClusterName}-pg18"
+      Description: Rulebricks PostgreSQL 18 - logical replication for Supabase Realtime
+      Family: postgres18
       Parameters:
         rds.logical_replication: "1" # wal_level=logical; static, applied at first boot
         max_replication_slots: "10"

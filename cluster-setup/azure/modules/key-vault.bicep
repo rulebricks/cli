@@ -1,18 +1,26 @@
-param clusterName string
 param location string
 param tags object
 param keyVaultName string
 
-param allowPublicNetworkAccess bool
 param enablePrivateEndpoint bool
 param enablePurgeProtection bool
 param softDeleteRetentionDays int
+@allowed([
+  'default'
+  'recover'
+])
+@description('Use recover only when a soft-deleted vault with keyVaultName already exists.')
+param createMode string = 'default'
 param privateEndpointsSubnetId string
-param vnetId string
+@description('Attach the endpoint to an organization-owned private DNS zone. False leaves registration to Azure Policy.')
+param createPrivateDnsZoneGroup bool = false
+param privateDnsZoneId string = ''
 
 param readerPrincipalId string
 param readerIdentityId string
 param writerPrincipalIds array
+param assignReaderRole bool = false
+param assignWriterRoles bool = false
 
 var keyVaultSecretsUserRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
@@ -28,6 +36,7 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   location: location
   tags: tags
   properties: {
+    createMode: createMode
     tenantId: tenant().tenantId
     sku: {
       family: 'A'
@@ -39,15 +48,17 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     // by OMITTING the property). null omits it.
     enablePurgeProtection: enablePurgeProtection ? true : null
     softDeleteRetentionInDays: softDeleteRetentionDays
-    publicNetworkAccess: allowPublicNetworkAccess ? 'Enabled' : 'Disabled'
+    publicNetworkAccess: enablePrivateEndpoint ? 'Disabled' : 'Enabled'
     networkAcls: {
       bypass: 'AzureServices'
-      defaultAction: allowPublicNetworkAccess ? 'Allow' : 'Deny'
+      defaultAction: enablePrivateEndpoint ? 'Deny' : 'Allow'
     }
   }
 }
 
-resource secretsUserRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+// Required before rulebricks deploy: Key Vault Secrets User for the
+// external-secrets identity.
+resource secretsUserRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (assignReaderRole) {
   name: guid(vault.id, readerIdentityId, 'Key Vault Secrets User')
   scope: vault
   properties: {
@@ -57,8 +68,10 @@ resource secretsUserRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
   }
 }
 
+// Required before rulebricks deploy: Key Vault Secrets Officer for each
+// operator that seeds or rotates workload secrets.
 resource secretsOfficerRoles 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
-  for principalId in writerPrincipalIds: {
+  for principalId in writerPrincipalIds: if (assignWriterRoles) {
     name: guid(vault.id, principalId, 'Key Vault Secrets Officer')
     scope: vault
     properties: {
@@ -67,24 +80,6 @@ resource secretsOfficerRoles 'Microsoft.Authorization/roleAssignments@2022-04-01
     }
   }
 ]
-
-resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (enablePrivateEndpoint) {
-  name: 'privatelink.vaultcore.azure.net'
-  location: 'global'
-  tags: tags
-}
-
-resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (enablePrivateEndpoint) {
-  parent: privateDnsZone
-  name: '${clusterName}-key-vault'
-  location: 'global'
-  properties: {
-    registrationEnabled: false
-    virtualNetwork: {
-      id: vnetId
-    }
-  }
-}
 
 resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (enablePrivateEndpoint) {
   name: '${keyVaultName}-pe'
@@ -108,7 +103,7 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (e
   }
 }
 
-resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (enablePrivateEndpoint) {
+resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (enablePrivateEndpoint && createPrivateDnsZoneGroup) {
   parent: privateEndpoint
   name: 'default'
   properties: {
@@ -116,7 +111,7 @@ resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGr
       {
         name: 'vault'
         properties: {
-          privateDnsZoneId: privateDnsZone!.id
+          privateDnsZoneId: privateDnsZoneId
         }
       }
     ]
@@ -124,4 +119,5 @@ resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGr
 }
 
 output vaultName string = vault.name
+output vaultId string = vault.id
 output vaultUri string = vault.properties.vaultUri

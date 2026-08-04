@@ -6,9 +6,18 @@
  */
 
 import { exec } from "child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "util";
 import { execa } from "execa";
-import { CloudProvider, CLOUD_REGIONS } from "../types/index.js";
+import {
+  CloudProvider,
+  CLOUD_REGIONS,
+  HELM_CHART_OCI,
+  HELM_CHART_OCI_SOURCE,
+  MIRRORED_CHART_REPOSITORY,
+} from "../types/index.js";
 import {
   approveCloudCommandOrThrow,
   CommandDeniedError,
@@ -89,6 +98,7 @@ export interface IamRole {
  * Azure user-assigned managed identity discovered through the Azure CLI.
  */
 export interface AzureManagedIdentity {
+  id?: string;
   name: string;
   clientId: string;
   resourceGroup?: string;
@@ -134,6 +144,52 @@ async function execCommand(
   } catch (error: unknown) {
     if (error && typeof error === "object" && "stdout" in error) {
       // Command executed but returned non-zero exit code
+      const execError = error as {
+        stdout?: string;
+        stderr?: string;
+        message?: string;
+      };
+      return {
+        stdout: execError.stdout || "",
+        stderr: execError.stderr || execError.message || "Command failed",
+      };
+    }
+    throw error;
+  }
+}
+
+function displayCommandArg(value: string): string {
+  return /^[A-Za-z0-9_./:=@+-]+$/.test(value)
+    ? value
+    : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+async function execCommandArgs(
+  file: string,
+  args: string[],
+  options: ExecCommandOptions | number = {},
+): Promise<{ stdout: string; stderr: string }> {
+  const opts: ExecCommandOptions =
+    typeof options === "number" ? { timeout: options } : options;
+  const timeout = opts.timeout ?? CLI_TIMEOUT;
+  const command = [file, ...args.map(displayCommandArg)].join(" ");
+
+  try {
+    await approveCloudCommandOrThrow({
+      intent: opts.intent ?? inferCommandIntent(command),
+      command,
+      description: opts.description,
+      provider: opts.provider ?? inferProvider(command),
+      mutating: opts.mutating,
+    });
+    const result = await execa(file, args, { timeout });
+    return { stdout: result.stdout, stderr: result.stderr };
+  } catch (error: unknown) {
+    if (
+      error &&
+      typeof error === "object" &&
+      ("stdout" in error || "stderr" in error)
+    ) {
       const execError = error as {
         stdout?: string;
         stderr?: string;
@@ -896,31 +952,57 @@ export async function checkAzureCli(): Promise<CloudCliStatus> {
  * a STATIC parameter that only takes effect after a server restart, which ARM
  * cannot perform. Detect the pending state and perform the restart here: the
  * database is idle on a first deploy, and this is a no-op on every subsequent
- * one. Fail-open ("unknown") on any ambiguity, including denied approvals.
+ * one. Ambiguous or denied restarts are surfaced so deploy cannot claim the
+ * database is ready while Azure still reports a pending static parameter.
  */
 export async function ensureAzurePostgresLogicalReplication(
   host: string,
   resourceGroup: string,
 ): Promise<{
-  status: "ok" | "restarted" | "wrong-value" | "unknown";
+  status: "ok" | "restarted" | "restart-required" | "wrong-value" | "unknown";
   value?: string;
+  detail?: string;
 }> {
   const serverName = host.split(".")[0];
   if (!serverName || !resourceGroup) return { status: "unknown" };
   try {
-    const res = await execCommand(
-      `az postgres flexible-server parameter show --resource-group ${resourceGroup} --server-name ${serverName} --name wal_level --output json`,
-      {
-        intent: "Verify database configuration",
-        provider: "azure",
-        timeout: 60000,
-      },
-    );
+    const readParameter = () =>
+      execCommandArgs(
+        "az",
+        [
+          "postgres",
+          "flexible-server",
+          "parameter",
+          "show",
+          "--resource-group",
+          resourceGroup,
+          "--server-name",
+          serverName,
+          "--name",
+          "wal_level",
+          "--output",
+          "json",
+        ],
+        {
+          intent: "Verify database configuration",
+          provider: "azure",
+          timeout: 60000,
+        },
+      );
+    const res = await readParameter();
+    if (!res.stdout.trim()) {
+      return {
+        status: "unknown",
+        detail: res.stderr.trim() || "Azure returned no wal_level state.",
+      };
+    }
     const parsed = JSON.parse(res.stdout || "{}") as {
       value?: string;
       isConfigPendingRestart?: boolean | string;
     };
-    if (!parsed.value) return { status: "unknown" };
+    if (!parsed.value) {
+      return { status: "unknown", detail: "Azure omitted the wal_level value." };
+    }
     if (parsed.value.toLowerCase() !== "logical") {
       return { status: "wrong-value", value: parsed.value };
     }
@@ -928,8 +1010,17 @@ export async function ensureAzurePostgresLogicalReplication(
       parsed.isConfigPendingRestart === true ||
       String(parsed.isConfigPendingRestart).toLowerCase() === "true";
     if (!pendingRestart) return { status: "ok" };
-    await execCommand(
-      `az postgres flexible-server restart --resource-group ${resourceGroup} --name ${serverName}`,
+    const restart = await execCommandArgs(
+      "az",
+      [
+        "postgres",
+        "flexible-server",
+        "restart",
+        "--resource-group",
+        resourceGroup,
+        "--name",
+        serverName,
+      ],
       {
         intent: "Restart managed database",
         provider: "azure",
@@ -938,45 +1029,73 @@ export async function ensureAzurePostgresLogicalReplication(
         timeout: 600000,
       },
     );
+    if (restart.stderr.trim()) {
+      return {
+        status: "restart-required",
+        value: parsed.value,
+        detail: restart.stderr.trim(),
+      };
+    }
+    const afterRestart = await readParameter();
+    if (!afterRestart.stdout.trim()) {
+      return {
+        status: "restart-required",
+        value: parsed.value,
+        detail:
+          afterRestart.stderr.trim() ||
+          "The CLI could not confirm that the pending restart cleared.",
+      };
+    }
+    const confirmed = JSON.parse(afterRestart.stdout) as {
+      isConfigPendingRestart?: boolean | string;
+    };
+    const stillPending =
+      confirmed.isConfigPendingRestart === true ||
+      String(confirmed.isConfigPendingRestart).toLowerCase() === "true";
+    if (stillPending) {
+      return {
+        status: "restart-required",
+        value: parsed.value,
+        detail: "Azure still reports wal_level as pending restart.",
+      };
+    }
     return { status: "restarted" };
-  } catch {
-    return { status: "unknown" };
+  } catch (error) {
+    return {
+      status: "unknown",
+      detail: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
-/**
- * ACS branded email sender: when the configured sender address uses a custom
- * domain, that domain must be VERIFIED (a POST action ARM cannot perform)
- * and then LINKED to the communication service (only possible once
- * verified). Both are plain control-plane calls, so self-heal here instead
- * of asking the operator to run commands or redeploy infrastructure: kick
- * off verification for any pending check, poll until Verified (the
- * cluster-setup template already created the DNS records), and link. A
- * no-op when the sender is the Azure-managed azurecomm.net domain or
- * everything is already linked. Fail-open ("unknown") on ambiguity.
- */
-export async function ensureAcsCustomEmailDomainLinked(
+/** Read-only verification of a custom ACS sender domain and its link. */
+export async function checkAcsCustomEmailDomainLinked(
   fromAddress: string,
   resourceGroup: string,
   smtpUsername?: string,
+  communicationServiceId?: string,
 ): Promise<{
-  status: "ok" | "linked" | "not-verified" | "unknown";
+  status: "ok" | "not-linked" | "not-verified" | "unknown";
   domain?: string;
   detail?: string;
 }> {
   const domain = fromAddress.split("@")[1]?.toLowerCase();
   if (!domain || domain.endsWith(".azurecomm.net")) return { status: "ok" };
   try {
-    // The communication service the deployment actually uses: named in the
-    // SMTP username the operator configured, resolved subscription-wide (its
-    // resource group is not necessarily the deployment's). Fallback: the
-    // deployment resource group's only communication service.
-    const smtpAcsName = smtpUsername
-      ? parseAcsSmtpResourceName(smtpUsername)
+    // Modern configs carry the exact resource ID. Legacy composite usernames
+    // retain a resource-name fallback.
+    const parsedCommunicationService = communicationServiceId
+      ? parseAcsCommunicationServiceId(communicationServiceId)
       : null;
+    const smtpAcsName =
+      parsedCommunicationService?.name ||
+      (smtpUsername ? parseAcsSmtpResourceName(smtpUsername) : null);
     let commService = "";
     let commResourceGroup = resourceGroup;
-    if (smtpAcsName) {
+    if (parsedCommunicationService) {
+      commService = parsedCommunicationService.name;
+      commResourceGroup = parsedCommunicationService.resourceGroup;
+    } else if (smtpAcsName) {
       const commRes = await execCommand(
         `az resource list --resource-type Microsoft.Communication/communicationServices --query "[?name=='${smtpAcsName}'].{name:name,resourceGroup:resourceGroup}" --output json`,
         { intent: "Verify email domain", provider: "azure" },
@@ -1000,10 +1119,28 @@ export async function ensureAcsCustomEmailDomainLinked(
     }
     if (!commService) return { status: "unknown" };
 
-    const linkedRes = await execCommand(
-      `az communication show --name ${commService} --resource-group ${commResourceGroup} --query linkedDomains --output json`,
-      { intent: "Verify email domain", provider: "azure" },
-    );
+    const linkedArgs = [
+      "communication",
+      "show",
+      "--name",
+      commService,
+      "--resource-group",
+      commResourceGroup,
+      "--query",
+      "linkedDomains",
+      "--output",
+      "json",
+    ];
+    if (parsedCommunicationService) {
+      linkedArgs.push(
+        "--subscription",
+        parsedCommunicationService.subscriptionId,
+      );
+    }
+    const linkedRes = await execCommandArgs("az", linkedArgs, {
+      intent: "Verify email domain",
+      provider: "azure",
+    });
     let linked: string[] = [];
     try {
       linked = JSON.parse(linkedRes.stdout || "[]");
@@ -1026,17 +1163,31 @@ export async function ensureAcsCustomEmailDomainLinked(
     // normally sits next to the azurecomm.net fallback, wherever the
     // prerequisites deployment put them), then the deployment resource
     // group's own email services.
-    const candidates: Array<{ resourceGroup: string; name: string }> = [];
+    const candidates: Array<{
+      subscriptionId?: string;
+      resourceGroup: string;
+      name: string;
+    }> = [];
     const seenSvc = new Set<string>();
-    const addCandidate = (rg: string, name: string) => {
-      const key = `${rg}/${name}`.toLowerCase();
+    const addCandidate = (
+      rg: string,
+      name: string,
+      subscriptionId?: string,
+    ) => {
+      const key = `${subscriptionId || ""}/${rg}/${name}`.toLowerCase();
       if (seenSvc.has(key)) return;
       seenSvc.add(key);
-      candidates.push({ resourceGroup: rg, name });
+      candidates.push({ subscriptionId, resourceGroup: rg, name });
     };
     for (const id of linked) {
       const parsed = parseAcsEmailDomainId(id);
-      if (parsed) addCandidate(parsed.resourceGroup, parsed.emailService);
+      if (parsed) {
+        addCandidate(
+          parsed.resourceGroup,
+          parsed.emailService,
+          parsed.subscriptionId,
+        );
+      }
     }
     try {
       const svcRes = await execCommand(
@@ -1060,10 +1211,27 @@ export async function ensureAcsCustomEmailDomainLinked(
       verificationStates?: Record<string, { status?: string }>;
     } | null> => {
       for (const svc of candidates) {
-        const res = await execCommand(
-          `az communication email domain show --domain-name ${domain} --email-service-name ${svc.name} --resource-group ${svc.resourceGroup} --output json`,
-          { intent: "Verify email domain", provider: "azure" },
-        );
+        const args = [
+          "communication",
+          "email",
+          "domain",
+          "show",
+          "--domain-name",
+          domain,
+          "--email-service-name",
+          svc.name,
+          "--resource-group",
+          svc.resourceGroup,
+          "--output",
+          "json",
+        ];
+        if (svc.subscriptionId) {
+          args.push("--subscription", svc.subscriptionId);
+        }
+        const res = await execCommandArgs("az", args, {
+          intent: "Verify email domain",
+          provider: "azure",
+        });
         try {
           const parsed = JSON.parse(res.stdout || "null");
           if (parsed?.id) {
@@ -1100,65 +1268,31 @@ export async function ensureAcsCustomEmailDomainLinked(
       );
     };
 
-    let info = await showDomain();
+    const info = await showDomain();
     if (!info?.id) return { status: "unknown" };
 
-    if (unverified(info).length > 0) {
-      // initiate-verification is idempotent for InProgress checks. It is a
-      // write on the domain, which a deployer working against a platform
-      // team's prerequisites may not hold - the command then fails and the
-      // poll below reports not-verified with the pending checks, which is
-      // the right outcome (verification belongs to the prerequisites step).
-      for (const check of unverified(info)) {
-        await execCommand(
-          `az communication email domain initiate-verification --domain-name ${domain} --email-service-name ${info.emailService} --resource-group ${info.resourceGroup} --verification-type ${check}`,
-          { intent: "Verify email domain", provider: "azure", mutating: true, timeout: 120000 },
-        );
-      }
-      // DNS records were created with the zone by the prerequisites
-      // deployment, so verification normally lands within a couple of
-      // minutes.
-      const deadline = Date.now() + 6 * 60 * 1000;
-      while (Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 15000));
-        info = await showDomain();
-        if (info?.id && unverified(info).length === 0) break;
-      }
-      if (!info?.id || unverified(info).length > 0) {
-        return {
-          status: "not-verified",
-          domain,
-          detail: info?.id ? unverified(info).join(", ") : "domain not found",
-        };
-      }
+    const pendingChecks = unverified(info);
+    if (pendingChecks.length > 0) {
+      return {
+        status: "not-verified",
+        domain,
+        detail: pendingChecks.join(", "),
+      };
     }
 
-    // Linking is a write on the communication service plus a READ on the
-    // domain, so it works even when the domain lives in a resource group the
-    // deployer cannot modify.
-    const allDomains = [...linked, info.id]
-      .map((id) => `"${id}"`)
-      .join(" ");
-    await execCommand(
-      `az communication update --name ${commService} --resource-group ${commResourceGroup} --linked-domains ${allDomains}`,
-      { intent: "Link email domain", provider: "azure", mutating: true, timeout: 120000 },
-    );
-    return { status: "linked", domain };
-  } catch {
-    return { status: "unknown" };
+    return {
+      status: "not-linked",
+      domain,
+      detail: "The verified domain is not linked to the communication service.",
+    };
+  } catch (error) {
+    return {
+      status: "unknown",
+      detail: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
-/**
- * ACS SMTP send requires the Entra app (whose client ID is the middle segment
- * of the SMTP username <acs>.<appClientId>.<tenant>) to hold a role on the
- * communication service. cluster-setup deliberately does NOT create this
- * assignment (the app is a Graph object created out-of-band), so the CLI
- * grants it here at deploy time - the same place it wires workload-identity
- * bindings - which removes the parameter-file round-trip and second Bicep
- * deploy. Idempotent (a re-grant is a no-op); fail-open ("unknown") on
- * anything ambiguous so a probe quirk never blocks a deploy.
- */
 export interface AzureAcsResource {
   name: string;
   resourceGroup: string;
@@ -1166,13 +1300,9 @@ export interface AzureAcsResource {
 }
 
 /**
- * List the ACS communication services in the subscription, so the wizard can
- * assemble the SMTP username (<acs>.<appClientId>.<tenant>) from a resource
- * the operator picked rather than one guessed for them. Deliberately NOT
- * scoped to the deployment's resource group: a bring-your-own ACS commonly
- * lives in a shared messaging resource group, and scoping it away made that
- * resource unselectable. Empty list on any failure so the wizard falls back to
- * the free-text username field.
+ * List ACS communication services in the active subscription. Deliberately
+ * subscription-wide because enterprise messaging resources often live in a
+ * platform-owned resource group.
  */
 export async function listAzureAcsResources(): Promise<AzureAcsResource[]> {
   try {
@@ -1198,6 +1328,86 @@ export async function listAzureAcsResources(): Promise<AzureAcsResource[]> {
   }
 }
 
+export interface AzureAcsSmtpUsername {
+  name: string;
+  username: string;
+  entraApplicationId: string;
+  tenantId: string;
+  status?: string;
+  communicationServiceId: string;
+}
+
+export function parseAcsCommunicationServiceId(
+  id: string,
+): { subscriptionId: string; resourceGroup: string; name: string } | null {
+  const match = id.match(
+    /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.Communication\/communicationServices\/([^/]+)$/i,
+  );
+  if (!match) return null;
+  return {
+    subscriptionId: match[1],
+    resourceGroup: match[2],
+    name: match[3],
+  };
+}
+
+/**
+ * Discover the modern ACS SMTP Username child resources. The username is
+ * user-defined; its Entra application and tenant are authoritative metadata,
+ * so the CLI must not synthesize or parse them from the username text.
+ */
+export async function listAcsSmtpUsernames(
+  communicationService: Pick<AzureAcsResource, "id">,
+): Promise<AzureAcsSmtpUsername[]> {
+  if (!parseAcsCommunicationServiceId(communicationService.id)) return [];
+  try {
+    const res = await execCommandArgs(
+      "az",
+      [
+        "rest",
+        "--method",
+        "get",
+        "--url",
+        `${communicationService.id}/smtpUsernames?api-version=2026-03-18`,
+        "--output",
+        "json",
+      ],
+      { intent: "Discover managed email", provider: "azure" },
+    );
+    if (!res.stdout.trim()) return [];
+    const payload = JSON.parse(res.stdout) as {
+      value?: Array<{
+        name?: string;
+        properties?: {
+          username?: string;
+          entraApplicationId?: string;
+          tenantId?: string;
+          status?: string;
+        };
+      }>;
+    };
+    return (payload.value ?? [])
+      .filter(
+        (item) =>
+          item.name &&
+          item.properties?.username &&
+          item.properties?.entraApplicationId &&
+          item.properties?.tenantId,
+      )
+      .map((item) => ({
+        name: item.name!,
+        username: item.properties!.username!,
+        entraApplicationId: item.properties!.entraApplicationId!,
+        tenantId: item.properties!.tenantId!,
+        status: item.properties!.status,
+        communicationServiceId: communicationService.id,
+      }))
+      .sort((a, b) => a.username.localeCompare(b.username));
+  } catch {
+    return [];
+  }
+}
+
 /**
  * True when a user-assigned managed identity of the given name exists
  * anywhere in the subscription - used to confirm the cluster-setup
@@ -1208,25 +1418,175 @@ export async function listAzureAcsResources(): Promise<AzureAcsResource[]> {
 export async function azureManagedIdentityExists(
   name: string,
 ): Promise<boolean> {
-  if (!name) return false;
+  return Boolean(await findAzureManagedIdentity(name));
+}
+
+export async function findAzureManagedIdentity(
+  name: string,
+): Promise<AzureManagedIdentity | null> {
+  if (!name) return null;
   try {
-    const res = await execCommand(
-      `az identity list --query "[?name=='${name}'].id" --output tsv`,
+    const res = await execCommandArgs(
+      "az",
+      [
+        "identity",
+        "list",
+        "--query",
+        `[?name=='${name}'] | [0].{id:id,name:name,clientId:clientId,resourceGroup:resourceGroup}`,
+        "--output",
+        "json",
+      ],
       { intent: "Discover DNS zones", provider: "azure" },
     );
-    return res.stdout.trim().length > 0;
+    if (!res.stdout.trim()) return null;
+    const identity = JSON.parse(res.stdout) as AzureManagedIdentity | null;
+    return identity?.id && identity.clientId ? identity : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
 export interface AzureDnsZoneInfo {
+  id: string;
   name: string;
   resourceGroup: string;
   nameServers: string[];
   // True when public NS records for the zone already point at its Azure name
   // servers - i.e. the one-time parent-domain delegation is live.
   delegated: boolean;
+}
+
+export function parseAzureDnsZoneId(
+  id: string,
+): { subscriptionId: string; resourceGroup: string; name: string } | null {
+  const match = id.match(
+    /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.Network\/dnsZones\/([^/]+)$/i,
+  );
+  if (!match) return null;
+  return {
+    subscriptionId: match[1],
+    resourceGroup: match[2],
+    name: match[3],
+  };
+}
+
+export function parseAzureManagedIdentityId(
+  id: string,
+): { subscriptionId: string; resourceGroup: string; name: string } | null {
+  const match = id.match(
+    /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.ManagedIdentity\/userAssignedIdentities\/([^/]+)$/i,
+  );
+  if (!match) return null;
+  return {
+    subscriptionId: match[1],
+    resourceGroup: match[2],
+    name: match[3],
+  };
+}
+
+async function withAzureDnsDelegation(
+  zone: Omit<AzureDnsZoneInfo, "delegated">,
+): Promise<AzureDnsZoneInfo> {
+  let delegated = false;
+  try {
+    const { promises: dns } = await import("node:dns");
+    const publicNs = await Promise.race([
+      dns.resolveNs(zone.name),
+      new Promise<string[]>((resolve) =>
+        setTimeout(() => resolve([]), 5000).unref?.(),
+      ),
+    ]);
+    const normalized = publicNs.map((name) =>
+      name.replace(/\.$/, "").toLowerCase(),
+    );
+    delegated =
+      normalized.length > 0 &&
+      zone.nameServers.some((name) => normalized.includes(name));
+  } catch {
+    delegated = false;
+  }
+  return { ...zone, delegated };
+}
+
+/** Resolve an exact Azure DNS resource ID, including cross-subscription IDs. */
+export async function findAzureDnsZoneById(
+  dnsZoneId: string,
+): Promise<AzureDnsZoneInfo | null> {
+  if (!parseAzureDnsZoneId(dnsZoneId)) return null;
+  try {
+    const result = await execCommandArgs(
+      "az",
+      [
+        "network",
+        "dns",
+        "zone",
+        "show",
+        "--ids",
+        dnsZoneId,
+        "--query",
+        "{id:id,name:name,resourceGroup:resourceGroup,nameServers:nameServers}",
+        "--output",
+        "json",
+      ],
+      { intent: "Discover DNS zones", provider: "azure" },
+    );
+    const zone = JSON.parse(result.stdout || "null") as {
+      id?: string;
+      name?: string;
+      resourceGroup?: string;
+      nameServers?: string[];
+    } | null;
+    if (!zone?.id || !zone.name || !zone.resourceGroup) return null;
+    return withAzureDnsDelegation({
+      id: zone.id,
+      name: zone.name.toLowerCase(),
+      resourceGroup: zone.resourceGroup,
+      nameServers: (zone.nameServers ?? []).map((name) =>
+        name.replace(/\.$/, "").toLowerCase(),
+      ),
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveAzureExternalDnsReferences(
+  dnsZoneId: string,
+  identityId: string,
+): Promise<{
+  clientId: string;
+  subscriptionId: string;
+  resourceGroup: string;
+} | null> {
+  const zone = parseAzureDnsZoneId(dnsZoneId);
+  const identity = parseAzureManagedIdentityId(identityId);
+  if (!zone || !identity) return null;
+  try {
+    const result = await execCommandArgs(
+      "az",
+      [
+        "identity",
+        "show",
+        "--ids",
+        identityId,
+        "--query",
+        "clientId",
+        "--output",
+        "tsv",
+      ],
+      { intent: "Discover DNS zones", provider: "azure" },
+    );
+    const clientId = result.stdout.trim();
+    return clientId
+      ? {
+          clientId,
+          subscriptionId: zone.subscriptionId,
+          resourceGroup: zone.resourceGroup,
+        }
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1241,10 +1601,10 @@ export async function findAzureDnsZone(
   domain: string,
 ): Promise<AzureDnsZoneInfo | null> {
   if (!domain) return null;
-  let zones: Array<{ name: string; resourceGroup: string }>;
+  let zones: Array<{ id: string; name: string; resourceGroup: string }>;
   try {
     const res = await execCommand(
-      `az network dns zone list --query "[].{name:name,resourceGroup:resourceGroup}" --output json`,
+      `az network dns zone list --query "[].{id:id,name:name,resourceGroup:resourceGroup}" --output json`,
       { intent: "Discover DNS zones", provider: "azure" },
     );
     zones = JSON.parse(res.stdout || "[]");
@@ -1264,8 +1624,20 @@ export async function findAzureDnsZone(
 
   let nameServers: string[] = [];
   try {
-    const res = await execCommand(
-      `az network dns zone show --name ${covering.name} --resource-group ${covering.resourceGroup} --query nameServers --output json`,
+    const res = await execCommandArgs(
+      "az",
+      [
+        "network",
+        "dns",
+        "zone",
+        "show",
+        "--ids",
+        covering.id,
+        "--query",
+        "nameServers",
+        "--output",
+        "json",
+      ],
       { intent: "Discover DNS zones", provider: "azure" },
     );
     nameServers = (JSON.parse(res.stdout || "[]") as string[]).map((n) =>
@@ -1275,34 +1647,12 @@ export async function findAzureDnsZone(
     nameServers = [];
   }
 
-  // Delegation check via public DNS (no shelling out). Compare the zone's
-  // authoritative name servers against what resolvers actually return for the
-  // zone apex; a non-empty intersection means the delegation is live.
-  // resolveNs has no built-in timeout, so cap it - an undelegated name can
-  // otherwise leave a resolver waiting, and this runs in an interactive
-  // wizard. A timeout simply reports "not delegated".
-  let delegated = false;
-  try {
-    const { promises: dns } = await import("node:dns");
-    const publicNs = await Promise.race([
-      dns.resolveNs(covering.name),
-      new Promise<string[]>((resolve) =>
-        setTimeout(() => resolve([]), 5000).unref?.(),
-      ),
-    ]);
-    const normalized = publicNs.map((n) => n.replace(/\.$/, "").toLowerCase());
-    delegated =
-      normalized.length > 0 && nameServers.some((n) => normalized.includes(n));
-  } catch {
-    delegated = false;
-  }
-
-  return {
+  return withAzureDnsDelegation({
+    id: covering.id,
     name: covering.name,
     resourceGroup: covering.resourceGroup,
     nameServers,
-    delegated,
-  };
+  });
 }
 
 export interface AcsSenderAddress {
@@ -1326,12 +1676,22 @@ export interface AcsSenderAddress {
  */
 export function parseAcsEmailDomainId(
   id: string,
-): { resourceGroup: string; emailService: string; domain: string } | null {
+): {
+  subscriptionId: string;
+  resourceGroup: string;
+  emailService: string;
+  domain: string;
+} | null {
   const match = id.match(
-    /\/resourceGroups\/([^/]+)\/providers\/Microsoft\.Communication\/emailServices\/([^/]+)\/domains\/([^/]+)$/i,
+    /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.Communication\/emailServices\/([^/]+)\/domains\/([^/]+)$/i,
   );
   if (!match) return null;
-  return { resourceGroup: match[1], emailService: match[2], domain: match[3] };
+  return {
+    subscriptionId: match[1],
+    resourceGroup: match[2],
+    emailService: match[3],
+    domain: match[4],
+  };
 }
 
 /**
@@ -1356,18 +1716,44 @@ export function parseAcsEmailDomainId(
 export async function listAcsSenderAddresses(
   resourceGroup: string,
   acsResourceName?: string,
+  communicationServiceId?: string,
 ): Promise<AcsSenderAddress[]> {
   if (!resourceGroup) return [];
   try {
     // (resource group, email service) pairs to pull domains from.
-    let emailServices: Array<{ resourceGroup: string; name: string }> = [];
+    let emailServices: Array<{
+      subscriptionId?: string;
+      resourceGroup: string;
+      name: string;
+    }> = [];
 
     if (acsResourceName) {
       try {
-        const linkedRes = await execCommand(
-          `az communication show --name ${acsResourceName} --resource-group ${resourceGroup} --query linkedDomains --output json`,
-          { intent: "Discover managed email", provider: "azure" },
-        );
+        const parsedCommunicationService = communicationServiceId
+          ? parseAcsCommunicationServiceId(communicationServiceId)
+          : null;
+        const args = [
+          "communication",
+          "show",
+          "--name",
+          parsedCommunicationService?.name || acsResourceName,
+          "--resource-group",
+          parsedCommunicationService?.resourceGroup || resourceGroup,
+          "--query",
+          "linkedDomains",
+          "--output",
+          "json",
+        ];
+        if (parsedCommunicationService) {
+          args.push(
+            "--subscription",
+            parsedCommunicationService.subscriptionId,
+          );
+        }
+        const linkedRes = await execCommandArgs("az", args, {
+          intent: "Discover managed email",
+          provider: "azure",
+        });
         const linked = JSON.parse(linkedRes.stdout || "[]") as string[];
         const seenSvc = new Set<string>();
         for (const id of linked) {
@@ -1377,6 +1763,7 @@ export async function listAcsSenderAddresses(
           if (seenSvc.has(key)) continue;
           seenSvc.add(key);
           emailServices.push({
+            subscriptionId: parsed.subscriptionId,
             resourceGroup: parsed.resourceGroup,
             name: parsed.emailService,
           });
@@ -1387,26 +1774,67 @@ export async function listAcsSenderAddresses(
     }
 
     if (emailServices.length === 0) {
-      const svcRes = await execCommand(
-        `az resource list --resource-group ${resourceGroup} --resource-type Microsoft.Communication/emailServices --query "[].name" --output json`,
-        { intent: "Discover managed email", provider: "azure" },
-      );
+      const parsedCommunicationService = communicationServiceId
+        ? parseAcsCommunicationServiceId(communicationServiceId)
+        : null;
+      const args = [
+        "resource",
+        "list",
+        "--resource-group",
+        parsedCommunicationService?.resourceGroup || resourceGroup,
+        "--resource-type",
+        "Microsoft.Communication/emailServices",
+        "--query",
+        "[].name",
+        "--output",
+        "json",
+      ];
+      if (parsedCommunicationService) {
+        args.push(
+          "--subscription",
+          parsedCommunicationService.subscriptionId,
+        );
+      }
+      const svcRes = await execCommandArgs("az", args, {
+        intent: "Discover managed email",
+        provider: "azure",
+      });
       // Every email service in the group is queried, not just the first: a
       // resource group holding a second (staging, legacy) email service would
       // otherwise hide the domains of whichever one did not sort first.
       emailServices = (JSON.parse(svcRes.stdout || "[]") as string[])
         .filter(Boolean)
-        .map((name) => ({ resourceGroup, name }));
+        .map((name) => ({
+          subscriptionId: parsedCommunicationService?.subscriptionId,
+          resourceGroup:
+            parsedCommunicationService?.resourceGroup || resourceGroup,
+          name,
+        }));
     }
     if (emailServices.length === 0) return [];
 
     const perService = await Promise.all(
       emailServices.map(async (svc) => {
         try {
-          const res = await execCommand(
-            `az communication email domain list --email-service-name ${svc.name} --resource-group ${svc.resourceGroup} --output json`,
-            { intent: "Discover managed email", provider: "azure" },
-          );
+          const args = [
+            "communication",
+            "email",
+            "domain",
+            "list",
+            "--email-service-name",
+            svc.name,
+            "--resource-group",
+            svc.resourceGroup,
+            "--output",
+            "json",
+          ];
+          if (svc.subscriptionId) {
+            args.push("--subscription", svc.subscriptionId);
+          }
+          const res = await execCommandArgs("az", args, {
+            intent: "Discover managed email",
+            provider: "azure",
+          });
           return JSON.parse(res.stdout || "[]") as Array<{
             fromSenderDomain?: string;
             domainManagement?: string;
@@ -1444,11 +1872,7 @@ export async function listAcsSenderAddresses(
   }
 }
 
-/**
- * Assemble an ACS SMTP username from its three parts. The wizard uses this so
- * the operator only supplies the Entra app client ID; the ACS resource name
- * and tenant come from the deployment.
- */
+/** Legacy composite username helper retained for existing deployment configs. */
 export function buildAcsSmtpUsername(
   acsResource: string,
   appClientId: string,
@@ -1457,11 +1881,7 @@ export function buildAcsSmtpUsername(
   return `${acsResource}.${appClientId}.${tenantId}`;
 }
 
-/**
- * Extract the Entra app client ID (the middle segment) from an ACS SMTP
- * username. Returns null when the value is not the expected
- * <acs>.<appClientId>.<tenant> shape or still holds a placeholder.
- */
+/** Parse the app ID from a legacy composite ACS SMTP username. */
 export function parseAcsSmtpAppClientId(smtpUsername: string): string | null {
   const parts = smtpUsername.split(".");
   if (parts.length < 3) return null;
@@ -1470,12 +1890,7 @@ export function parseAcsSmtpAppClientId(smtpUsername: string): string | null {
   return appClientId;
 }
 
-/**
- * Extract the ACS resource name (the leading segment) from an ACS SMTP
- * username. This is how the deploy-time role grant finds the exact resource
- * the operator selected in the wizard. Returns null on the placeholder or a
- * value that is not the <acs>.<appClientId>.<tenant> shape.
- */
+/** Parse the ACS resource name from a legacy composite SMTP username. */
 export function parseAcsSmtpResourceName(smtpUsername: string): string | null {
   const parts = smtpUsername.split(".");
   if (parts.length < 3) return null;
@@ -1613,68 +2028,235 @@ export function recommendSmtpAppIndex(
   return apps.findIndex((app) => /rulebricks/i.test(app.name));
 }
 
-export async function ensureAcsSmtpRoleAssignment(
-  smtpUsername: string,
-): Promise<{
-  status: "ok" | "granted" | "no-app" | "denied" | "unknown";
-  /** no-app: the missing app client ID. denied: the grant command an admin can run. */
-  detail?: string;
-}> {
-  const appClientId = parseAcsSmtpAppClientId(smtpUsername);
-  if (!appClientId) return { status: "unknown" };
-  // The username's leading segment is the ACS resource the operator selected,
-  // so the grant lands on that exact resource. Taking the first ACS in the
-  // resource group instead would silently grant Contributor on the wrong
-  // service whenever the deployment uses a BYO or secondary ACS, and SMTP
-  // would still fail with a permissions error pointing nowhere useful.
-  const acsResource = parseAcsSmtpResourceName(smtpUsername);
-  if (!acsResource) return { status: "unknown" };
-  try {
-    const acsRes = await execCommand(
-      `az resource list --resource-type Microsoft.Communication/communicationServices --query "[?name=='${acsResource}'].id | [0]" --output tsv`,
-      { intent: "Verify email domain", provider: "azure" },
-    );
-    const acsId = acsRes.stdout.trim();
-    if (!acsId) return { status: "unknown" };
+export const ACS_SMTP_BUILT_IN_ROLE =
+  "Communication and Email Service Owner";
 
-    const spRes = await execCommand(
-      `az ad sp show --id ${appClientId} --query id --output tsv`,
-      { intent: "Verify email domain", provider: "azure" },
+export const ACS_SMTP_CUSTOM_ROLE_ACTIONS = [
+  "Microsoft.Communication/CommunicationServices/Read",
+  "Microsoft.Communication/CommunicationServices/Write",
+  "Microsoft.Communication/EmailServices/Write",
+] as const;
+
+export type AcsSmtpRoleRequirement = {
+  principalId: string;
+  scope: string;
+  builtInRole: typeof ACS_SMTP_BUILT_IN_ROLE;
+  customRoleActions: typeof ACS_SMTP_CUSTOM_ROLE_ACTIONS;
+};
+
+export type AcsCommandRunner = (
+  file: string,
+  args: string[],
+  intent: string,
+) => Promise<{ stdout: string; stderr: string }>;
+
+const runAcsCommand: AcsCommandRunner = (file, args, intent) =>
+  execCommandArgs(file, args, { intent, provider: "azure" });
+
+export interface AcsSmtpContext {
+  communicationServiceId?: string;
+  entraApplicationId?: string;
+}
+
+export async function checkAcsSmtpRoleAssignment(
+  smtpUsername: string,
+  contextOrRun: AcsSmtpContext | AcsCommandRunner = {},
+  injectedRun: AcsCommandRunner = runAcsCommand,
+): Promise<{
+  status:
+    | "ok"
+    | "needs-review"
+    | "no-app"
+    | "no-service-principal"
+    | "unknown";
+  /** Missing-app/SP statuses carry the application client ID. */
+  detail?: string;
+  requirement?: AcsSmtpRoleRequirement;
+}> {
+  const run =
+    typeof contextOrRun === "function" ? contextOrRun : injectedRun;
+  const context =
+    typeof contextOrRun === "function" ? {} : contextOrRun;
+  let appClientId =
+    context.entraApplicationId || parseAcsSmtpAppClientId(smtpUsername);
+  let acsId = context.communicationServiceId || "";
+  let requirement: AcsSmtpRoleRequirement | undefined;
+  const parsedAcsId = acsId ? parseAcsCommunicationServiceId(acsId) : null;
+
+  // Modern SMTP usernames are free-form child resources. If the caller knows
+  // the exact ACS resource but loaded an older config without app metadata,
+  // recover the authoritative Entra application from that child.
+  if (parsedAcsId && !appClientId) {
+    try {
+      const usernames = await run(
+        "az",
+        [
+          "rest",
+          "--method",
+          "get",
+          "--url",
+          `${acsId}/smtpUsernames?api-version=2026-03-18`,
+          "--query",
+          `value[?properties.username=='${smtpUsername}'].properties.entraApplicationId | [0]`,
+          "--output",
+          "tsv",
+        ],
+        "Verify ACS SMTP access",
+      );
+      appClientId = usernames.stdout.trim();
+    } catch (error) {
+      return {
+        status: "unknown",
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  // Compatibility for configs created before SMTP Username child resources:
+  // their username embedded the ACS name, app ID, and tenant.
+  const legacyAcsResource = !acsId
+    ? parseAcsSmtpResourceName(smtpUsername)
+    : null;
+  if (!appClientId || (!parsedAcsId && !legacyAcsResource)) {
+    return {
+      status: "unknown",
+      detail:
+        "The SMTP Username is not linked to an ACS resource and Entra application in this configuration.",
+    };
+  }
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      appClientId,
+    ) ||
+    (legacyAcsResource &&
+      !/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(legacyAcsResource))
+  ) {
+    return {
+      status: "unknown",
+      detail: "The ACS resource name or Entra application ID is invalid.",
+    };
+  }
+  try {
+    if (!acsId && legacyAcsResource) {
+      const acsRes = await run(
+        "az",
+        [
+          "resource",
+          "list",
+          "--resource-type",
+          "Microsoft.Communication/communicationServices",
+          "--query",
+          `[?name=='${legacyAcsResource}'].id | [0]`,
+          "--output",
+          "tsv",
+        ],
+        "Verify ACS SMTP access",
+      );
+      acsId = acsRes.stdout.trim();
+      if (!acsId) {
+        return {
+          status: "unknown",
+          detail:
+            acsRes.stderr.trim() ||
+            `Azure Communication Services resource "${legacyAcsResource}" was not found.`,
+        };
+      }
+    }
+
+    const spRes = await run(
+      "az",
+      [
+        "ad",
+        "sp",
+        "show",
+        "--id",
+        appClientId,
+        "--query",
+        "id",
+        "--output",
+        "tsv",
+      ],
+      "Verify ACS SMTP access",
     );
     const spObjectId = spRes.stdout.trim();
     if (!spObjectId) {
-      return { status: "no-app", detail: appClientId };
+      const detail = spRes.stderr.trim();
+      if (detail && !/does not exist|not found|no service principal/i.test(detail)) {
+        return { status: "unknown", detail };
+      }
+      const appRes = await run(
+        "az",
+        [
+          "ad",
+          "app",
+          "show",
+          "--id",
+          appClientId,
+          "--query",
+          "appId",
+          "--output",
+          "tsv",
+        ],
+        "Verify ACS SMTP access",
+      );
+      if (appRes.stdout.trim()) {
+        return { status: "no-service-principal", detail: appClientId };
+      }
+      const appDetail = appRes.stderr.trim();
+      return appDetail &&
+        !/does not exist|not found|could not be found/i.test(appDetail)
+        ? { status: "unknown", detail: appDetail }
+        : { status: "no-app", detail: appClientId };
     }
 
-    // Contributor is Microsoft's documented baseline for ACS SMTP send.
-    const existing = await execCommand(
-      `az role assignment list --assignee ${spObjectId} --scope ${acsId} --role Contributor --query "length(@)" --output tsv`,
-      { intent: "Verify email domain", provider: "azure" },
+    requirement = {
+      principalId: spObjectId,
+      scope: acsId,
+      builtInRole: ACS_SMTP_BUILT_IN_ROLE,
+      customRoleActions: ACS_SMTP_CUSTOM_ROLE_ACTIONS,
+    };
+
+    // Deliberately read-only: Contributor cannot create role assignments, and
+    // the documented SMTP grant belongs to the platform owner. An equivalent
+    // custom role is also valid, so absence of the built-in role requires
+    // review rather than proving that access is missing.
+    const existing = await run(
+      "az",
+      [
+        "role",
+        "assignment",
+        "list",
+        "--assignee",
+        spObjectId,
+        "--scope",
+        acsId,
+        "--include-inherited",
+        "--query",
+        `[?roleDefinitionName=='${ACS_SMTP_BUILT_IN_ROLE}'] | length(@)`,
+        "--output",
+        "tsv",
+      ],
+      "Verify ACS SMTP access",
     );
-    if (existing.stdout.trim() !== "0" && existing.stdout.trim() !== "") {
-      return { status: "ok" };
+    const assignmentCount = existing.stdout.trim();
+    if (!assignmentCount) {
+      return {
+        status: "unknown",
+        detail: existing.stderr.trim(),
+        requirement,
+      };
     }
-    const grantCommand = `az role assignment create --assignee-object-id ${spObjectId} --assignee-principal-type ServicePrincipal --role Contributor --scope ${acsId}`;
-    let grant: { stdout: string; stderr: string };
-    try {
-      grant = await execCommand(grantCommand, {
-        intent: "Grant email SMTP access",
-        provider: "azure",
-        mutating: true,
-        timeout: 120000,
-      });
-    } catch (error) {
-      if (error instanceof CommandDeniedError) {
-        return { status: "denied", detail: grantCommand };
-      }
-      throw error;
+    if (assignmentCount !== "0") {
+      return { status: "ok", requirement };
     }
-    if (!grant.stdout.trim() && isCloudAuthorizationError(grant.stderr)) {
-      return { status: "denied", detail: grantCommand };
-    }
-    return { status: "granted" };
-  } catch {
-    return { status: "unknown" };
+
+    return { status: "needs-review", requirement };
+  } catch (error) {
+    return {
+      status: "unknown",
+      detail: error instanceof Error ? error.message : String(error),
+      ...(requirement ? { requirement } : {}),
+    };
   }
 }
 
@@ -1751,7 +2333,7 @@ export async function listAzureManagedIdentities(): Promise<
 > {
   try {
     const result = await execCommand(
-      'az identity list --query "[].{name:name,clientId:clientId,resourceGroup:resourceGroup}" --output json',
+      'az identity list --query "[].{id:id,name:name,clientId:clientId,resourceGroup:resourceGroup}" --output json',
     );
     if (result.stderr && !result.stdout) {
       return [];
@@ -2068,6 +2650,7 @@ export async function listAllAksClusters(): Promise<DiscoveredCluster[]> {
 }
 
 export interface AzureContainerRegistry {
+  id: string;
   name: string;
   loginServer: string;
   resourceGroup: string;
@@ -2076,28 +2659,28 @@ export interface AzureContainerRegistry {
 
 /**
  * List Azure Container Registries across the subscription. The wizard's
- * image-source step offers the deployment's registry (cluster-setup
- * provisions one with a docker.io/rulebricks/* pull-through cache rule) as
- * the image host; subscription-wide because it may live in another resource
- * group.
+ * image-source step offers the deployment's registry as the image host.
+ * Subscription-wide because it may live in another resource group.
  */
 export async function listAzureContainerRegistries(): Promise<
   AzureContainerRegistry[]
 > {
   try {
     const res = await execCommand(
-      `az acr list --query "[].{name:name,loginServer:loginServer,resourceGroup:resourceGroup,sku:sku.name}" --output json`,
+      `az acr list --query "[].{id:id,name:name,loginServer:loginServer,resourceGroup:resourceGroup,sku:sku.name}" --output json`,
       { intent: "Discover container registries", provider: "azure" },
     );
     const rows = JSON.parse(res.stdout || "[]") as Array<{
+      id?: string;
       name?: string;
       loginServer?: string;
       resourceGroup?: string;
       sku?: string;
     }>;
     return rows
-      .filter((row) => row.name && row.loginServer)
+      .filter((row) => row.id && row.name && row.loginServer)
       .map((row) => ({
+        id: row.id!,
         name: row.name!,
         loginServer: row.loginServer!,
         resourceGroup: row.resourceGroup || "",
@@ -2110,27 +2693,34 @@ export async function listAzureContainerRegistries(): Promise<
 }
 
 /**
- * True when the registry carries a pull-through cache rule for the
- * docker.io/rulebricks/* repositories (cluster-setup provisions one). Decides
- * whether the wizard recommends pull-through (rule present: pulls populate
- * the cache on demand) or mirroring (no rule: something must copy the images
- * in).
+ * True when the CLI fully mirrors the deployment's registry - every container
+ * image AND the helm chart are imported into it, and helm installs from it.
+ * Azure ACR only. Deploy and upgrade share this gate.
  */
-export async function acrHasRulebricksCacheRule(
-  registryName: string,
-): Promise<boolean> {
-  try {
-    const res = await execCommand(
-      `az acr cache list --registry ${registryName} --query "[].sourceRepository" --output json`,
-      { intent: "Discover container registries", provider: "azure" },
-    );
-    const sources = JSON.parse(res.stdout || "[]") as string[];
-    return sources.some((source) =>
-      /^docker\.io\/rulebricks\//i.test(source || ""),
-    );
-  } catch {
-    return false;
-  }
+export function shouldMirrorToAcr(config: {
+  imageRegistryMode?: string;
+  imageRegistry?: string;
+  infrastructure: { provider?: CloudProvider };
+}): boolean {
+  return (
+    config.imageRegistryMode === "mirror" &&
+    Boolean(config.imageRegistry) &&
+    config.infrastructure.provider === "azure"
+  );
+}
+
+/**
+ * The chart ref helm installs/upgrades/dry-runs from: the deployment's own
+ * fully mirrored registry, or the canonical ghcr.io chart otherwise.
+ */
+export function chartOciRef(config: {
+  imageRegistryMode?: string;
+  imageRegistry?: string;
+  infrastructure: { provider?: CloudProvider };
+}): string {
+  return shouldMirrorToAcr(config)
+    ? `oci://${config.imageRegistry}/${MIRRORED_CHART_REPOSITORY}`
+    : HELM_CHART_OCI;
 }
 
 export interface AcrImportSpec {
@@ -2194,15 +2784,15 @@ export function planAcrImports(
 }
 
 /**
- * Copy the planned images into an ACR with `az acr import` - the CLI-driven
- * alternative to the pull-through cache for registries that cannot use one
- * (Basic/Standard SKUs, or egress policies that forbid on-demand upstream
- * pulls). Idempotent: a tag already present with the expected digest (or any
- * digest, when the plan has no pin - release tags are immutable) is skipped;
- * mismatches are re-imported with --force so digest pins in the values always
- * resolve. Source auth is the same Docker Hub PAT the license key backs
- * everywhere else. Failures are collected, not thrown: the caller decides
- * whether missing mirrors block the deploy.
+ * Copy the planned images into an ACR with `az acr import`, so a fully
+ * mirrored deployment never pulls from Docker Hub (air-gapped clusters, or
+ * egress policies that forbid on-demand upstream pulls). Idempotent: a tag
+ * already present with the expected digest (or any digest, when the plan has
+ * no pin - release tags are immutable) is skipped; mismatches are re-imported
+ * with --force so digest pins in the values always resolve. Source auth is
+ * the same Docker Hub PAT the license key backs everywhere else. Failures are
+ * collected, not thrown: the caller decides whether missing mirrors block the
+ * deploy.
  */
 export interface AcrImportFailure {
   ref: string;
@@ -2210,16 +2800,171 @@ export interface AcrImportFailure {
   detail?: string;
 }
 
+export function formatAcrMirrorFailureMessage(
+  registry: string,
+  failed: AcrImportFailure[],
+  context = "Mirroring images",
+): string {
+  const registryName = registry.split(".")[0];
+  return [
+    `${context} into ${registry} failed for:`,
+    ...failed.map((failure) =>
+      `  - ${failure.ref}${failure.detail ? ` (${failure.detail})` : ""}`,
+    ),
+    "Ask a registry admin to grant Container Registry Data Importer and Data Reader on the registry, or import them:",
+    ...failed.map((failure) => {
+      // Docker Hub sources need the license-derived PAT; the ghcr.io chart
+      // package is public and imports anonymously.
+      const sourceAuth = failure.source.startsWith("docker.io/")
+        ? " --username rulebricks --password <Docker PAT derived from your license key>"
+        : "";
+      return `  az acr import --name ${registryName} --source "${failure.source}" --image "${failure.ref}"${sourceAuth} --force`;
+    }),
+  ].join("\n");
+}
+
+export function assertAcrMirrorSucceeded(
+  registry: string,
+  result: { failed: AcrImportFailure[] },
+  context?: string,
+): void {
+  if (result.failed.length > 0) {
+    throw new Error(
+      formatAcrMirrorFailureMessage(registry, result.failed, context),
+    );
+  }
+}
+
+export function parseAzureContainerRegistryId(
+  id: string,
+): { subscriptionId: string; resourceGroup: string; name: string } | null {
+  const match = id.match(
+    /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.ContainerRegistry\/registries\/([^/]+)$/i,
+  );
+  if (!match) return null;
+  return {
+    subscriptionId: match[1],
+    resourceGroup: match[2],
+    name: match[3],
+  };
+}
+
+async function resolveAzureContainerRegistryId(
+  registryName: string,
+  configuredResourceId?: string,
+): Promise<string> {
+  if (configuredResourceId) {
+    const parsed = parseAzureContainerRegistryId(configuredResourceId);
+    if (!parsed || parsed.name.toLowerCase() !== registryName.toLowerCase()) {
+      throw new Error(
+        "imageRegistryResourceId must reference the selected Azure Container Registry.",
+      );
+    }
+    return configuredResourceId;
+  }
+  const result = await execCommandArgs(
+    "az",
+    [
+      "acr",
+      "show",
+      "--name",
+      registryName,
+      "--query",
+      "id",
+      "--output",
+      "tsv",
+    ],
+    { intent: "Discover container registries", provider: "azure" },
+  );
+  const id = result.stdout.trim();
+  if (!id) {
+    throw new Error(
+      result.stderr.trim() ||
+        `Azure Container Registry "${registryName}" was not found.`,
+    );
+  }
+  return id;
+}
+
+function acrSubscriptionArgs(resourceId?: string): string[] {
+  const parsed = resourceId
+    ? parseAzureContainerRegistryId(resourceId)
+    : null;
+  if (resourceId && !parsed) {
+    throw new Error(
+      "imageRegistryResourceId must be a full Azure Container Registry resource ID.",
+    );
+  }
+  return parsed ? ["--subscription", parsed.subscriptionId] : [];
+}
+
+async function importPrivateImageToAcr(
+  registryResourceId: string,
+  source: string,
+  target: string,
+  password: string,
+): Promise<{ stdout: string; stderr: string }> {
+  const separator = source.indexOf("/");
+  if (separator <= 0 || separator === source.length - 1) {
+    throw new Error(`Invalid registry source reference: ${source}`);
+  }
+  const body = {
+    source: {
+      registryUri: source.slice(0, separator),
+      sourceImage: source.slice(separator + 1),
+      credentials: {
+        username: "rulebricks",
+        password,
+      },
+    },
+    targetTags: [target],
+    mode: "Force",
+  };
+  const directory = await mkdtemp(join(tmpdir(), "rulebricks-acr-import-"));
+  const bodyPath = join(directory, "request.json");
+  try {
+    await writeFile(bodyPath, JSON.stringify(body), { mode: 0o600 });
+    return await execCommandArgs(
+      "az",
+      [
+        "rest",
+        "--method",
+        "post",
+        "--url",
+        `${registryResourceId}/importImage?api-version=2023-11-01-preview`,
+        "--body",
+        `@${bodyPath}`,
+        "--output",
+        "none",
+      ],
+      {
+        intent: "Mirror images to registry",
+        provider: "azure",
+        mutating: true,
+        timeout: 600000,
+      },
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 export async function mirrorImagesToAcr(
   registryName: string,
   licenseKey: string,
   specs: AcrImportSpec[],
+  registryResourceId?: string,
 ): Promise<{ imported: string[]; skipped: string[]; failed: AcrImportFailure[] }> {
   const { formatDockerPat } = await import("./dockerHub.js");
   const pat = formatDockerPat(licenseKey);
   const imported: string[] = [];
   const skipped: string[] = [];
   const failed: AcrImportFailure[] = [];
+  const resolvedRegistryId = await resolveAzureContainerRegistryId(
+    registryName,
+    registryResourceId,
+  );
+  const subscriptionArgs = acrSubscriptionArgs(resolvedRegistryId);
 
   for (const spec of specs) {
     const ref = `${spec.repository}:${spec.tag}`;
@@ -2227,25 +2972,41 @@ export async function mirrorImagesToAcr(
       // Mutable-tag images (force) are always re-imported; the check below
       // would wrongly skip a tag whose upstream content changed.
       if (!spec.force) {
-        const existing = await execCommand(
-          `az acr manifest show --registry ${registryName} --name "${ref}" --query digest --output tsv`,
-          { intent: "Mirror images to registry", provider: "azure" },
-        );
-        const currentDigest = existing.stdout.trim();
-        if (currentDigest && (!spec.digest || currentDigest === spec.digest)) {
-          skipped.push(ref);
-          continue;
+        try {
+          const existing = await execCommandArgs(
+            "az",
+            [
+              "acr",
+              "manifest",
+              "show",
+              "--registry",
+              registryName,
+              "--name",
+              ref,
+              "--query",
+              "digest",
+              "--output",
+              "tsv",
+              ...subscriptionArgs,
+            ],
+            { intent: "Mirror images to registry", provider: "azure" },
+          );
+          const currentDigest = existing.stdout.trim();
+          if (currentDigest && (!spec.digest || currentDigest === spec.digest)) {
+            skipped.push(ref);
+            continue;
+          }
+        } catch {
+          // Repository-read access is only an optimization. The import action
+          // is authoritative and can still succeed with a narrower custom
+          // role, so fall through and import instead of failing pre-emptively.
         }
       }
-      const importRes = await execCommand(
-        `az acr import --name ${registryName} --source "${spec.source}" --image "${ref}" --username rulebricks --password "${pat}" --force --output none`,
-        {
-          intent: "Mirror images to registry",
-          provider: "azure",
-          mutating: true,
-          // Large multi-arch images take a while to copy server-side.
-          timeout: 600000,
-        },
+      const importRes = await importPrivateImageToAcr(
+        resolvedRegistryId,
+        spec.source,
+        ref,
+        pat,
       );
       if (importRes.stderr && /error/i.test(importRes.stderr)) {
         failed.push({
@@ -2268,6 +3029,159 @@ export async function mirrorImagesToAcr(
     }
   }
   return { imported, skipped, failed };
+}
+
+/**
+ * Copy the helm chart OCI artifact for a release into an ACR with
+ * `az acr import`, so fully mirrored deployments install the chart from the
+ * registry instead of ghcr.io. Chart releases are immutable, so a version
+ * already present is skipped. The ghcr.io chart package is public - no
+ * source credentials are needed. Same result shape as mirrorImagesToAcr so
+ * assertAcrMirrorSucceeded gates both.
+ */
+export async function mirrorChartToAcr(
+  registryName: string,
+  chartVersion: string,
+  registryResourceId?: string,
+): Promise<{ imported: string[]; skipped: string[]; failed: AcrImportFailure[] }> {
+  const ref = `${MIRRORED_CHART_REPOSITORY}:${chartVersion}`;
+  const source = `${HELM_CHART_OCI_SOURCE}:${chartVersion}`;
+  try {
+    const resolvedRegistryId = await resolveAzureContainerRegistryId(
+      registryName,
+      registryResourceId,
+    );
+    const subscriptionArgs = acrSubscriptionArgs(resolvedRegistryId);
+    try {
+      const existing = await execCommandArgs(
+        "az",
+        [
+          "acr",
+          "manifest",
+          "show",
+          "--registry",
+          registryName,
+          "--name",
+          ref,
+          "--query",
+          "digest",
+          "--output",
+          "tsv",
+          ...subscriptionArgs,
+        ],
+        { intent: "Mirror images to registry", provider: "azure" },
+      );
+      if (existing.stdout.trim()) {
+        return { imported: [], skipped: [ref], failed: [] };
+      }
+    } catch {
+      // Repository-read access is only an optimization. The import action is
+      // authoritative, so fall through instead of failing pre-emptively.
+    }
+    const importRes = await execCommandArgs(
+      "az",
+      [
+        "acr",
+        "import",
+        "--name",
+        registryName,
+        "--source",
+        source,
+        "--image",
+        ref,
+        "--force",
+        "--output",
+        "none",
+        ...subscriptionArgs,
+      ],
+      {
+        intent: "Mirror images to registry",
+        provider: "azure",
+        mutating: true,
+        timeout: 600000,
+      },
+    );
+    if (importRes.stderr && /error/i.test(importRes.stderr)) {
+      return {
+        imported: [],
+        skipped: [],
+        failed: [{ ref, source, detail: importRes.stderr.split("\n")[0] }],
+      };
+    }
+    return { imported: [ref], skipped: [], failed: [] };
+  } catch (error) {
+    return {
+      imported: [],
+      skipped: [],
+      failed: [
+        {
+          ref,
+          source,
+          detail:
+            error instanceof CommandDeniedError
+              ? "command approval denied"
+              : (error as { message?: string })?.message,
+        },
+      ],
+    };
+  }
+}
+
+/**
+ * Log the local helm client into an ACR so it can pull the mirrored chart:
+ * helm install/upgrade/dry-run run on the operator machine, which has no
+ * kubelet AcrPull identity. `az acr login --expose-token` mints a registry
+ * token without needing a docker daemon; helm stores it in its registry
+ * config for the rest of the run. Tokens are valid for hours - once per CLI
+ * invocation is plenty.
+ */
+export async function helmRegistryLoginToAcr(
+  registryName: string,
+  loginServer: string,
+  registryResourceId?: string,
+): Promise<void> {
+  const res = await execCommandArgs(
+    "az",
+    [
+      "acr",
+      "login",
+      "--name",
+      registryName,
+      "--expose-token",
+      "--output",
+      "json",
+      ...acrSubscriptionArgs(registryResourceId),
+    ],
+    { intent: "Mirror images to registry", provider: "azure", timeout: 60000 },
+  );
+  let token = "";
+  try {
+    token =
+      (JSON.parse(res.stdout || "{}") as { accessToken?: string })
+        .accessToken ?? "";
+  } catch {
+    // Unparseable output falls through to the error below.
+  }
+  if (!token) {
+    throw new Error(
+      `Could not obtain an access token for ${loginServer} (az acr login --expose-token). ` +
+        "Ensure your Azure identity can pull from the registry (AcrPull, or Container Registry Data Importer and Data Reader)." +
+        (res.stderr ? `\nAzure said: ${res.stderr.split("\n")[0]}` : ""),
+    );
+  }
+  // The fixed GUID is ACR's documented username for token-based logins.
+  await execa(
+    "helm",
+    [
+      "registry",
+      "login",
+      loginServer,
+      "--username",
+      "00000000-0000-0000-0000-000000000000",
+      "--password-stdin",
+    ],
+    { input: token, timeout: 60000 },
+  );
 }
 
 /**

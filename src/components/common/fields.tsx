@@ -171,6 +171,8 @@ export interface DiscoveredSelectProps {
   onSelect: (value: string) => void;
   onManual: () => void;
   manualLabel?: string;
+  /** Hide the appended manual row when every valid choice is already listed. */
+  showManualOption?: boolean;
   /** Index of the recommended item (-1 for none); it is preselected and labeled. */
   recommendIndex?: (items: SelectOption[]) => number;
   /** Preselect the item with this value when present (used after recommendIndex). */
@@ -199,6 +201,7 @@ export function DiscoveredSelect({
   onSelect,
   onManual,
   manualLabel = "Enter manually…",
+  showManualOption = true,
   recommendIndex,
   initialValue,
   preferRecommended = false,
@@ -264,7 +267,7 @@ export function DiscoveredSelect({
         index === recommended ? `${item.label}  - recommended` : item.label,
       value: item.value,
     })),
-    { label: manualLabel, value: MANUAL },
+    ...(showManualOption ? [{ label: manualLabel, value: MANUAL }] : []),
   ];
   // Size the list to its contents; scroll only past the layout's budget
   // instead of reserving a fixed block of rows.

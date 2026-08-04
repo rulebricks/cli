@@ -281,7 +281,7 @@ variable "redis_transit_encryption" {
 # ------------------------------------------------------------------------------
 variable "enable_managed_database" {
   description = <<-EOT
-    Provision Cloud SQL for PostgreSQL 17 instead of running Postgres
+    Provision Cloud SQL for PostgreSQL 18 instead of running Postgres
     in-cluster. NOTE: the Rulebricks CLI wizard currently offers external
     Postgres on AWS/Azure only - on GCP, set externalServices.postgres in the
     deployment config file by hand (the chart itself is cloud-agnostic).

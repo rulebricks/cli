@@ -46,7 +46,7 @@
 
   { "ParameterKey": "EnableManagedDatabase", "ParameterValue": "false" },
   { "ParameterKey": "DbInstanceClass", "ParameterValue": "db.m7g.large" },
-  { "ParameterKey": "DbEngineVersion", "ParameterValue": "17" },
+  { "ParameterKey": "DbEngineVersion", "ParameterValue": "18" },
   { "ParameterKey": "DbMasterUsername", "ParameterValue": "postgres" },
   { "ParameterKey": "DbAllocatedStorageGiB", "ParameterValue": "100" },
   { "ParameterKey": "DbMaxAllocatedStorageGiB", "ParameterValue": "500" },

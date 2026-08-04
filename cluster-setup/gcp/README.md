@@ -56,7 +56,7 @@ are ignored unless that toggle is `true`, so they cannot create a bad state):
 | `kafka_topic_prefix` / `kafka_solution_partitions` / `kafka_logs_partitions` | `com.rulebricks.` / `128` / `24` | Topics created here (match the chart config) |
 | `enable_managed_redis` | `false` | Memorystore for Redis (STANDARD_HA) instead of in-cluster Valkey |
 | `redis_memory_size_gb` / `redis_transit_encryption` | `4` / `false` | Capacity / TLS |
-| `enable_managed_database` | `false` | Cloud SQL for PostgreSQL 17 instead of in-cluster Postgres |
+| `enable_managed_database` | `false` | Cloud SQL for PostgreSQL 18 instead of in-cluster Postgres |
 | `db_tier` / `db_disk_size_gb` / `db_high_availability` | `db-custom-2-8192` / `100` / `true` | Instance sizing / HA |
 | `db_master_password` | `""` | **Required** when the DB toggle is on; pass via `TF_VAR_db_master_password` |
 | `db_deletion_protection` | `true` | Blocks destroy of the instance; set `false` before teardown |
@@ -85,7 +85,7 @@ Conditionally created:
 | `roles/monitoring.metricWriter` grant | `google_project_iam_member` | `enable_metrics_writer` |
 | Managed Kafka cluster + 3 topics + client SA | `google_managed_kafka_cluster` (`<cluster>-kafka`), `google_managed_kafka_topic` x3, `google_service_account` (`<cluster>-kafka`) | `enable_managed_kafka` |
 | Memorystore Redis | `google_redis_instance` (`<cluster>-redis`, STANDARD_HA) | `enable_managed_redis` |
-| Cloud SQL PostgreSQL 17 + PSA peering | `google_sql_database_instance` (`<cluster>-db`, `cloudsql.logical_decoding=on`), `google_compute_global_address` + `google_service_networking_connection` (`<cluster>-psa`) | `enable_managed_database` |
+| Cloud SQL PostgreSQL 18 + PSA peering | `google_sql_database_instance` (`<cluster>-db`, `cloudsql.logical_decoding=on`), `google_compute_global_address` + `google_service_networking_connection` (`<cluster>-psa`) | `enable_managed_database` |
 
 ## 3. Manual provisioning still required
 

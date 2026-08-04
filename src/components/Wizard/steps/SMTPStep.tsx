@@ -16,15 +16,13 @@ import { SMTP_PROVIDERS } from "../../../types/index.js";
 import { isValidEmail } from "../../../lib/validation.js";
 import {
   listAzureAcsResources,
-  getAzureTenantId,
-  buildAcsSmtpUsername,
   parseAcsSmtpAppClientId,
   parseAcsSmtpResourceName,
+  parseAcsCommunicationServiceId,
+  listAcsSmtpUsernames,
   listAcsSenderAddresses,
-  listAzureEntraApps,
-  recommendSmtpAppIndex,
   AzureAcsResource,
-  AzureEntraApp,
+  AzureAcsSmtpUsername,
 } from "../../../lib/cloudCli.js";
 
 /** Marks an ACS sender whose domain ownership check has not passed yet. */
@@ -111,29 +109,29 @@ export function SMTPStep({
   const [from, setFrom] = useState(state.smtpFrom || "");
   const [fromName, setFromName] = useState(state.smtpFromName || "Rulebricks");
 
-  // Azure Communication Services username assembly. The username is
-  // <acs-resource>.<entra-app-client-id>.<tenant-id>: the operator picks the
-  // communication service and the Entra app, and the tenant comes from the
-  // signed-in account. acsAutoAssemble stays false when the subscription holds
-  // no communication service at all, or when the operator opts out - then the
-  // plain username field is shown instead.
+  // Modern ACS authentication uses a user-defined SMTP Username child
+  // resource. The platform team creates it and links the Entra application;
+  // this wizard only discovers and selects the ready resource.
   const [acsResources, setAcsResources] = useState<AzureAcsResource[]>([]);
   const [acsResource, setAcsResource] = useState<string | null>(null);
+  const [acsResourceId, setAcsResourceId] = useState(
+    state.smtpAzureCommunicationServiceId,
+  );
+  const [acsResourceIdInput, setAcsResourceIdInput] = useState(
+    state.smtpAzureCommunicationServiceId,
+  );
   const [acsResourceGroup, setAcsResourceGroup] = useState("");
-  // Set when the operator opts out of the discovered communication services.
   const [acsResourceManual, setAcsResourceManual] = useState(false);
-  const [acsTenant, setAcsTenant] = useState<string | null>(null);
-  const [acsAppId, setAcsAppId] = useState("");
+  const [acsAppId, setAcsAppId] = useState(
+    state.smtpAzureEntraApplicationId,
+  );
+  const [acsTenantId, setAcsTenantId] = useState(state.smtpAzureTenantId);
   const [acsDiscovering, setAcsDiscovering] = useState(false);
-  const acsAutoAssemble =
-    acsResources.length > 0 && !!acsTenant && !acsResourceManual;
-  // Set when the operator opts out of the discovered app-registration list.
-  const [acsAppIdManual, setAcsAppIdManual] = useState(false);
-  // Apps from the last discovery, aligned 1:1 with the select items (a ref:
-  // recommendIndex runs in the same render the load resolves in).
-  const entraAppsRef = useRef<AzureEntraApp[]>([]);
-  // Same reason: the communication services behind the acs-resource items.
+  const acsDiscoveryAvailable =
+    acsResources.length > 0 && !acsResourceManual;
+  const [acsSmtpUsernameManual, setAcsSmtpUsernameManual] = useState(false);
   const acsResourcesRef = useRef<AzureAcsResource[]>([]);
+  const acsSmtpUsernamesRef = useRef<AzureAcsSmtpUsername[]>([]);
   // Set when the operator opts out of the discovered sender list.
   const [fromManual, setFromManual] = useState(false);
 
@@ -143,41 +141,31 @@ export function SMTPStep({
   const discoverAcs = async () => {
     setAcsDiscovering(true);
     try {
-      const [resources, tenant] = await Promise.all([
-        listAzureAcsResources(),
-        getAzureTenantId(),
-      ]);
+      const resources = await listAzureAcsResources();
       setAcsResources(resources);
-      setAcsTenant(tenant);
-      // Re-entry with a saved username: keep the previously chosen service
-      // selected when it still exists, so the picker opens on it.
-      const savedResource = parseAcsSmtpResourceName(user);
-      const match = savedResource
-        ? resources.find((r) => r.name === savedResource)
-        : undefined;
+      acsResourcesRef.current = resources;
+      const savedResource =
+        parseAcsCommunicationServiceId(state.smtpAzureCommunicationServiceId)
+          ?.name || parseAcsSmtpResourceName(user);
+      const match = state.smtpAzureCommunicationServiceId
+        ? resources.find(
+            (resource) =>
+              resource.id.toLowerCase() ===
+              state.smtpAzureCommunicationServiceId.toLowerCase(),
+          )
+        : savedResource
+          ? resources.find((resource) => resource.name === savedResource)
+          : undefined;
       if (match) {
         setAcsResource(match.name);
+        setAcsResourceId(match.id);
+        setAcsResourceIdInput(match.id);
         setAcsResourceGroup(match.resourceGroup);
       }
     } catch {
       setAcsResources([]);
-      setAcsTenant(null);
     }
     setAcsDiscovering(false);
-  };
-
-  // Shared by the discovered app picker and its manual fallback: record the
-  // app ID and assemble the ACS SMTP username from the discovered parts.
-  const submitAcsAppId = (appId: string) => {
-    setAcsAppId(appId);
-    const assembled = buildAcsSmtpUsername(
-      acsResource ?? "",
-      appId,
-      acsTenant ?? "",
-    );
-    setUser(assembled);
-    setError(null);
-    dispatch({ type: "SET_SMTP", config: { smtpUser: assembled } });
   };
 
   const completed = (): { label: string; value: string }[] => {
@@ -213,6 +201,12 @@ export function SMTPStep({
               const hostMatches =
                 !!host && detectProviderFromHost(host) === value;
               setProvider(value);
+              if (value !== "azure-acs") {
+                setAcsResource(null);
+                setAcsResourceId("");
+                setAcsResourceIdInput("");
+                setAcsResourceGroup("");
+              }
               const providerConfig =
                 SMTP_PROVIDERS[value as keyof typeof SMTP_PROVIDERS];
               if (providerConfig && !hostMatches) {
@@ -235,6 +229,13 @@ export function SMTPStep({
                     smtpPort: providerConfig.port,
                     smtpUser: providerConfig.user,
                     smtpPass: "",
+                    ...(value !== "azure-acs"
+                      ? {
+                          smtpAzureCommunicationServiceId: "",
+                          smtpAzureEntraApplicationId: "",
+                          smtpAzureTenantId: "",
+                        }
+                      : {}),
                   },
                 });
               } else if (providerConfig?.user && !user) {
@@ -306,16 +307,16 @@ export function SMTPStep({
       ),
     },
     {
-      // Which communication service sends the mail. Its name becomes the
-      // leading segment of the SMTP username, and deploy grants the Entra app
-      // Contributor on this exact resource - so an arbitrary pick here fails
-      // at send time, which is why the operator makes it.
+      // Which communication service owns the SMTP Username child resource.
       id: "acs-resource",
-      when: () => provider === "azure-acs" && acsAutoAssemble,
+      when: () =>
+        provider === "azure-acs" &&
+        acsDiscoveryAvailable &&
+        !acsResourceId,
       render: (flow) => (
         <DiscoveredSelect
           label="Azure Communication Services resource"
-          hint="The communication service that sends your email. Deploy grants the SMTP app access to whichever one you pick."
+          hint="The communication service that sends your email. Deploy checks the SMTP app access but does not change IAM."
           loadingLabel="Discovering communication services..."
           emptyHint="None found in this subscription. Press R to refresh, or enter the SMTP username manually."
           initialValue={acsResource || undefined}
@@ -343,7 +344,12 @@ export function SMTPStep({
               (r) => r.name === value,
             );
             setAcsResource(value);
+            setAcsResourceId(picked?.id || "");
+            setAcsResourceIdInput(picked?.id || "");
             setAcsResourceGroup(picked?.resourceGroup || "");
+            setAcsAppId("");
+            setAcsTenantId("");
+            setAcsSmtpUsernameManual(false);
             setError(null);
             flow.next();
           }}
@@ -355,63 +361,127 @@ export function SMTPStep({
       ),
     },
     {
-      // ACS with a chosen resource: pick the SMTP Entra app from the
-      // tenant's app registrations (the docs create it as "Rulebricks SMTP",
-      // which drives the recommendation) and assemble the username. The
-      // client secret is entered next as the password; deploy grants the app
-      // access to the ACS resource.
-      id: "acs-app-id",
+      id: "acs-resource-id",
       when: () =>
-        provider === "azure-acs" && acsAutoAssemble && !acsAppIdManual,
+        provider === "azure-acs" &&
+        !acsResourceId &&
+        (!acsDiscoveryAvailable || acsResourceManual),
+      onEscape: () => setAcsResourceManual(false),
       render: (flow) => (
-        <DiscoveredSelect
-          label="Email SMTP app (Entra app registration)"
-          hint="Deploy grants the app access automatically; its client secret is the password on the next screen."
-          loadingLabel="Discovering Entra app registrations..."
-          emptyHint="No app registrations found (missing Graph read access, or none exist yet)."
-          initialValue={
-            acsAppId || parseAcsSmtpAppClientId(user) || undefined
-          }
-          preferRecommended={!state.configLoaded}
-          recommendIndex={() => recommendSmtpAppIndex(entraAppsRef.current)}
-          load={async () => {
-            const apps = await listAzureEntraApps();
-            entraAppsRef.current = apps;
-            return apps.map((app) => ({
-              label: `${app.name} (${app.appId})`,
-              value: app.appId,
-            }));
-          }}
-          onSelect={(value) => {
-            submitAcsAppId(value);
-            flow.next();
-          }}
-          onManual={() => {
-            setAcsAppIdManual(true);
+        <TextField
+          label="Azure Communication Services resource ID"
+          hint="Paste the full existingCommunicationServiceId from the prerequisites handoff"
+          value={acsResourceIdInput}
+          onChange={setAcsResourceIdInput}
+          placeholder="/subscriptions/.../providers/Microsoft.Communication/communicationServices/..."
+          onSubmit={() => {
+            const parsed = parseAcsCommunicationServiceId(
+              acsResourceIdInput.trim(),
+            );
+            if (!parsed) {
+              setError(
+                "Enter a full Microsoft.Communication/communicationServices resource ID",
+              );
+              return;
+            }
+            const selected = {
+              id: acsResourceIdInput.trim(),
+              name: parsed.name,
+              resourceGroup: parsed.resourceGroup,
+            };
+            setAcsResourceId(selected.id);
+            setAcsResource(selected.name);
+            setAcsResourceGroup(selected.resourceGroup);
+            acsResourcesRef.current = [selected];
+            dispatch({
+              type: "SET_SMTP",
+              config: {
+                smtpAzureCommunicationServiceId: selected.id,
+                smtpAzureEntraApplicationId: "",
+                smtpAzureTenantId: "",
+              },
+            });
+            setError(null);
             flow.next();
           }}
         />
       ),
     },
     {
-      id: "acs-app-id-manual",
+      id: "acs-smtp-username",
       when: () =>
-        provider === "azure-acs" && acsAutoAssemble && acsAppIdManual,
-      // Escaping returns to the discovered app list.
-      onEscape: () => setAcsAppIdManual(false),
+        provider === "azure-acs" &&
+        Boolean(acsResourceId) &&
+        !acsSmtpUsernameManual,
       render: (flow) => (
-        <TextField
-          label="Email SMTP app (Entra application/client ID)"
-          hint="The app ID from `az ad app create` for the Rulebricks SMTP app. Deploy grants it access automatically; its client secret is the password on the next screen."
-          value={acsAppId}
-          onChange={setAcsAppId}
-          placeholder="00000000-0000-0000-0000-000000000000"
-          onSubmit={() => {
-            if (!acsAppId) {
-              setError("The email SMTP app client ID is required");
-              return;
-            }
-            submitAcsAppId(acsAppId);
+        <DiscoveredSelect
+          label="ACS SMTP Username"
+          hint='Select the platform-created SMTP Username linked to the approved Entra app. The CLI checks "Communication and Email Service Owner" but never changes IAM.'
+          loadingLabel="Discovering SMTP Usernames..."
+          emptyHint="No SMTP Username exists on this communication service. Ask the platform team to create one and link the approved Entra app."
+          initialValue={user || undefined}
+          preferRecommended={!state.configLoaded}
+          recommendIndex={(items) =>
+            items.findIndex((item) => !item.label.includes("not ready"))
+          }
+          load={async () => {
+            const parsed = parseAcsCommunicationServiceId(acsResourceId);
+            const selected =
+              acsResourcesRef.current.find(
+                (resource) => resource.id === acsResourceId,
+              ) ||
+              (parsed
+                ? {
+                    id: acsResourceId,
+                    name: parsed.name,
+                    resourceGroup: parsed.resourceGroup,
+                  }
+                : undefined);
+            const usernames = selected
+              ? await listAcsSmtpUsernames(selected)
+              : [];
+            acsSmtpUsernamesRef.current = usernames;
+            return usernames.map((item) => ({
+              label: `${item.username}${
+                item.status &&
+                !/ready|succeeded|active/i.test(item.status)
+                  ? ` - not ready (${item.status})`
+                  : ""
+              }`,
+              value: item.username,
+            }));
+          }}
+          onSelect={(value) => {
+            const selected = acsSmtpUsernamesRef.current.find(
+              (item) => item.username === value,
+            );
+            setUser(value);
+            setAcsAppId(selected?.entraApplicationId || "");
+            setAcsTenantId(selected?.tenantId || "");
+            setError(null);
+            dispatch({
+              type: "SET_SMTP",
+              config: {
+                smtpUser: value,
+                smtpAzureCommunicationServiceId:
+                  selected?.communicationServiceId || acsResourceId,
+                smtpAzureEntraApplicationId:
+                  selected?.entraApplicationId || "",
+                smtpAzureTenantId: selected?.tenantId || "",
+              },
+            });
+            flow.next();
+          }}
+          onManual={() => {
+            setAcsSmtpUsernameManual(true);
+            dispatch({
+              type: "SET_SMTP",
+              config: {
+                smtpAzureCommunicationServiceId: acsResourceId,
+                smtpAzureEntraApplicationId: "",
+                smtpAzureTenantId: "",
+              },
+            });
             flow.next();
           }}
         />
@@ -419,22 +489,29 @@ export function SMTPStep({
     },
     {
       id: "user",
-      when: () => !(provider === "azure-acs" && acsAutoAssemble),
-      // Escaping returns to the discovered communication services.
-      onEscape: () => setAcsResourceManual(false),
+      when: () =>
+        !(
+          provider === "azure-acs" &&
+          Boolean(acsResourceId) &&
+          !acsSmtpUsernameManual
+        ),
+      onEscape: () => {
+        setAcsSmtpUsernameManual(false);
+        setAcsResourceManual(false);
+      },
       render: (flow) => (
         <TextField
           label="SMTP username"
           hint={
             provider === "azure-acs"
-              ? "Format: <acs-resource>.<entra-app-client-id>.<tenant-id> - the emailSmtpUsername value for your ACS resource"
+              ? "Enter the exact user-defined SMTP Username child resource. Ask the platform team to create it first if none was discovered."
               : undefined
           }
           value={user}
           onChange={setUser}
           placeholder={
             provider === "azure-acs"
-              ? "rbcommxxxx.<app-id>.<tenant-id>"
+              ? "rulebricks-smtp"
               : "smtp_username"
           }
           onSubmit={() => {
@@ -443,7 +520,19 @@ export function SMTPStep({
               return;
             }
             setError(null);
-            dispatch({ type: "SET_SMTP", config: { smtpUser: user } });
+            dispatch({
+              type: "SET_SMTP",
+              config: {
+                smtpUser: user,
+                ...(provider === "azure-acs"
+                  ? {
+                      smtpAzureCommunicationServiceId: acsResourceId,
+                      smtpAzureEntraApplicationId: acsAppId,
+                      smtpAzureTenantId: acsTenantId,
+                    }
+                  : {}),
+              },
+            });
             flow.next();
           }}
         />
@@ -460,9 +549,9 @@ export function SMTPStep({
           }
           hint={
             provider === "azure-acs"
-              ? `Secrets are never listable, so mint one if needed: az ad app credential reset --id ${
+              ? `Enter the client secret issued for app ${
                   acsAppId || parseAcsSmtpAppClientId(user) || "<app-id>"
-                }`
+                }. The CLI never creates or rotates Entra credentials.`
               : undefined
           }
           value={pass}
@@ -510,6 +599,7 @@ export function SMTPStep({
             const senders = await listAcsSenderAddresses(
               acsResourceGroup || state.azureResourceGroup,
               acsResource ?? undefined,
+              acsResourceId || undefined,
             );
             // Unverified domains stay in the list (the operator may be
             // mid-verification) but are labeled, never recommended: cluster

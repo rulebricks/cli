@@ -1,4 +1,4 @@
-# Managed database: Cloud SQL for PostgreSQL 17
+# Managed database: Cloud SQL for PostgreSQL 18
 # (enable_managed_database = false by default - Postgres runs in-cluster
 # otherwise).
 #
@@ -48,7 +48,7 @@ resource "google_sql_database_instance" "main" {
 
   name                = "${var.cluster_name}-db"
   region              = var.region
-  database_version    = "POSTGRES_17"
+  database_version    = "POSTGRES_18"
   deletion_protection = var.db_deletion_protection
 
   settings {

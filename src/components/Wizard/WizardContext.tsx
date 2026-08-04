@@ -47,6 +47,8 @@ export interface WizardState {
   clusterName: string;
   gcpProjectId: string;
   azureResourceGroup: string;
+  azureDnsZoneId: string;
+  azureExternalDnsIdentityId: string;
 
   // Domain & Email
   domain: string;
@@ -79,6 +81,9 @@ export interface WizardState {
   smtpPass: string;
   smtpFrom: string;
   smtpFromName: string;
+  smtpAzureCommunicationServiceId: string;
+  smtpAzureEntraApplicationId: string;
+  smtpAzureTenantId: string;
 
   // Database
   databaseType: DatabaseType | null;
@@ -263,9 +268,11 @@ export interface WizardState {
   version: string;
 
   // Image source: registry host override + how it stays populated
-  // ("" = the Rulebricks Docker Hub repository directly).
+  // ("" = the Rulebricks repositories directly; "mirror" = the CLI imports
+  // every image and the helm chart into the registry).
   imageRegistry: string;
-  imageRegistryMode: "" | "pull-through" | "mirror";
+  imageRegistryResourceId: string;
+  imageRegistryMode: "" | "mirror";
 
   // Legacy chart version (deprecated)
   chartVersion: string;
@@ -278,6 +285,11 @@ type WizardAction =
   | { type: "SET_CLUSTER_NAME"; clusterName: string }
   | { type: "SET_GCP_PROJECT"; projectId: string }
   | { type: "SET_AZURE_RG"; resourceGroup: string }
+  | {
+      type: "SET_AZURE_DNS_RESOURCES";
+      zoneId: string;
+      identityId: string;
+    }
   | { type: "SET_DOMAIN"; domain: string }
   | { type: "SET_ADMIN_EMAIL"; email: string }
   | { type: "SET_DNS_PROVIDER"; provider: DnsProvider }
@@ -308,6 +320,9 @@ type WizardAction =
           | "smtpPass"
           | "smtpFrom"
           | "smtpFromName"
+          | "smtpAzureCommunicationServiceId"
+          | "smtpAzureEntraApplicationId"
+          | "smtpAzureTenantId"
         >
       >;
     }
@@ -520,7 +535,8 @@ type WizardAction =
   | {
       type: "SET_IMAGE_REGISTRY";
       registry: string;
-      mode: "" | "pull-through" | "mirror";
+      resourceId?: string;
+      mode: "" | "mirror";
     };
 
 /**
@@ -538,6 +554,8 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     clusterName: profile?.clusterName ?? "",
     gcpProjectId: "",
     azureResourceGroup: "",
+    azureDnsZoneId: "",
+    azureExternalDnsIdentityId: "",
 
     // Domain & Email - pre-populate from profile
     domain: "", // Domain is intentionally left empty - user should enter unique domain per deployment
@@ -567,6 +585,9 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     smtpPass: profile?.smtpPass ?? "",
     smtpFrom: profile?.smtpFrom ?? "",
     smtpFromName: profile?.smtpFromName ?? "Rulebricks",
+    smtpAzureCommunicationServiceId: "",
+    smtpAzureEntraApplicationId: "",
+    smtpAzureTenantId: "",
 
     // Database - pre-populate from profile
     databaseType: profile?.databaseType ?? null,
@@ -751,6 +772,7 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
 
     // Image source
     imageRegistry: "",
+    imageRegistryResourceId: "",
     imageRegistryMode: "",
   };
 }
@@ -1296,6 +1318,9 @@ export function configToWizardState(
     clusterName: config.infrastructure.clusterName ?? base.clusterName,
     gcpProjectId: config.infrastructure.gcpProjectId ?? "",
     azureResourceGroup: config.infrastructure.azureResourceGroup ?? "",
+    azureDnsZoneId: config.infrastructure.azureDnsZoneId ?? "",
+    azureExternalDnsIdentityId:
+      config.infrastructure.azureExternalDnsIdentityId ?? "",
     domain: config.domain,
     adminEmail: config.adminEmail,
     tlsEmail: config.tlsEmail,
@@ -1314,6 +1339,11 @@ export function configToWizardState(
     smtpPass: config.smtp.pass,
     smtpFrom: config.smtp.from,
     smtpFromName: config.smtp.fromName,
+    smtpAzureCommunicationServiceId:
+      config.smtp.azure?.communicationServiceId ?? "",
+    smtpAzureEntraApplicationId:
+      config.smtp.azure?.entraApplicationId ?? "",
+    smtpAzureTenantId: config.smtp.azure?.tenantId ?? "",
     databaseType: config.database.type,
     supabaseUrl: config.database.supabaseUrl ?? "",
     supabaseAnonKey: config.database.supabaseAnonKey ?? "",
@@ -1545,6 +1575,7 @@ export function configToWizardState(
     version: config.version,
     chartVersion: config.chartVersion ?? "",
     imageRegistry: config.imageRegistry ?? "",
+    imageRegistryResourceId: config.imageRegistryResourceId ?? "",
     imageRegistryMode: config.imageRegistryMode ?? "",
   };
 }
@@ -1562,6 +1593,8 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
           clusterName: "",
           gcpProjectId: "",
           azureResourceGroup: "",
+          azureDnsZoneId: "",
+          azureExternalDnsIdentityId: "",
         };
       }
       // A provider change invalidates everything tied to the old cloud:
@@ -1574,6 +1607,8 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
         clusterName: "",
         gcpProjectId: "",
         azureResourceGroup: "",
+        azureDnsZoneId: "",
+        azureExternalDnsIdentityId: "",
         storageProvider: null,
         storageBucket: "",
         storageRegion: "",
@@ -1583,6 +1618,12 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
         storageAzureBlobTenantId: "",
         storageAzureBlobConnectionStringSecretRef: "",
         storageGcpServiceAccountEmail: "",
+        // The image registry is an ACR picked under Azure; keeping it after a
+        // provider switch would rewrite images to a registry the new cloud's
+        // cluster cannot pull from.
+        imageRegistry: "",
+        imageRegistryResourceId: "",
+        imageRegistryMode: "",
         // Secrets backend is cloud-specific; reset with the provider.
         secretsBackend: null,
         secretsPrefix: "",
@@ -1647,6 +1688,12 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, gcpProjectId: action.projectId };
     case "SET_AZURE_RG":
       return { ...state, azureResourceGroup: action.resourceGroup };
+    case "SET_AZURE_DNS_RESOURCES":
+      return {
+        ...state,
+        azureDnsZoneId: action.zoneId,
+        azureExternalDnsIdentityId: action.identityId,
+      };
     case "SET_DOMAIN":
       return { ...state, domain: action.domain };
     case "SET_ADMIN_EMAIL":
@@ -1786,6 +1833,7 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return {
         ...state,
         imageRegistry: action.registry,
+        imageRegistryResourceId: action.resourceId || "",
         imageRegistryMode: action.mode,
       };
     case "SET_CHART_VERSION":
@@ -1876,6 +1924,9 @@ export function WizardProvider({
         clusterName: state.clusterName || undefined,
         gcpProjectId: state.gcpProjectId || undefined,
         azureResourceGroup: state.azureResourceGroup || undefined,
+        azureDnsZoneId: state.azureDnsZoneId || undefined,
+        azureExternalDnsIdentityId:
+          state.azureExternalDnsIdentityId || undefined,
         nodeArchitecture:
           options.nodeArchitecture || state.nodeArchitecture || undefined,
         arm64TolerationRequired:
@@ -1937,6 +1988,19 @@ export function WizardProvider({
         pass: state.smtpPass,
         from: state.smtpFrom,
         fromName: state.smtpFromName,
+        ...(state.smtpAzureCommunicationServiceId &&
+        state.smtpAzureEntraApplicationId
+          ? {
+              azure: {
+                communicationServiceId:
+                  state.smtpAzureCommunicationServiceId,
+                entraApplicationId: state.smtpAzureEntraApplicationId,
+                ...(state.smtpAzureTenantId
+                  ? { tenantId: state.smtpAzureTenantId }
+                  : {}),
+              },
+            }
+          : {}),
       },
       database: {
         type: state.databaseType || "self-hosted",
@@ -2210,6 +2274,9 @@ export function WizardProvider({
       ...(state.imageRegistry
         ? {
             imageRegistry: state.imageRegistry,
+            ...(state.imageRegistryResourceId
+              ? { imageRegistryResourceId: state.imageRegistryResourceId }
+              : {}),
             ...(state.imageRegistryMode
               ? { imageRegistryMode: state.imageRegistryMode }
               : {}),

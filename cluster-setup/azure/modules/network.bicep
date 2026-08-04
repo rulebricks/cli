@@ -1,12 +1,26 @@
 param clusterName string
 param location string
 param tags object
+
+@description('Create a new VNet. False creates the requested subnets inside existing vnetName without modifying the VNet address space.')
+param createVnet bool = true
+
+@description('VNet to create or reference in this module scope.')
+param vnetName string = '${clusterName}-vnet'
+
 param vnetAddressSpace string
+param aksSubnetName string
 param aksSubnetPrefix string
+@description('Optional organization-owned NSG to attach when creating the AKS subnet in an existing VNet. A newly created VNet uses the module-managed NSG.')
+param aksSubnetNetworkSecurityGroupId string = ''
+param createPrivateEndpointsSubnet bool
+param privateEndpointsSubnetName string
 param privateEndpointsSubnetPrefix string
+param createPostgresSubnet bool
+param postgresSubnetName string
 param postgresSubnetPrefix string
 
-resource nsg 'Microsoft.Network/networkSecurityGroups@2023-11-01' = {
+resource nsg 'Microsoft.Network/networkSecurityGroups@2023-11-01' = if (createVnet) {
   name: '${clusterName}-nsg'
   location: location
   tags: tags
@@ -68,8 +82,8 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-11-01' = {
   }
 }
 
-resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
-  name: '${clusterName}-vnet'
+resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = if (createVnet) {
+  name: vnetName
   location: location
   tags: tags
   properties: {
@@ -78,43 +92,114 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
         vnetAddressSpace
       ]
     }
-    subnets: [
-      {
-        name: 'aks-subnet'
-        properties: {
-          addressPrefix: aksSubnetPrefix
+  }
+}
+
+resource existingVnet 'Microsoft.Network/virtualNetworks@2023-11-01' existing = if (!createVnet) {
+  name: vnetName
+}
+
+// Subnets are child resources instead of an inline VNet array. This keeps the
+// creation model identical to the existing-VNet path and prevents future
+// changes from replacing sibling subnets accidentally.
+resource aksSubnet 'Microsoft.Network/virtualNetworks/subnets@2023-11-01' = if (createVnet) {
+  parent: vnet
+  name: aksSubnetName
+  properties: {
+    addressPrefix: aksSubnetPrefix
+    networkSecurityGroup: {
+      id: nsg!.id
+    }
+  }
+}
+
+resource aksSubnetInExistingVnet 'Microsoft.Network/virtualNetworks/subnets@2023-11-01' = if (!createVnet) {
+  parent: existingVnet
+  name: aksSubnetName
+  properties: union(
+    {
+      addressPrefix: aksSubnetPrefix
+    },
+    empty(aksSubnetNetworkSecurityGroupId)
+      ? {}
+      : {
           networkSecurityGroup: {
-            id: nsg.id
+            id: aksSubnetNetworkSecurityGroupId
           }
         }
-      }
+  )
+}
+
+resource privateEndpointsSubnet 'Microsoft.Network/virtualNetworks/subnets@2023-11-01' = if (createVnet && createPrivateEndpointsSubnet) {
+  parent: vnet
+  name: privateEndpointsSubnetName
+  properties: {
+    addressPrefix: privateEndpointsSubnetPrefix
+    privateEndpointNetworkPolicies: 'Disabled'
+  }
+  dependsOn: [
+    aksSubnet
+  ]
+}
+
+resource privateEndpointsSubnetInExistingVnet 'Microsoft.Network/virtualNetworks/subnets@2023-11-01' = if (!createVnet && createPrivateEndpointsSubnet) {
+  parent: existingVnet
+  name: privateEndpointsSubnetName
+  properties: {
+    addressPrefix: privateEndpointsSubnetPrefix
+    privateEndpointNetworkPolicies: 'Disabled'
+  }
+  dependsOn: [
+    aksSubnetInExistingVnet
+  ]
+}
+
+resource postgresSubnet 'Microsoft.Network/virtualNetworks/subnets@2023-11-01' = if (createVnet && createPostgresSubnet) {
+  parent: vnet
+  name: postgresSubnetName
+  properties: {
+    addressPrefix: postgresSubnetPrefix
+    delegations: [
       {
-        name: 'private-endpoints-subnet'
+        name: 'postgres-flexible-server'
         properties: {
-          addressPrefix: privateEndpointsSubnetPrefix
-          privateEndpointNetworkPolicies: 'Disabled'
-        }
-      }
-      {
-        name: 'postgres-subnet'
-        properties: {
-          addressPrefix: postgresSubnetPrefix
-          delegations: [
-            {
-              name: 'postgres-flexible-server'
-              properties: {
-                serviceName: 'Microsoft.DBforPostgreSQL/flexibleServers'
-              }
-            }
-          ]
+          serviceName: 'Microsoft.DBforPostgreSQL/flexibleServers'
         }
       }
     ]
   }
+  dependsOn: [
+    aksSubnet
+    privateEndpointsSubnet
+  ]
 }
 
-output vnetId string = vnet.id
-output vnetName string = vnet.name
-output aksSubnetId string = vnet.properties.subnets[0].id
-output privateEndpointsSubnetId string = vnet.properties.subnets[1].id
-output postgresSubnetId string = vnet.properties.subnets[2].id
+resource postgresSubnetInExistingVnet 'Microsoft.Network/virtualNetworks/subnets@2023-11-01' = if (!createVnet && createPostgresSubnet) {
+  parent: existingVnet
+  name: postgresSubnetName
+  properties: {
+    addressPrefix: postgresSubnetPrefix
+    delegations: [
+      {
+        name: 'postgres-flexible-server'
+        properties: {
+          serviceName: 'Microsoft.DBforPostgreSQL/flexibleServers'
+        }
+      }
+    ]
+  }
+  dependsOn: [
+    aksSubnetInExistingVnet
+    privateEndpointsSubnetInExistingVnet
+  ]
+}
+
+output vnetId string = createVnet ? vnet!.id : existingVnet!.id
+output vnetName string = vnetName
+output aksSubnetId string = createVnet ? aksSubnet!.id : aksSubnetInExistingVnet!.id
+output privateEndpointsSubnetId string = createPrivateEndpointsSubnet
+  ? (createVnet ? privateEndpointsSubnet!.id : privateEndpointsSubnetInExistingVnet!.id)
+  : ''
+output postgresSubnetId string = createPostgresSubnet
+  ? (createVnet ? postgresSubnet!.id : postgresSubnetInExistingVnet!.id)
+  : ''

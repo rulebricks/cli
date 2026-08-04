@@ -24,6 +24,7 @@ import { BenchmarkCommand } from "./commands/benchmark.js";
 import { BackupCommand } from "./commands/backup.js";
 import { RestoreCommand } from "./commands/restore.js";
 import { listDeployments, deploymentExists } from "./lib/config.js";
+import { importValuesFile } from "./lib/valuesImport.js";
 import { DeploymentPicker } from "./components/common/DeploymentPicker.js";
 
 const require = createRequire(import.meta.url);
@@ -358,6 +359,73 @@ program
 
     const { waitUntilExit } = render(<RestoreCommand name={deploymentName} />);
     await waitUntilExit();
+  });
+
+// Values commands (vocabulary / dynamic values)
+const valuesCommand = program
+  .command("values")
+  .description("Manage vocabulary (dynamic values) on a Rulebricks instance");
+
+valuesCommand
+  .command("import")
+  .description(
+    "Import a JSON dictionary of vocabulary values (flat or nested) in idempotent chunks",
+  )
+  .argument("<file>", "Path to a JSON file of key-value pairs")
+  .requiredOption(
+    "--url <url>",
+    "Instance URL (e.g. https://rulebricks.example.com)",
+  )
+  .option(
+    "--api-key <key>",
+    "API key (defaults to the RULEBRICKS_API_KEY environment variable)",
+  )
+  .action(async (file, options) => {
+    const apiKey = options.apiKey || process.env.RULEBRICKS_API_KEY;
+    if (!apiKey) {
+      console.error(
+        chalk.red(
+          "An API key is required. Pass --api-key or set RULEBRICKS_API_KEY.",
+        ),
+      );
+      process.exit(1);
+    }
+
+    try {
+      const started = Date.now();
+      const result = await importValuesFile({
+        filePath: file,
+        url: options.url,
+        apiKey,
+        onProgress: ({ processed, total, chunk, chunkCount }) => {
+          const pct = Math.round((processed / Math.max(total, 1)) * 100);
+          process.stdout.write(
+            `\r${chalk.dim(`Chunk ${chunk}/${chunkCount}`)}  ${processed.toLocaleString()}/${total.toLocaleString()} values (${pct}%)   `,
+          );
+        },
+      });
+      const seconds = ((Date.now() - started) / 1000).toFixed(1);
+      process.stdout.write("\n");
+      console.log(
+        chalk.green(
+          `Imported ${result.processed.toLocaleString()} values in ${seconds}s ` +
+            `(${result.created.toLocaleString()} created, ${result.updated.toLocaleString()} updated, ${result.chunkCount} chunks).`,
+        ),
+      );
+    } catch (error) {
+      process.stdout.write("\n");
+      console.error(
+        chalk.red(
+          `Import failed: ${error instanceof Error ? error.message : error}`,
+        ),
+      );
+      console.error(
+        chalk.dim(
+          "Chunks already uploaded were applied; re-running the same import is safe (upserts are idempotent).",
+        ),
+      );
+      process.exit(1);
+    }
   });
 
 /**

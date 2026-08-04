@@ -23,7 +23,11 @@ import {
 } from "../../../types/index.js";
 import {
   findAzureDnsZone,
-  azureManagedIdentityExists,
+  findAzureDnsZoneById,
+  findAzureManagedIdentity,
+  parseAzureDnsZoneId,
+  parseAzureManagedIdentityId,
+  resolveAzureExternalDnsReferences,
   AzureDnsZoneInfo,
 } from "../../../lib/cloudCli.js";
 
@@ -102,33 +106,72 @@ export function DomainStep({
   const [azureDetecting, setAzureDetecting] = useState(false);
   const [azureZone, setAzureZone] = useState<AzureDnsZoneInfo | null>(null);
   const [azureAutoDetected, setAzureAutoDetected] = useState(false);
+  const [azureDnsAutoManage, setAzureDnsAutoManage] = useState(
+    state.dnsAutoManage,
+  );
+  const [azureDnsZoneId, setAzureDnsZoneId] = useState(state.azureDnsZoneId);
+  const [azureExternalDnsIdentityId, setAzureExternalDnsIdentityId] = useState(
+    state.azureExternalDnsIdentityId,
+  );
 
   const detectAzureDns = async () => {
     setAzureDetecting(true);
     try {
       // Hard cap: detection is a convenience, never a reason for the wizard
       // to sit still. On timeout we fall through to the manual question.
-      const zone = await Promise.race([
-        findAzureDnsZone(domain.toLowerCase()),
-        new Promise<null>((resolve) =>
-          setTimeout(() => resolve(null), 30000).unref?.(),
-        ),
+      const hasExactReferences =
+        Boolean(azureDnsZoneId) && Boolean(azureExternalDnsIdentityId);
+      const [exactReferences, zone] = await Promise.all([
+        hasExactReferences
+          ? resolveAzureExternalDnsReferences(
+              azureDnsZoneId,
+              azureExternalDnsIdentityId,
+            )
+          : Promise.resolve(null),
+        Promise.race([
+          hasExactReferences
+            ? findAzureDnsZoneById(azureDnsZoneId)
+            : findAzureDnsZone(domain.toLowerCase()),
+          new Promise<null>((resolve) =>
+            setTimeout(() => resolve(null), 30000).unref?.(),
+          ),
+        ]),
       ]);
-      let identityPresent = false;
-      if (zone && state.clusterName) {
+      let identityId = "";
+      if (zone && exactReferences) {
+        identityId = azureExternalDnsIdentityId;
+      } else if (zone && state.clusterName && !hasExactReferences) {
         // Subscription-wide: the prerequisites template may have placed the
         // identity next to the zone in a platform resource group.
-        identityPresent = await azureManagedIdentityExists(
-          `${state.clusterName}-external-dns`,
-        );
+        identityId =
+          (
+            await findAzureManagedIdentity(
+              `${state.clusterName}-external-dns`,
+            )
+          )?.id || "";
       }
-      if (zone && identityPresent) {
+      const requestedDomain = domain.toLowerCase();
+      const zoneCoversDomain =
+        zone &&
+        (requestedDomain === zone.name ||
+          requestedDomain.endsWith(`.${zone.name}`));
+      if (zone && identityId && zoneCoversDomain) {
         setAzureZone(zone);
         setAzureAutoDetected(true);
         dispatch({ type: "SET_DNS_AUTO_MANAGE", autoManage: true });
-      } else {
+        dispatch({
+          type: "SET_AZURE_DNS_RESOURCES",
+          zoneId: zone.id,
+          identityId,
+        });
+      } else if (!hasExactReferences) {
         setAzureZone(null);
         setAzureAutoDetected(false);
+        dispatch({
+          type: "SET_AZURE_DNS_RESOURCES",
+          zoneId: "",
+          identityId: "",
+        });
       }
     } catch {
       setAzureZone(null);
@@ -319,6 +362,16 @@ export function DomainStep({
                 type: "SET_DNS_AUTO_MANAGE",
                 autoManage: value === "yes",
               });
+              setAzureDnsAutoManage(value === "yes");
+              if (value !== "yes" && dnsProvider === "azure") {
+                setAzureDnsZoneId("");
+                setAzureExternalDnsIdentityId("");
+                dispatch({
+                  type: "SET_AZURE_DNS_RESOURCES",
+                  zoneId: "",
+                  identityId: "",
+                });
+              }
               flow.next();
             }}
           />
@@ -332,6 +385,83 @@ export function DomainStep({
             </Text>
           </Box>
         </Box>
+      ),
+    },
+    {
+      id: "azure-dns-zone-id",
+      when: () =>
+        dnsProvider === "azure" &&
+        azureDnsAutoManage &&
+        !azureAutoDetected,
+      render: (flow) => (
+        <TextField
+          label="Azure DNS zone resource ID"
+          hint="Paste the full ID from prerequisites.mainDeploymentParameters.existingDnsZoneId"
+          value={azureDnsZoneId}
+          onChange={setAzureDnsZoneId}
+          placeholder="/subscriptions/.../providers/Microsoft.Network/dnsZones/example.com"
+          onSubmit={() => {
+            if (!parseAzureDnsZoneId(azureDnsZoneId.trim())) {
+              setError("Enter a full Microsoft.Network/dnsZones resource ID");
+              return;
+            }
+            setAzureDnsZoneId(azureDnsZoneId.trim());
+            setError(null);
+            flow.next();
+          }}
+        />
+      ),
+    },
+    {
+      id: "azure-external-dns-identity-id",
+      when: () =>
+        dnsProvider === "azure" &&
+        azureDnsAutoManage &&
+        !azureAutoDetected,
+      render: (flow) => (
+        <TextField
+          label="External-dns managed identity resource ID"
+          hint="Paste the full ID from prerequisites.mainDeploymentParameters.existingExternalDnsIdentityId"
+          value={azureExternalDnsIdentityId}
+          onChange={setAzureExternalDnsIdentityId}
+          placeholder="/subscriptions/.../providers/Microsoft.ManagedIdentity/userAssignedIdentities/..."
+          onSubmit={async () => {
+            const identityId = azureExternalDnsIdentityId.trim();
+            if (!parseAzureManagedIdentityId(identityId)) {
+              setError(
+                "Enter a full Microsoft.ManagedIdentity/userAssignedIdentities resource ID",
+              );
+              return;
+            }
+            setAzureDetecting(true);
+            const [zone, references] = await Promise.all([
+              findAzureDnsZoneById(azureDnsZoneId),
+              resolveAzureExternalDnsReferences(azureDnsZoneId, identityId),
+            ]);
+            setAzureDetecting(false);
+            const requestedDomain = domain.toLowerCase();
+            if (
+              !zone ||
+              !references ||
+              (requestedDomain !== zone.name &&
+                !requestedDomain.endsWith(`.${zone.name}`))
+            ) {
+              setError(
+                "The CLI could not read these Azure resources, or the DNS zone does not cover this domain",
+              );
+              return;
+            }
+            setAzureZone(zone);
+            setAzureExternalDnsIdentityId(identityId);
+            dispatch({
+              type: "SET_AZURE_DNS_RESOURCES",
+              zoneId: zone.id,
+              identityId,
+            });
+            setError(null);
+            flow.next();
+          }}
+        />
       ),
     },
   ];

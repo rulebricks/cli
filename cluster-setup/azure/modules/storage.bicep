@@ -12,11 +12,15 @@ param enableBlobVersioning bool
 param blobSoftDeleteDays int
 param enablePrivateEndpoint bool
 param privateEndpointsSubnetId string
-param vnetId string
+@description('Attach the endpoint to an organization-owned private DNS zone. False leaves registration to Azure Policy.')
+param createPrivateDnsZoneGroup bool = false
+param privateDnsZoneId string = ''
 param enableDeleteLock bool
 
 param rulebricksPrincipalId string
 param rulebricksIdentityId string
+// False defers the grant to a platform owner using main.bicep principalIds.
+param assignRoles bool = false
 
 var storageBlobDataContributorRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
@@ -55,11 +59,11 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01'
   properties: {
     containerDeleteRetentionPolicy: {
       enabled: blobSoftDeleteDays > 0
-      days: blobSoftDeleteDays
+      days: blobSoftDeleteDays > 0 ? blobSoftDeleteDays : null
     }
     deleteRetentionPolicy: {
       enabled: blobSoftDeleteDays > 0
-      days: blobSoftDeleteDays
+      days: blobSoftDeleteDays > 0 ? blobSoftDeleteDays : null
     }
     isVersioningEnabled: enableBlobVersioning
   }
@@ -73,31 +77,15 @@ resource dataContainer 'Microsoft.Storage/storageAccounts/blobServices/container
   }
 }
 
-resource blobRoleCreated 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createStorage) {
+// Required before rulebricks deploy: Storage Blob Data Contributor for the
+// data-access identity on the created account.
+resource blobRoleCreated 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createStorage && assignRoles) {
   name: guid(storageAccount.id, rulebricksIdentityId, 'Storage Blob Data Contributor')
   scope: storageAccount
   properties: {
     roleDefinitionId: storageBlobDataContributorRoleId
     principalId: rulebricksPrincipalId
     principalType: 'ServicePrincipal'
-  }
-}
-
-resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (createStorage && enablePrivateEndpoint) {
-  name: 'privatelink.blob.${environment().suffixes.storage}'
-  location: 'global'
-  tags: tags
-}
-
-resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (createStorage && enablePrivateEndpoint) {
-  parent: privateDnsZone
-  name: '${clusterName}-storage'
-  location: 'global'
-  properties: {
-    registrationEnabled: false
-    virtualNetwork: {
-      id: vnetId
-    }
   }
 }
 
@@ -123,7 +111,7 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (c
   }
 }
 
-resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (createStorage && enablePrivateEndpoint) {
+resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (createStorage && enablePrivateEndpoint && createPrivateDnsZoneGroup) {
   parent: privateEndpoint
   name: 'default'
   properties: {
@@ -131,7 +119,7 @@ resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGr
       {
         name: 'blob'
         properties: {
-          privateDnsZoneId: privateDnsZone!.id
+          privateDnsZoneId: privateDnsZoneId
         }
       }
     ]
@@ -148,4 +136,5 @@ resource storageDeleteLock 'Microsoft.Authorization/locks@2020-05-01' = if (crea
 }
 
 output storageAccountName string = effectiveStorageAccountName
+output storageAccountId string = createStorage ? storageAccount!.id : ''
 output dataContainer string = dataContainerName

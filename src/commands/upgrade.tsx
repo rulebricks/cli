@@ -50,7 +50,15 @@ import {
   rolloutRestart,
   type DeployedVersions,
 } from "../lib/kubernetes.js";
-import { mirrorImagesToAcr, planAcrImports } from "../lib/cloudCli.js";
+import {
+  assertAcrMirrorSucceeded,
+  chartOciRef,
+  helmRegistryLoginToAcr,
+  mirrorChartToAcr,
+  mirrorImagesToAcr,
+  planAcrImports,
+  shouldMirrorToAcr,
+} from "../lib/cloudCli.js";
 import { ensureNamespace, applyDeploymentSecrets } from "../lib/secrets.js";
 import { setupExternalSecrets } from "../lib/eso.js";
 import { secretModeForConfig } from "../lib/deploySequence.js";
@@ -102,6 +110,39 @@ function chartVersionsEqual(
 ): boolean {
   if (!a || !b) return false;
   return a === b;
+}
+
+/**
+ * Full-mirror registries: import the chart release into the ACR (a no-op when
+ * already present - chart releases are immutable) and log the local helm
+ * client in so upgrade/dry-run can pull the chart from the registry. Also
+ * covers releases installed before chart mirroring existed, whose current
+ * chart version is not in the registry yet. No-op outside full-mirror mode.
+ */
+async function ensureMirroredChart(
+  cfg: DeploymentConfig,
+  chartVersion: string,
+): Promise<void> {
+  if (!shouldMirrorToAcr(cfg)) {
+    return;
+  }
+  const registry = cfg.imageRegistry!;
+  const registryName = registry.split(".")[0];
+  const chartMirror = await mirrorChartToAcr(
+    registryName,
+    chartVersion,
+    cfg.imageRegistryResourceId,
+  );
+  assertAcrMirrorSucceeded(
+    registry,
+    chartMirror,
+    `Mirroring helm chart ${chartVersion}`,
+  );
+  await helmRegistryLoginToAcr(
+    registryName,
+    registry,
+    cfg.imageRegistryResourceId,
+  );
 }
 
 type UpgradeStep =
@@ -331,25 +372,23 @@ function UpgradeCommandInner({
       const tlsEnabled = deriveTlsEnabled(currentValues);
       const images = await resolveImageCatalog(chart.version);
 
-      if (
-        cfgWithVersion.imageRegistryMode === "mirror" &&
-        cfgWithVersion.imageRegistry &&
-        cfgWithVersion.infrastructure.provider === "azure"
-      ) {
+      if (shouldMirrorToAcr(cfgWithVersion)) {
+        const registry = cfgWithVersion.imageRegistry!;
         const mirror = await mirrorImagesToAcr(
-          cfgWithVersion.imageRegistry.split(".")[0],
+          registry.split(".")[0],
           cfgWithVersion.licenseKey,
           planAcrImports(images.entries()),
+          cfgWithVersion.imageRegistryResourceId,
         );
-        if (mirror.failed.length > 0) {
-          throw new Error(
-            `Mirroring chart ${chart.version} image pins into ${cfgWithVersion.imageRegistry} failed for:\n` +
-              mirror.failed
-                .map((f) => `  - ${f.ref}${f.detail ? ` (${f.detail})` : ""}`)
-                .join("\n"),
-          );
-        }
+        assertAcrMirrorSucceeded(
+          registry,
+          mirror,
+          `Mirroring chart ${chart.version} image pins`,
+        );
       }
+      // The dry run below pulls the chart from the registry in full-mirror
+      // mode, so the target chart version must be imported first.
+      await ensureMirroredChart(cfgWithVersion, chart.version);
 
       await generateHelmValuesPreservingEdits(cfgWithVersion, {
         tlsEnabled,
@@ -361,6 +400,7 @@ function UpgradeCommandInner({
         releaseName,
         namespace,
         version: chart.version,
+        chartRef: chartOciRef(cfgWithVersion),
       });
 
       if (dryRun) {
@@ -387,10 +427,15 @@ function UpgradeCommandInner({
       snapshot = await fs.readFile(getHelmValuesPath(name), "utf8");
       await syncProductVersion(config!, app.version);
 
+      // Full-mirror mode renders from the registry's chart copy; make sure
+      // the (unchanged) chart version is actually there.
+      await ensureMirroredChart(config!, chartVersion);
+
       const output = await dryRunUpgrade(name, {
         releaseName,
         namespace,
         version: chartVersion,
+        chartRef: chartOciRef(config!),
       });
       setDryRunOutput(output);
       await restoreValuesSnapshot(snapshot);
@@ -409,31 +454,31 @@ function UpgradeCommandInner({
     }
   }
 
-  async function mirrorAppImagesIfNeeded(
+  async function mirrorReleaseArtifactsIfNeeded(
     cfg: DeploymentConfig,
     app: AppVersion,
+    chartVersion: string,
   ) {
-    if (
-      !cfg.imageRegistryMode ||
-      !cfg.imageRegistry ||
-      cfg.infrastructure.provider !== "azure"
-    ) {
+    if (!shouldMirrorToAcr(cfg)) {
       return;
     }
 
+    const registry = cfg.imageRegistry!;
     const mirror = await mirrorImagesToAcr(
-      cfg.imageRegistry.split(".")[0],
+      registry.split(".")[0],
       cfg.licenseKey,
       planAcrImports([], app.version),
+      cfg.imageRegistryResourceId,
     );
-    if (mirror.failed.length > 0 && cfg.imageRegistryMode === "mirror") {
-      throw new Error(
-        `Mirroring ${app.version} images into ${cfg.imageRegistry} failed for:\n` +
-          mirror.failed
-            .map((f) => `  - ${f.ref}${f.detail ? ` (${f.detail})` : ""}`)
-            .join("\n"),
-      );
-    }
+    assertAcrMirrorSucceeded(
+      registry,
+      mirror,
+      `Mirroring ${app.version} application images`,
+    );
+    // The upgrade below installs the chart from the registry; make sure the
+    // selected chart version is present (idempotent for versions the prepare
+    // step already imported).
+    await ensureMirroredChart(cfg, chartVersion);
   }
 
   async function restartHpsWorkloads(ns: string) {
@@ -455,7 +500,11 @@ function UpgradeCommandInner({
     );
 
     try {
-      await mirrorAppImagesIfNeeded(config, selectedApp);
+      await mirrorReleaseArtifactsIfNeeded(
+        config,
+        selectedApp,
+        selectedChart.version,
+      );
 
       if (changingChart) {
         // Values were regenerated in prepare with the selected app version.
@@ -475,6 +524,7 @@ function UpgradeCommandInner({
           releaseName,
           namespace,
           version: selectedChart.version,
+          chartRef: chartOciRef(config),
           wait: true,
           atomic: true,
         });
@@ -485,6 +535,7 @@ function UpgradeCommandInner({
           releaseName,
           namespace,
           version: selectedChart.version,
+          chartRef: chartOciRef(config),
           wait: true,
         });
 

@@ -1,7 +1,6 @@
 // Event Hubs exposes Kafka on port 9093 using SASL PLAIN. The three hubs and
 // their partition counts must match the topic settings generated for Helm.
 
-param clusterName string
 param location string
 param tags object
 
@@ -32,7 +31,9 @@ param retentionHours int = 168
 param enablePrivateEndpoint bool
 
 param privateEndpointsSubnetId string
-param vnetId string
+@description('Attach the endpoint to an organization-owned private DNS zone. False leaves registration to Azure Policy.')
+param createPrivateDnsZoneGroup bool = false
+param privateDnsZoneId string = ''
 
 resource namespace 'Microsoft.EventHub/namespaces@2024-01-01' = {
   name: namespaceName
@@ -98,24 +99,6 @@ resource logsHub 'Microsoft.EventHub/namespaces/eventhubs@2024-01-01' = {
   }
 }
 
-resource privateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (enablePrivateEndpoint) {
-  name: 'privatelink.servicebus.windows.net'
-  location: 'global'
-  tags: tags
-}
-
-resource privateDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (enablePrivateEndpoint) {
-  parent: privateDnsZone
-  name: '${clusterName}-eventhubs'
-  location: 'global'
-  properties: {
-    registrationEnabled: false
-    virtualNetwork: {
-      id: vnetId
-    }
-  }
-}
-
 resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (enablePrivateEndpoint) {
   name: '${namespaceName}-pe'
   location: location
@@ -138,7 +121,7 @@ resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (e
   }
 }
 
-resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (enablePrivateEndpoint) {
+resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-11-01' = if (enablePrivateEndpoint && createPrivateDnsZoneGroup) {
   parent: privateEndpoint
   name: 'default'
   properties: {
@@ -146,7 +129,7 @@ resource privateEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGr
       {
         name: 'servicebus'
         properties: {
-          privateDnsZoneId: privateDnsZone!.id
+          privateDnsZoneId: privateDnsZoneId
         }
       }
     ]

@@ -232,6 +232,8 @@ export async function installChart(
     wait?: boolean;
     timeout?: string;
     createNamespace?: boolean;
+    /** Chart OCI ref to install from (a fully mirrored registry's copy). */
+    chartRef?: string;
   },
 ): Promise<void> {
   const {
@@ -241,6 +243,7 @@ export async function installChart(
     wait = true,
     timeout = "15m",
     createNamespace = true,
+    chartRef = HELM_CHART_OCI,
   } = options;
 
   const valuesPath = getHelmValuesPath(deploymentName);
@@ -248,7 +251,7 @@ export async function installChart(
   const args = [
     "install",
     releaseName,
-    HELM_CHART_OCI,
+    chartRef,
     "--namespace",
     namespace,
     "--values",
@@ -402,6 +405,8 @@ export async function installOrUpgradeChart(
     wait?: boolean;
     timeout?: string;
     createNamespace?: boolean;
+    /** Chart OCI ref to install from (a fully mirrored registry's copy). */
+    chartRef?: string;
   },
 ): Promise<void> {
   const {
@@ -411,6 +416,7 @@ export async function installOrUpgradeChart(
     wait = true,
     timeout = "15m",
     createNamespace = true,
+    chartRef = HELM_CHART_OCI,
   } = options;
 
   if (await isReleaseStrandedBeforeFirstDeploy(releaseName, namespace)) {
@@ -468,7 +474,7 @@ export async function installOrUpgradeChart(
     "upgrade",
     "--install", // This makes it idempotent - install if not exists, upgrade if exists
     releaseName,
-    HELM_CHART_OCI,
+    chartRef,
     "--namespace",
     namespace,
     "--values",
@@ -508,6 +514,8 @@ export async function upgradeChart(
     timeout?: string;
     /** Roll the release back automatically when the upgrade fails. */
     atomic?: boolean;
+    /** Chart OCI ref to upgrade from (a fully mirrored registry's copy). */
+    chartRef?: string;
   },
 ): Promise<void> {
   const {
@@ -517,6 +525,7 @@ export async function upgradeChart(
     wait = true,
     timeout = "15m",
     atomic = false,
+    chartRef = HELM_CHART_OCI,
   } = options;
 
   const valuesPath = getHelmValuesPath(deploymentName);
@@ -524,7 +533,7 @@ export async function upgradeChart(
   const args = [
     "upgrade",
     releaseName,
-    HELM_CHART_OCI,
+    chartRef,
     "--namespace",
     namespace,
     "--values",
@@ -599,15 +608,22 @@ export async function dryRunUpgrade(
     releaseName: string;
     namespace: string;
     version?: string;
+    /** Chart OCI ref to render from (a fully mirrored registry's copy). */
+    chartRef?: string;
   },
 ): Promise<string> {
-  const { releaseName, namespace, version } = options;
+  const {
+    releaseName,
+    namespace,
+    version,
+    chartRef = HELM_CHART_OCI,
+  } = options;
   const valuesPath = getHelmValuesPath(deploymentName);
 
   const args = [
     "upgrade",
     releaseName,
-    HELM_CHART_OCI,
+    chartRef,
     "--namespace",
     namespace,
     "--values",

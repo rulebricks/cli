@@ -4,7 +4,12 @@ param tags object
 param kubernetesVersion string
 param aksSkuTier string
 
-param vnetName string
+// The control-plane identity is staged by prerequisites.bicep. A VNet owner
+// grants it subnet-scoped Network Contributor before main.bicep invokes this
+// module.
+param aksIdentityId string
+param aksIdentityPrincipalId string
+
 param aksSubnetId string
 
 param nodeCount int
@@ -29,10 +34,12 @@ param dnsServiceIP string
 param podCidr string
 
 param availabilityZones array
-param enablePrivateCluster bool
+param aksApiAccessMode string
+param existingAksPrivateDnsZoneId string
 param apiServerAuthorizedIpRanges array
 param enableEntraRbac bool
 param aksAdminPrincipalIds array
+param assignAksAdminRoles bool
 param kubernetesUpgradeChannel string
 param nodeOsUpgradeChannel string
 param enableMaintenanceWindow bool
@@ -44,35 +51,17 @@ param enableKeyVaultSecretsProvider bool
 param enableControlPlaneLogs bool
 param controlPlaneLogAnalyticsWorkspaceId string
 
-var networkContributorRoleId = subscriptionResourceId(
-  'Microsoft.Authorization/roleDefinitions',
-  'b24988ac-6180-42a0-ab88-20f7382dd24c'
-)
 var aksRbacClusterAdminRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   'b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b'
 )
 var zoneConfig = empty(availabilityZones) ? {} : { availabilityZones: availabilityZones }
-
-resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' existing = {
-  name: vnetName
-}
-
-resource aksIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: '${clusterName}-identity'
-  location: location
-  tags: tags
-}
-
-resource aksNetworkRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(vnet.id, aksIdentity.id, 'Network Contributor')
-  scope: vnet
-  properties: {
-    roleDefinitionId: networkContributorRoleId
-    principalId: aksIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
+var privateCluster = aksApiAccessMode != 'restrictedPublic'
+var privateDnsZone = aksApiAccessMode == 'privateWithAzureDns'
+  ? 'system'
+  : (aksApiAccessMode == 'privateWithPublicFqdn'
+      ? 'none'
+      : (aksApiAccessMode == 'privateWithExistingDns' ? existingAksPrivateDnsZoneId : null))
 
 var sharedSystemPool = union(
   {
@@ -194,7 +183,7 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-08-01' = {
   identity: {
     type: 'UserAssigned'
     userAssignedIdentities: {
-      '${aksIdentity.id}': {}
+      '${aksIdentityId}': {}
     }
   }
   properties: {
@@ -208,8 +197,12 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-08-01' = {
         }
       : null
     apiServerAccessProfile: {
-      enablePrivateCluster: enablePrivateCluster
-      authorizedIPRanges: enablePrivateCluster ? [] : apiServerAuthorizedIpRanges
+      enablePrivateCluster: privateCluster
+      enablePrivateClusterPublicFQDN: aksApiAccessMode == 'privateWithPublicFqdn'
+      // Explicit values prevent AKS from silently creating an unmanaged
+      // private DNS zone when a private API mode is selected.
+      privateDNSZone: privateDnsZone
+      authorizedIPRanges: privateCluster ? [] : apiServerAuthorizedIpRanges
     }
     agentPoolProfiles: agentPools
     autoScalerProfile: {
@@ -262,9 +255,6 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-08-01' = {
       }
     }
   }
-  dependsOn: [
-    aksNetworkRole
-  ]
 }
 
 // Control-plane log parity with the EKS stack (api/audit/authenticator
@@ -292,8 +282,10 @@ resource controlPlaneDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-
   }
 }
 
+// Optional: AKS RBAC Cluster Admin for each configured Entra principal.
+// Required only when Entra RBAC is enabled; apply after main when deferred.
 resource aksAdminRoles 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
-  for principalId in aksAdminPrincipalIds: if (enableEntraRbac) {
+  for principalId in aksAdminPrincipalIds: if (enableEntraRbac && assignAksAdminRoles) {
     name: guid(aks.id, principalId, 'Azure Kubernetes Service RBAC Cluster Admin')
     scope: aks
     properties: {
@@ -340,6 +332,7 @@ resource nodeOsMaintenance 'Microsoft.ContainerService/managedClusters/maintenan
 }
 
 output clusterName string = aks.name
+output clusterId string = aks.id
 output oidcIssuerUrl string = aks.properties.oidcIssuerProfile.issuerURL
-output clusterIdentityPrincipalId string = aksIdentity.properties.principalId
+output clusterIdentityPrincipalId string = aksIdentityPrincipalId
 output kubeletIdentityObjectId string = aks.properties.identityProfile.kubeletidentity.objectId

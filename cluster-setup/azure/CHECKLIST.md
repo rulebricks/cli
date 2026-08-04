@@ -1,224 +1,145 @@
-# Pre-deployment checklist
+# Azure enterprise deployment checklist
 
-To deploy Rulebricks, your workflow will be:
+Use this as the handoff between the Rulebricks operator and the platform team.
+The Bicep `roleRequirements` outputs contain exact principal IDs and scopes;
+this checklist intentionally contains no generated role-assignment commands.
 
- - Go through this checklist, please ensure you have any required resources provisioned.
-   - **Delegated DNS subdomain** (e.g. `rb.mycorp.com`) and parent-domain NS
-     delegation capability
-   - **Approved IP ranges** (VNet address space and subnets)
-   - **Owner** (or Contributor + User Access Administrator) on the workload
-     resource group
-   - **Entra app for email** (client ID and client secret), or BYO SMTP
-     credentials
-   - **Entra app for SSO** (optional: client ID, client secret, and tenant ID)
-   - **TLS certificates** (only if your organization issues its own)
-   - **Rulebricks license key** (request from Rulebricks)
- - Prepare the machine that will deploy the infrastructure and Rulebricks application.
-   - Have the Azure CLI, the Rulebricks CLI, and helm installed
-   - Confirm whether that machine can reach the VNet (VPN, peering, or jump host)
- - Deploy `prerequisites.bicep` (DNS zone, external-dns identity, email
-   service), or hand it to / request it from the team that controls DNS and
-   email at your organization. See steps 3 and 5.
- - Create a copy of, review, and configure the bicep parameters file, then
-   deploy `main.bicep`.
- - Wait for all resources to be deployed successfully, debug any issues (permissions, quota, etc.)
- - Using the Rulebricks CLI, run `rulebricks init` to fully configure your Rulebricks instance.
- - Run `rulebricks deploy` to deploy the Rulebricks application.
+## Resource group and deployer
 
-This checklist continues with what to confirm you have on hand before deploying bicep.
+- [ ] The prerequisites and workload resource groups already exist, or the
+      operator has subscription-level permission to create them first.
+- [ ] The prerequisites deployer can create the selected resources in the
+      prerequisites resource group.
+- [ ] If the AKS identity is created in a separate workload resource group, the
+      prerequisites deployer can create deployments and managed identities
+      there.
+- [ ] The main deployer has Contributor or equivalent resource permissions in
+      the workload resource group.
+- [ ] Role writes remain off for Contributor-only deployers.
+- [ ] Any self-service role writer has Owner or Contributor+User Access
+      Administrator on every target scope. UAA alone is not resource creation
+      permission.
 
-## 1. Region and capacity
+## Prerequisites selection
 
-- [ ] Pick a region.
-- [ ] Ensure vCPU / memory / disk quota for the node SKUs there: the defaults
-      (Dasv6 family) need ~38 vCPUs and ~152 GiB RAM at launch. Chart request
-      floor is ~10 vCPU / ~23 GiB on the core pool, plus a warm worker fleet
-      (28 × 500m CPU / 1Gi) and HPS gather (4 × 1 CPU / 1Gi). PVC baselines:
-      Kafka 50Gi, ClickHouse 100Gi (plus Redis 4Gi, Prometheus 50Gi); node OS
-      disks default to 64 GiB each. Lower capacity can work if you reduce
-      `rulebricks.hps.keda.minReplicaCount` and
-      `rulebricks.hps.workers.keda.minReplicaCount` in Helm values.
-      Check: `az vm list-usage --location <region> -o table`
-- [ ] PostgreSQL Flexible Server is available to your subscription there.
-      Check: `az postgres flexible-server list-skus --location <region>`
+- [ ] `networkProvisioningMode` matches the approved ownership model:
+      `none`, `existingSubnets`, `createSubnetsInExistingVnet`, or
+      `createVnetAndSubnets`.
+- [ ] Existing subnet IDs are full resource IDs and belong to one intended
+      VNet.
+- [ ] Subnet prefixes have been allocated and do not overlap.
+- [ ] Creating subnets in an existing VNet is approved; the deployer has
+      deployment access on its resource group plus `Network Contributor` on
+      the VNet (or an approved custom subnet read/write role).
+- [ ] The approved AKS subnet NSG is supplied when the organization requires
+      one.
+- [ ] AKS identity creation/reference is enabled only when needed.
+- [ ] Public DNS is either created, supplied as both zone+identity IDs, or
+      disabled.
+- [ ] Private DNS is either centrally managed, supplied as existing zone IDs,
+      or selectively created and linked to the approved VNet.
+- [ ] When prerequisites creates private DNS links, its deployer has
+      `virtualNetworks/join/action` on the selected VNet before deployment.
+- [ ] ACS is created, supplied by ID, or disabled independently of DNS/network.
+- [ ] All prerequisite role toggles start `false` unless their exact scopes
+      have explicit role-assignment approval.
+- [ ] Prerequisites what-if contains only the intended components.
+- [ ] Prerequisites deployment succeeded and its
+      `mainDeploymentParameters`, `roleRequirements`, and principal IDs were
+      saved.
 
-## 2. IP ranges
+## Required before main
 
-The deployment creates its own VNet. The default ranges work as-is for an
-isolated deployment, but if this VNet will be connected to your corporate
-network, the ranges must not overlap anything routable on that network.
+Review each applicable prerequisite `roleRequirements` item:
 
-- [ ] `vnetAddressSpace` | the block your network team allocates
-      (default `10.240.0.0/16`)
-- [ ] `aksSubnetPrefix`, `privateEndpointsSubnetPrefix`, `postgresSubnetPrefix`
-      | three non-overlapping subnets carved from inside that block
-      (defaults: a /22 and two /24s). If you change the VNet range, change
-      all three with it.
-- [ ] `serviceCidr` + `dnsServiceIP` (default `172.16.0.0/16` / `172.16.0.10`)
-      and `podCidr` (default `192.168.0.0/16`) | these are cluster-internal
-      and never appear on your network, but they must not overlap the VNet or
-      any range routed to it. Only change them if your network team flags a
-      conflict; keep dnsServiceIP inside serviceCidr.
+- [ ] AKS control-plane identity can read/join only the AKS subnet
+      (`Network Contributor` at subnet scope, or an approved custom read/join
+      role).
+- [ ] Main deployer can attach the AKS identity (`Managed Identity Operator`)
+      when Contributor inheritance does not already provide that capability.
+- [ ] External-dns identity has `DNS Zone Contributor` on only its public zone.
+- [ ] CLI operator can create federated credentials on the external-dns
+      identity.
+- [ ] AKS identity can use the supplied private DNS zone for
+      `privateWithExistingDns`, when selected.
+- [ ] Main/CLI deployers can read every referenced prerequisite resource,
+      including cross-resource-group DNS, identity, and ACS resources.
+- [ ] Main deployer can join the staged private-endpoint and PostgreSQL
+      subnets selected by main.
+- [ ] Main deployer can join every staged private DNS zone selected by main;
+      use the exact `beforeMain` scopes from the prerequisite handoff.
 
-## 3. DNS
+If a role toggle caused the deployment to fail:
 
-Rulebricks needs its own DNS subdomain delegated, e.g. `rb.mycorp.com`.
-[prerequisites.bicep](prerequisites.bicep) creates an Azure DNS zone for it,
-plus the identity external-dns runs as (granted DNS Zone Contributor on that
-zone); your organization then points the parent domain at the zone once, and
-all records and TLS certificates are automatic afterward.
+- [ ] Disable only that failed role toggle.
+- [ ] Rerun prerequisites so ordinary resources finish deploying.
+- [ ] Give the matching `roleRequirements` entry to the owning platform team.
+- [ ] Confirm previously successful grants remain present; a disabled
+      conditional role resource is not automatically deleted.
 
-- [ ] Decide the subdomain name. This becomes `dnsZoneName` in both parameter
+## Main configuration
+
+- [ ] Required AKS identity and subnet IDs were copied from the prerequisite
+      handoff.
+- [ ] API access mode and authorized CIDRs match enterprise policy.
+- [ ] Existing AKS private DNS zone ID is set for
+      `privateWithExistingDns`.
+- [ ] Optional features are enabled only when their resource ownership and
+      access are approved.
+- [ ] Existing storage, Key Vault, DCR, and ACR IDs have the expected Azure
+      resource type.
+- [ ] Existing ACR permission mode is `legacyRbac` or `rbacAbac` as configured
+      on that registry.
+- [ ] Main does not create or modify any prerequisite-owned network, identity,
+      DNS, ACS, or existing ACR resource.
+- [ ] Every main role toggle starts `false` for a Contributor-only deployer.
+- [ ] Main deployer can join every selected private endpoint to its subnet.
+- [ ] Main deployer can join private endpoint zone groups to every supplied
+      organization-owned private DNS zone.
+- [ ] PostgreSQL deployment principal can join the delegated subnet and has
+      Private DNS Zone Contributor (or approved equivalent) on its zone.
+- [ ] Main deployer has Reader on every cross-resource-group BYO resource.
+- [ ] Main what-if contains no role assignments when all role toggles are off.
+- [ ] Main deployment succeeded and its `roleRequirements` and `principalIds`
+      outputs were saved.
+
+## Required before `rulebricks deploy`
+
+Review each applicable main `roleRequirements` item:
+
+- [ ] Data-access identity has `Storage Blob Data Contributor`.
+- [ ] External-secrets identity has Key Vault Secrets User and selected
+      operators have Key Vault Secrets Officer.
+- [ ] Data-access identity has Monitoring Metrics Publisher; Managed Grafana
+      has Monitoring Data Reader when used.
+- [ ] AKS kubelet has `AcrPull` for legacy RBAC or
+      `Container Registry Repository Reader` for RBAC+ABAC.
+- [ ] CLI operators have `Container Registry Data Importer and Data Reader`
+      for image/chart mirroring.
+- [ ] Selected Entra administrators have AKS RBAC Cluster Admin.
+- [ ] CLI operators can create federated credentials on the data-access,
+      external-secrets, and external-dns identities they use.
+- [ ] CLI operator can obtain AKS credentials and complete Kubernetes API
+      operations required by Helm.
+- [ ] Key Vault and AKS private endpoints are reachable from the machine that
+      runs the CLI when public access is disabled.
+
+ACS SMTP is a separate handoff and does not appear in main's
+`roleRequirements` output:
+
+- [ ] ACS SMTP application service principal has either
+      `Communication and Email Service Owner` on the ACS resource or a custom
+      role with CommunicationServices Read/Write and EmailServices Write.
+- [ ] A platform-created SMTP Username links that Entra application to the
+      exact ACS resource and reports `Ready to use`.
+
+## Final verification
+
+- [ ] Both Bicep entry points and all retained parameter files compile.
+- [ ] TypeScript typecheck and Azure permission tests pass.
+- [ ] Azure what-if was run for the real tenant/resource IDs when credentials
+      are available.
+- [ ] DNS delegation/verification is complete before branded email or
+      external-dns is expected to work.
+- [ ] No secret values were placed in Bicep outputs or committed parameter
       files.
-- [ ] Deploy the prerequisites - or, if creating DNS zones is gated at your
-      organization, hand `prerequisites.bicep` to the team that owns DNS. They
-      deploy it into any resource group they like with your Entra object ID in
-      `deployerPrincipalIds`, which grants you the read (and one
-      federated-credential write) access the main deployment needs there -
-      nothing else to request. You then set `prerequisitesResourceGroup` and
-      the values from their `mainDeploymentParameters` output in your
-      parameters file.
-- [ ] Identify who controls the parent domain's DNS and confirm they can add
-      NS records after the prerequisites deploy (the name servers appear in
-      its `dnsZoneNameServers` output).
-- [ ] If the parent domain publishes a CAA record, confirm it permits
-      Let's Encrypt (`letsencrypt.org`).
-
-### TLS certificates
-
-`rulebricks init` asks how certificates are issued and supports three paths:
-
-1. **Let's Encrypt (default)** | issued and renewed automatically for every
-   hostname; nothing to prepare beyond the CAA check above.
-2. **Your cluster's certificate manager** | if your platform team runs a
-   cert-manager issuer (Venafi, Vault, a private ACME CA, ...), the CLI
-   points certificate requests at it and renewal stays fully automatic. Have
-   on hand: the issuer's name and kind.
-3. **Bring your own certificate files** | request them before an install.
-   Rulebricks serves these hostnames under the subdomain (`<sub>` = the
-   `dnsZoneName` above):
-
-   - [ ] `<sub>` | the main app and API
-   - [ ] `supabase.<sub>` | authentication and data APIs
-   - [ ] `observability.<sub>` | built-in observability UI
-   - [ ] `valkey.<sub>` | only if the optional Valkey admin UI is enabled
-
-   One wildcard certificate covering `<sub>` and `*.<sub>` works for all of
-   them; otherwise one certificate per hostname you enable.
-
-   **It will also be useful to know if the issuing CA is publicly trusted, or
-    a private/corporate CA.** Both are supported.
-
-
-## 4. Network path for the installer
-
-- [ ] The machine that runs the Rulebricks install needs a network path to
-      the VNet (VPN, peering, or a jump host); the Kubernetes control plane
-      and Key Vault are private. If this is not possible, you can use a public
-      endpoint for the control plane and Key Vault by configuring
-      `enablePrivateCluster`, `allowKeyVaultPublicAccess`, and
-      `enableKeyVaultPrivateEndpoint`.
-
-## 5. Email / SMTP
-
-- [ ] Email is required for Rulebricks to function.
-- [ ] Rulebricks supports Azure Communication Services for email. For that
-      path, provision an Entra app and have its app ID and client secret on
-      hand.
-- [ ] Decide the sender address: the Azure-managed `azurecomm.net` one, which
-      works as soon as the deployment finishes, or a branded address on a
-      domain you own (`DoNotReply@mycorp.com`).
-
-**Already have email?** If your organization gives you SMTP credentials from
-any provider (Exchange with SMTP AUTH, SES, SendGrid, Resend, ...), set
-`enableManagedEmail = false` and hand those credentials to `rulebricks init`
-instead. Nothing else in this section applies.
-
-### Branded sender
-
-Proving you own a domain is a DNS round-trip on Azure's schedule, which is why
-the email service and its domains live in the prerequisites deployment: verify
-once there, and the main deployment (and every redeploy) simply links the
-already-verified domain.
-
-- [ ] Set `emailSenderDomain` in the prerequisites parameters to a name under
-      the zone from step 3 (or the zone itself). The verification DNS records
-      are published into the zone automatically.
-- [ ] After the prerequisites deploy and NS delegation is live, run its
-      `emailInitiateVerificationCommands` outputs (four short `az` commands)
-      and wait until its `emailVerificationStatusCommand` reports all four
-      checks Verified - typically a couple of minutes. If a platform team ran
-      the prerequisites, this is theirs to run too.
-- [ ] Set `emailBrandedDomainName` to the same domain in the main parameters.
-      Branded email then works on the first run; if verification is still
-      pending when main deploys, the deployment does not fail - the
-      `azurecomm.net` sender works immediately and the Rulebricks CLI links
-      the branded domain automatically once verification lands.
-
-**Organization already runs ACS with a verified domain?** No new email service
-is needed: point `emailServiceName`, `emailServiceResourceGroup`, and
-`emailBrandedDomainName` in the main parameters at theirs (set
-`emailFallbackDomainName = ''` if that service has no Azure-managed domain).
-Linking only READS the domain, so Reader on it is all you need to ask for.
-
-## 6. Component decisions
-
-Confirm the defaults are what you want; each flips with one parameter:
-
-- [ ] Managed PostgreSQL: on
-- [ ] Kafka and Redis: in-cluster
-- [ ] Managed Prometheus + Grafana monitoring: on
-
-## 7. Images
-
-- [ ] Decide whether cluster nodes pull from Rulebricks' registry directly
-      (needs egress from the nodes) or through your own ACR, which caches all
-      images automatically (on by default; only the registry needs egress).
-
-## 8. Access and values to have on hand
-
-Whoever runs a deployment needs rights to create resources AND role
-assignments in its target resource group (Owner, or Contributor + User Access
-Administrator). Most privileged, org-gated pieces are in `prerequisites.bicep`.
-
-- **Prerequisites deployer** (you, or a platform team): Owner or
-  Contributor + User Access Administrator on the prerequisites resource group.
-- **Main deployer**: the same, but only on the workload resource group. When
-  the prerequisites live in a different resource group, the two grants the
-  main deployment needs there (Reader, plus federated-credential write on the
-  external-dns identity) are made automatically by listing your object ID in
-  the prerequisites' `deployerPrincipalIds`.
-
-These ensure you can authenticate to the cluster and seed secrets:
-
-- [ ] `aksAdminPrincipalIds` | Entra object IDs of the cluster admins
-- [ ] `keyVaultWriterPrincipalIds` | Entra object IDs allowed to seed secrets
-      (include whoever runs the Rulebricks deploy)
-
-For the ACS email path, provision before deployment:
-
-- [ ] An Entra app for email: `az ad app create --display-name "Rulebricks SMTP"`
-      then `az ad sp create --id <appId>` and `az ad app credential reset`.
-      The CLI takes the app's client ID (`<appId>`) and its client secret
-      (`<clientSecret>`), and grants the app access to the email service
-      during deploy.
-
-Optional, only if enabling Entra SSO:
-
-- [ ] An Entra app for SSO. Have on hand: its client ID, a client secret, and
-      your tenant ID. The app needs one web redirect URI -
-      `https://supabase.<subdomain-from-step-3>/auth/v1/callback` - and ID
-      token issuance enabled; the default `User.Read` permission is
-      sufficient. Create the app and its service principal (required for
-      sign-in), and keep the redirect URI exact for this deployment's
-      subdomain:
-      `az ad app create --display-name "Rulebricks SSO" --sign-in-audience AzureADMyOrg --web-redirect-uris "https://supabase.<subdomain>/auth/v1/callback" --enable-id-token-issuance true`,
-      then `az ad sp create --id <appId>` and `az ad app credential reset --id <appId>`.
-
-These are provided by Rulebricks or generated by you:
-
-- [ ] `LICENSE_KEY` | your Rulebricks license key
-- [ ] `POSTGRES_ADMIN_PASSWORD` | a strong password for the managed
-      PostgreSQL instance
-- [ ] Rulebricks admin email | the email address that should have admin
-      privileges on the Rulebricks workspace.
