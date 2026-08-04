@@ -8,7 +8,7 @@ targetScope = 'resourceGroup'
 // writes) or creates a complete VNet for self-managed environments.
 // main.bicep consumes only the resulting IDs.
 //
-// RESOURCES THIS TEMPLATE CAN CREATE:
+// RESOURCES THIS TEMPLATE MAY CREATE:
 //   networkProvisioningMode
 //                      no network, existing subnet references, approved
 //                      subnets in an existing VNet, or a new VNet/subnets

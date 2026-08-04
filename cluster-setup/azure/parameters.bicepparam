@@ -13,19 +13,21 @@
 using 'main.bicep'
 
 param clusterName = 'rulebricks'
-param location = 'eastus'
+param location = 'westus'
 param environmentName = 'production'
 param resourceTags = {
   environment: 'production'
   workload: 'rulebricks'
 }
 
-// Empty auto-detects the identity running this ARM deployment and uses it for
-// both main and Rulebricks CLI phases. Set mainDeployerPrincipalIds and
-// cliPrincipalIds directly only when those are different actors.
+// Empty auto-detects the identity running this ARM deployment and uses it
 param operatorPrincipalIds = []
 
-// REQUIRED: outputs from prerequisites.bicep.
+// ================================================
+
+// FROM PREREQUISITES
+// Direct outputs from running/completing prerequisites.bicep
+
 param existingAksControlPlaneIdentityId = ''
 param existingAksSubnetId = ''
 param existingAksPrivateDnsZoneId = ''
@@ -40,7 +42,11 @@ param existingPrivateDnsZoneIds = {
   postgres: ''
 }
 
-// REQUIRED: at least one approved corporate/VPN egress CIDR
+// ================================================
+
+// CLUSTER CONFIGURATION
+// restrictedPublic needs at least one approved corporate/VPN egress CIDR
+
 param aksApiAccessMode = 'restrictedPublic'
 param apiServerAuthorizedIpRanges = []
 
@@ -57,25 +63,56 @@ param enableMaintenanceWindow = true
 param maintenanceDay = 'Sunday'
 param maintenanceStartTime = '02:00'
 
-// Every role write remains independently selectable and off by default.
-// This is the external-platform-team handoff path. Owner or Contributor+UAA
-// can turn on only the grants they want this deployment to apply.
+// ================================================
+
+// ROLES
+// Same workflow as prerequisites: self-grant (Owner or Contributor+UAA/RBAC Admin
+// on this RG) or platform tickets from the roleRequirements output after main.
+
+// These grants are all needed before CLI `rulebricks deploy`
+
+// Below are usually true when you create storage/KV/ACR/monitoring in this RG
+// and have Owner/UAA here, leave false for Contributor-only + ticket handoff.
+
+// AKS RBAC Cluster Admin → aksAdminPrincipalIds (only if enableEntraRbac)
 param assignAksAdminRoles = false
-param assignStorageRole = false
-param assignKeyVaultReaderRole = false
-param assignKeyVaultWriterRoles = false
-param assignMonitoringPublisherRole = false
-param assignGrafanaReaderRole = false
-param assignAcrPullRole = false
-param assignAcrImporterRole = false
-param assignDataAccessFederatedIdentityRoles = false
-param assignExternalSecretsFederatedIdentityRoles = false
+// Storage Blob Data Contributor → data-access identity
+param assignStorageRole = true
+// Key Vault Secrets User → external-secrets identity
+param assignKeyVaultReaderRole = true
+// Key Vault Secrets Officer → CLI operator (secret seeding)
+param assignKeyVaultWriterRoles = true
+// Monitoring Metrics Publisher → data-access identity
+param assignMonitoringPublisherRole = true
+// Monitoring Data Reader → Managed Grafana identity
+param assignGrafanaReaderRole = true
+// AcrPull → kubelet identity (nodes pull mirrored images)
+param assignAcrPullRole = true
+// ACR Data Importer → CLI operator (image/chart mirror)
+param assignAcrImporterRole = true
+// FIC Contributor → CLI can bind K8s SAs to the data-access identity
+param assignDataAccessFederatedIdentityRoles = true
+// FIC Contributor → CLI can bind K8s SAs to the external-secrets identity
+param assignExternalSecretsFederatedIdentityRoles = true
+
+// ================================================
+
+// PRIVATE ENDPOINTS / PRIVATE DNS
+// On = needs a PE subnet ID above, plus either central Azure Policy DNS
+// (privateDnsIntegrationMode='policy') or existingPrivateDnsZoneIds
+// ('existingZones')
 
 // Public defaults: no endpoint, subnet, private-zone
 param createBlobPrivateEndpoint = false
 param enableKeyVaultPrivateEndpoint = false
 param enableDataServicePrivateEndpoints = false
 param privateDnsIntegrationMode = 'policy'
+
+// ================================================
+
+// STORAGE / MONITORING / KEY VAULT / ACR
+// create*=true provisions in this RG
+// this is where main.bicep does most resource creation
 
 // Storage is required for decision logs/backups
 param createStorage = true
@@ -102,22 +139,28 @@ param keyVaultCreateMode = 'default'
 param enableKeyVaultPurgeProtection = true
 param keyVaultSoftDeleteRetentionDays = 90
 
-// ACR is used for the Rulebricks image/chart mirror.
+// ACR is used for the Rulebricks image/chart mirror
 param createContainerRegistry = true
 param existingContainerRegistryId = ''
 param existingContainerRegistryPermissionMode = 'legacyRbac'
 param containerRegistrySku = 'Standard'
 
 // Managed services (Kafka, Redis, Postgres)
+// Details are in the main.bicep or corresponding modules/*.bicep file
 param createEventHubsNamespace = false
 param createRedisEnterprise = false
 param createPostgresFlexibleServer = false
 
-// Public DNS resources are read-only references staged in prerequisites.
+// ================================================
+
+// FROM PREREQUISITES
+// Prerequisites owns these sensitive resource creations, main only reads
+
+// Public DNS resources are read-only, prerequisites bicep decides resoure creation
 param useExternalDns = true
 param existingDnsZoneId = ''
 param existingExternalDnsIdentityId = ''
 
-// ACS is read-only here; prerequisites creates or references it.
+// ACS is read-only here; prerequisites bicep decides resource creation
 param useManagedEmail = true
 param existingCommunicationServiceId = ''
