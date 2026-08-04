@@ -58,30 +58,30 @@ az deployment group create \
   | tee rulebricks-outputs.json
 ```
 
-## Platform team tickets
-
-Each numbered item below is a ticket and when to submit it.
+## Deployment Workflow
 
 <details>
-<summary><strong>Self-service / non-production</strong></summary>
+<summary><strong>Self-service / Pre-production</strong></summary>
 
 If the deployer already has `Owner`, or `Contributor` plus
 `User Access Administrator` / `Role Based Access Control Administrator`, on
-the workload resource group, there are no Azure RBAC tickets for resources in that group.
-Enable the applicable `assign*Role` toggles and run prerequisites, main, then
+the workload resource group, there are no Azure RBAC tickets for resources 
+needed within that group.
+
+Enable the applicable `assign*Role` toggles and run prerequisites & main bicep, then
 the CLI.
 
-1. **Before prerequisites — external resource access (only if applicable).**
+1. **Before deploying prerequisites: external resource access (only if applicable).**
    - Deployer: role-assignment capability plus `Reader` on platform-owned VNet,
      subnet, DNS, or ACS scopes.
    - Deployer: `Network Contributor` only where prerequisites must create
      subnets or VNet links.
-2. **Before prerequisites — ACS SMTP identity (only if email is enabled and the
+2. **Before deploying prerequisites: ACS SMTP identity (only if email is enabled and the
    deployer cannot manage Entra apps).**
    - Identity team: create the Entra application, service principal, and client
      secret.
    - Return to deployer: application client ID and client secret.
-3. **After prerequisites — DNS delegation (only if the parent domain is owned
+3. **After deploying prerequisites: DNS delegation (only if the parent domain is owned
    elsewhere).**
    - Deployer: send the `dnsZoneNameServers` output.
    - DNS owner: delegate the Rulebricks subdomain to those name servers.
@@ -91,12 +91,12 @@ No ticket is required after main when all selected role toggles succeed.
 </details>
 
 <details>
-<summary><strong>Enterprise / Contributor</strong></summary>
+<summary><strong>Enterprise / Production</strong></summary>
 
 Keep all `assign*Role` toggles off. The deployer runs Bicep and the CLI; the
 platform team completes these tickets:
 
-1. **Before prerequisites — deployment access and inputs.**
+1. **Before prerequisites bicep: deployment access and inputs.**
    - Workload resource group: create it and grant the deployer `Contributor`.
    - Existing VNet/DNS/ACS: provide resource IDs and grant the deployer
      `Reader`.
@@ -104,7 +104,7 @@ platform team completes these tickets:
      prerequisites must create subnets or VNet links.
    - ACS email: provide the Entra application client ID and client secret; for
      platform-owned ACS, also provide its resource ID.
-2. **After prerequisites, before main — network, DNS, identity, and ACS.**
+2. **After prerequisites, before main bicep: network, DNS, identity, and ACS.**
    - Attach: prerequisite `roleRequirements` output.
    - AKS identity: `Network Contributor` on the AKS subnet.
    - External-dns identity: `DNS Zone Contributor`.
@@ -116,7 +116,7 @@ platform team completes these tickets:
      `Private DNS Zone Contributor` on selected zones.
    - DNS delegation: include `dnsZoneNameServers` when another team owns the
      parent domain.
-3. **After main, before the CLI — workload access.**
+3. **After main bicep, before the CLI: workload access.**
    - Attach: main `roleRequirements` output.
    - Data-access identity: `Storage Blob Data Contributor` and
      `Monitoring Metrics Publisher`.

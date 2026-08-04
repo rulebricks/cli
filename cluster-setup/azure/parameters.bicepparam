@@ -53,8 +53,8 @@ param apiServerAuthorizedIpRanges = []
 // Cluster access and lifecycle. Entra RBAC remains opt-in.
 param enableEntraRbac = false
 param maxNodeCount = 4
-param separateSystemPool = false
-param enableBurstPool = false
+param separateSystemPool = true
+param enableBurstPool = true
 param aksSkuTier = 'Standard'
 param availabilityZones = []
 param kubernetesUpgradeChannel = 'stable'
