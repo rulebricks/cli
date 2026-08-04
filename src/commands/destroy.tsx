@@ -160,16 +160,19 @@ function DestroyCommandInner({
         const releaseName = getReleaseName(name);
 
         if (deploymentScope.clusterAccessible) {
-          // ESO cleanup first, while the operator is still running: deleting
-          // the ExternalSecrets/SecretStore is orderly here, and the entries
-          // in the client's secrets platform are NEVER touched (they are the
-          // system of record; the completion screen lists what remains).
+          // ESO cleanup first, while the operator/release still exist: delete
+          // ExternalSecrets/SecretStore, helm-uninstall the CLI-managed ESO
+          // (so its cluster-scoped ValidatingWebhookConfigurations go with
+          // it), and strip any stranded webhooks. Provider entries in the
+          // client's secrets platform are NEVER touched (system of record;
+          // the completion screen lists what remains).
           if (cfg && secretModeForConfig(cfg) === "eso") {
             try {
               const eso = await removeEsoResources(cfg);
               setRemainingSecretEntries(eso.remainingRemoteKeys);
             } catch {
-              // Best-effort; namespace deletion below covers the resources.
+              // Best-effort; namespace deletion below covers namespaced bits,
+              // but cluster-scoped webhooks need the path above.
             }
           }
 

@@ -1820,15 +1820,17 @@ const RULEBRICKS_CRD_GROUP_SUFFIXES = [
   ".keda.sh", // keda.sh, eventing.keda.sh
   "monitoring.coreos.com", // kube-prometheus-stack
   ".traefik.io", // traefik.io, hub.traefik.io (traefik subchart)
+  "external-secrets.io", // CLI-managed ESO (+ generators.external-secrets.io)
 ];
 
 /**
  * Deletes the cluster-scoped CRDs the chart installs from crds/ dirs (cert-
- * manager, keda, strimzi, kube-prometheus-stack). CLUSTER-SHARED: deleting a CRD
- * cascade-deletes every custom resource of that kind across ALL namespaces, so
- * callers MUST gate this on isLastRulebricksDeployment() (or an explicit
- * operator --purge); never call it while another Rulebricks deployment exists.
- * Best-effort, non-blocking; returns the CRD names removed.
+ * manager, keda, strimzi, kube-prometheus-stack) plus CLI-managed ESO.
+ * CLUSTER-SHARED: deleting a CRD cascade-deletes every custom resource of that
+ * kind across ALL namespaces, so callers MUST gate this on
+ * isLastRulebricksDeployment() (or an explicit operator --purge); never call
+ * it while another Rulebricks deployment exists. Best-effort, non-blocking;
+ * returns the CRD names removed.
  */
 export async function deleteRulebricksCRDs(): Promise<string[]> {
   const deleted: string[] = [];

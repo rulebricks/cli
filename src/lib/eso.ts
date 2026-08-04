@@ -7,8 +7,10 @@
 //   1. seedCloudSecrets       - write one JSON object per Secret into the
 //                               cloud secrets manager (create-if-absent, so
 //                               client-rotated values are never clobbered).
-//   2. ensureEsoOperator      - install a namespace-scoped ESO when its CRDs
-//                               are absent; respect any platform-managed ESO.
+//   2. ensureEsoOperator      - install a namespace-scoped ESO when none is
+//                               serving (or when a prior destroy stranded
+//                               failurePolicy:Fail webhooks); respect a
+//                               live platform-managed ESO.
 //   3. applyEsoManifests      - ServiceAccount + SecretStore + one
 //                               ExternalSecret per Secret. Targets reuse
 //                               deploymentSecretNames(), so every secretRef
@@ -50,7 +52,10 @@ import { isKubernetesForbiddenError } from "./cloudErrors.js";
 // Pinned to the chart's external-secrets dependency version (Chart.yaml).
 const ESO_CHART_VERSION = "2.7.0";
 const ESO_HELM_REPO = "https://charts.external-secrets.io";
-const ESO_RELEASE_NAME = "rulebricks-external-secrets";
+/** Helm release name for the CLI-managed namespaced ESO operator. */
+export const ESO_RELEASE_NAME = "rulebricks-external-secrets";
+/** Webhook Service the upstream chart creates for that release. */
+const ESO_WEBHOOK_SERVICE = `${ESO_RELEASE_NAME}-webhook`;
 
 export type EsoBackend =
   | "aws-secrets-manager"
@@ -256,21 +261,102 @@ export async function esoCrdsPresent(): Promise<boolean> {
   }
 }
 
-/**
- * Ensure an External Secrets Operator serves this cluster. A platform-managed
- * ESO (CRDs already present) is respected untouched; otherwise the CLI
- * installs a namespace-scoped operator from the upstream chart, pinned to the
- * same version the Rulebricks chart's optional dependency uses. Installing
- * before the Rulebricks chart is what breaks the ordering deadlock: the
- * SecretStore/ExternalSecret resources (and their sync gate) must exist
- * before the app pods that consume the synced Secrets.
- */
-export async function ensureEsoOperator(
-  namespace: string,
-): Promise<{ installed: boolean }> {
-  if (await esoCrdsPresent()) {
-    return { installed: false };
+async function cliEsoWebhookServiceExists(namespace: string): Promise<boolean> {
+  try {
+    await execa("kubectl", [
+      "get",
+      "svc",
+      ESO_WEBHOOK_SERVICE,
+      "--namespace",
+      namespace,
+    ]);
+    return true;
+  } catch {
+    return false;
   }
+}
+
+/** True when any external-secrets Deployment has ready replicas cluster-wide. */
+async function esoControllerReadySomewhere(): Promise<boolean> {
+  try {
+    const { stdout } = await execa("kubectl", [
+      "get",
+      "deploy",
+      "--all-namespaces",
+      "-l",
+      "app.kubernetes.io/name=external-secrets",
+      "-o",
+      "jsonpath={range .items[*]}{.status.readyReplicas}{\"\\n\"}{end}",
+    ]);
+    return stdout
+      .split("\n")
+      .some((value) => Number.parseInt(value, 10) > 0);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Delete cluster-scoped admission webhooks left by the CLI-managed ESO
+ * release that still target `namespace`. Namespace deletion removes the
+ * webhook Service but not these ValidatingWebhookConfigurations; with
+ * failurePolicy: Fail they block the next deploy's SecretStore apply.
+ * Best-effort; returns the resource names removed.
+ */
+export async function cleanupCliEsoClusterLeftovers(
+  namespace: string,
+): Promise<string[]> {
+  const removed: string[] = [];
+  for (const kind of [
+    "validatingwebhookconfiguration",
+    "mutatingwebhookconfiguration",
+  ] as const) {
+    try {
+      const { stdout } = await execa("kubectl", [
+        "get",
+        kind,
+        "-l",
+        `app.kubernetes.io/instance=${ESO_RELEASE_NAME}`,
+        "-o",
+        "json",
+      ]);
+      const items = (
+        JSON.parse(stdout) as {
+          items?: Array<{
+            metadata?: { name?: string };
+            webhooks?: Array<{
+              clientConfig?: { service?: { namespace?: string } };
+            }>;
+          }>;
+        }
+      ).items ?? [];
+      for (const item of items) {
+        const name = item.metadata?.name;
+        if (!name) continue;
+        const pointsHere = (item.webhooks ?? []).some(
+          (webhook) => webhook.clientConfig?.service?.namespace === namespace,
+        );
+        if (!pointsHere) continue;
+        try {
+          await execa("kubectl", [
+            "delete",
+            kind,
+            name,
+            "--ignore-not-found",
+          ]);
+          removed.push(`${kind}/${name}`);
+        } catch {
+          // Best-effort per object.
+        }
+      }
+    } catch {
+      // Listing failed (no access / kind absent); nothing to strip.
+    }
+  }
+  return removed;
+}
+
+async function installCliEsoOperator(namespace: string): Promise<void> {
   try {
     await execa("helm", [
       "upgrade",
@@ -317,6 +403,38 @@ export async function ensureEsoOperator(
       `Failed to install the External Secrets Operator (release ${ESO_RELEASE_NAME}): ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+/**
+ * Ensure an External Secrets Operator serves this deployment's namespace.
+ * Reuses a live platform-managed (or already-installed) ESO; otherwise
+ * installs a namespace-scoped operator from the upstream chart, pinned to
+ * the same version the Rulebricks chart's optional dependency uses.
+ *
+ * CRDs alone are not enough: a prior destroy can leave CRDs + cluster-scoped
+ * webhooks while the webhook Service is gone. In that case we strip the dead
+ * webhooks and reinstall so SecretStore applies are not rejected with
+ * failurePolicy: Fail against a missing Service.
+ */
+export async function ensureEsoOperator(
+  namespace: string,
+): Promise<{ installed: boolean }> {
+  if (await cliEsoWebhookServiceExists(namespace)) {
+    return { installed: false };
+  }
+
+  if (await esoCrdsPresent()) {
+    if (await esoControllerReadySomewhere()) {
+      // Live operator elsewhere (platform / another namespace). Drop any dead
+      // webhooks that still target this namespace so applies aren't blocked.
+      await cleanupCliEsoClusterLeftovers(namespace);
+      return { installed: false };
+    }
+    // CRDs without a ready controller: typical post-destroy residue.
+    await cleanupCliEsoClusterLeftovers(namespace);
+  }
+
+  await installCliEsoOperator(namespace);
   return { installed: true };
 }
 
@@ -579,6 +697,12 @@ export async function setupExternalSecrets(
  * Remove the CLI-managed ESO resources at destroy time. Provider entries in
  * the secrets platform are never deleted - they are the client's system of
  * record; we print what remains instead.
+ *
+ * Also uninstalls the CLI-managed ESO Helm release and strips its
+ * cluster-scoped admission webhooks. Namespace deletion alone removes the
+ * webhook Service but leaves ValidatingWebhookConfigurations behind, which
+ * breaks the next deploy (SecretStore apply → failurePolicy: Fail against a
+ * missing Service).
  */
 export async function removeEsoResources(
   config: DeploymentConfig,
@@ -617,6 +741,23 @@ export async function removeEsoResources(
       // Best-effort.
     }
   }
+
+  // Uninstall while the release record still exists so helm can delete the
+  // cluster-scoped webhooks it owns. Ignore "not found" (already gone).
+  try {
+    await execa(
+      "helm",
+      ["uninstall", ESO_RELEASE_NAME, "--namespace", namespace],
+      { timeout: 120_000 },
+    );
+    removed.push(`HelmRelease/${ESO_RELEASE_NAME}`);
+  } catch {
+    // Release already gone, or helm unreachable — webhook sweep below
+    // still clears stranded ValidatingWebhookConfigurations.
+  }
+
+  removed.push(...(await cleanupCliEsoClusterLeftovers(namespace)));
+
   const remainingRemoteKeys =
     config.secrets?.backend === "byo-secret-store"
       ? []
