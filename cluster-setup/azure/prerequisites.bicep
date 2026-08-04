@@ -21,6 +21,7 @@ targetScope = 'resourceGroup'
 //                      Microsoft.ManagedIdentity/userAssignedIdentities
 //   createAcsEmail     Microsoft.Communication/emailServices (+ its domains)
 //                      Microsoft.Communication/communicationServices
+//                      Microsoft.Communication/communicationServices/smtpUsernames
 //   createPrivateDnsZonesFor
 //                      selected private DNS zones and VNet links
 //   assign<Role>       independently selected network, DNS, Reader, identity,
@@ -199,11 +200,14 @@ param existingExternalDnsIdentityId string = ''
 // Email (Azure Communication Services)
 // ---------------------------------------------------------------------------
 
-@description('CREATES the ACS email service, its sender domains, and the communication service the app authenticates against. Off by default: provisioning ACS is restricted in many tenants. Leave it off to use an SMTP provider you already have, or point main.bicep at an ACS resource your organization already runs.')
+@description('CREATES the ACS email service, sender domains, communication service, and SMTP Username linked to acsSmtpEntraApplicationId. Off by default because ACS provisioning is restricted in many tenants.')
 param createAcsEmail bool = false
 
 @description('Existing Azure Communication Services resource ID to pass through to main when createAcsEmail is false. Empty disables managed email.')
 param existingCommunicationServiceId string = ''
+
+@description('REQUIRED when createAcsEmail is true. Client/application ID of the existing Entra application used for ACS SMTP authentication. Its client secret remains a secure out-of-band handoff.')
+param acsSmtpEntraApplicationId string = ''
 
 // ACS data-at-rest region ('United States', 'Europe', ...). Domains can only
 // be linked into a communication service with the same data location, so
@@ -423,6 +427,8 @@ var emailServiceName = take('rbemail${uniqueString(resourceGroup().id, validated
 // Returned as a full resource ID for main.bicep; no name/resource-group
 // reconstruction is required.
 var communicationServiceName = take('rbcomm${uniqueString(resourceGroup().id, validatedClusterName)}', 63)
+var acsSmtpUsernameResourceName = take('${replace(toLower(validatedClusterName), '_', '-')}-smtp', 253)
+var acsSmtpUsername = take('${replace(toLower(validatedClusterName), '_', '-')}-smtp-user', 253)
 
 var networkContributorRoleDefinitionId = '4d97b98b-1d4f-4787-a291-c67834d212e7'
 var contributorRoleDefinitionId = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
@@ -841,6 +847,9 @@ var configurationErrors = [
   !createAcsEmail || empty(existingCommunicationServiceId)
     ? ''
     : 'createAcsEmail and existingCommunicationServiceId are mutually exclusive.'
+  !createAcsEmail || !empty(acsSmtpEntraApplicationId)
+    ? ''
+    : 'acsSmtpEntraApplicationId is required when createAcsEmail is true.'
   empty(existingCommunicationServiceId) || existingCommunicationServiceType == 'microsoft.communication/communicationservices'
     ? ''
     : 'existingCommunicationServiceId must reference Microsoft.Communication/communicationServices.'
@@ -1106,10 +1115,18 @@ resource communicationService 'Microsoft.Communication/communicationServices@202
   }
 }
 
-// NOTE: SMTP authentication also requires an SMTP Username child resource
-// linked to an Entra app registration. The platform team creates that child
-// and grants the app its ACS role after prerequisites; the CLI only discovers
-// and verifies it.
+// The Azure-side SMTP identity. The Entra app and its client secret remain
+// directory-owned inputs because subscription Owner/UAA does not grant Entra
+// application-management permission.
+resource smtpUsername 'Microsoft.Communication/communicationServices/smtpUsernames@2026-03-18' = if (createAcsEmail) {
+  parent: communicationService
+  name: acsSmtpUsernameResourceName
+  properties: {
+    entraApplicationId: acsSmtpEntraApplicationId
+    tenantId: tenant().tenantId
+    username: acsSmtpUsername
+  }
+}
 
 module communicationServiceReader 'modules/communication-role.bicep' = if (assignCommunicationServiceReaderRole && useManagedEmail && !empty(effectiveCliPrincipalIds)) {
   name: '${validatedClusterName}-communication-reader'
@@ -1450,8 +1467,14 @@ output emailSenderAddress string = createAcsEmail
       : 'DoNotReply@${managedDomain!.properties.fromSenderDomain}')
   : ''
 
-@description('SMTP host and port for the ACS sender. A platform team must create an SMTP Username child resource linked to the approved Entra app.')
+@description('SMTP host and port for the ACS sender.')
 output emailSmtpEndpoint string = createAcsEmail ? 'smtp.azurecomm.net:587' : ''
+
+@description('SMTP Username created under the communication service and linked to the approved Entra application.')
+output emailSmtpUsername string = createAcsEmail ? smtpUsername!.properties.username : ''
+
+@description('Entra application client ID linked to the SMTP Username.')
+output emailSmtpEntraApplicationId string = createAcsEmail ? acsSmtpEntraApplicationId : ''
 
 @description('Branded domain only. Starting verification is a POST action ARM cannot perform. A platform owner runs these once, waits for all four checks, then links the domain.')
 output emailInitiateVerificationCommands array = [

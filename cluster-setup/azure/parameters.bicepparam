@@ -6,7 +6,7 @@
 // deployment's roleRequirements output). Copy that output's resource IDs
 // into the parameters below.
 //
-// Review created resources with:
+// Review potential created resources with:
 // az deployment group what-if -g <resource-group> --parameters parameters.bicepparam
 // ============================================================================
 
@@ -49,7 +49,7 @@ param enableEntraRbac = false
 param maxNodeCount = 4
 param separateSystemPool = false
 param enableBurstPool = false
-param aksSkuTier = 'Free'
+param aksSkuTier = 'Standard'
 param availabilityZones = []
 param kubernetesUpgradeChannel = 'stable'
 param nodeOsUpgradeChannel = 'NodeImage'

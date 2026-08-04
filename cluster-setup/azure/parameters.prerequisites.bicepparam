@@ -11,7 +11,7 @@
 // each target scope; otherwise leave them off and use the roleRequirements
 // output as ticket items.
 //
-// Review created resources with:
+// Review potential created resources with:
 // az deployment group what-if -g <resource-group> --parameters parameters.prerequisites.bicepparam
 // ============================================================================
 

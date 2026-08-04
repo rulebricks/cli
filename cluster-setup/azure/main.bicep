@@ -253,10 +253,7 @@ param existingPrivateDnsZoneIds PrivateDnsZoneIds = {
 
 param nodeCount int = 3
 param maxNodeCount int = 4
-// D-series v6 (AMD): current-generation general purpose, available across
-// zones in the mainstream regions and overlapping PostgreSQL Flexible Server
-// availability. v5 remains a drop-in substitute where a subscription has
-// quota there instead.
+// D-series v6 (AMD): current-generation general purpose
 param nodeVmSize string = 'Standard_D4as_v6'
 
 @minValue(10)
@@ -1654,9 +1651,10 @@ output redisAccessKeyCommand string = createRedisEnterprise ? redis!.outputs.acc
 
 // ----- Email (Azure Communication Services) ----------------------------------
 // Read-only: every ACS resource belongs to prerequisites.bicep. The CLI's
-// email step discovers the platform-created SMTP Username child resource and
-// linked sender domains from the exact communication-service ID. The password
-// is the linked Entra app's client secret and is never a Bicep output.
+// email step discovers the prerequisite- or platform-created SMTP Username
+// child resource and linked sender domains from the exact communication-service
+// ID. The password is the linked Entra app's client secret and is never a
+// Bicep output.
 
 @description('SMTP host for ACS email.')
 output emailSmtpHost string = useManagedEmail ? 'smtp.azurecomm.net' : ''
