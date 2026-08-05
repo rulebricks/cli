@@ -12,6 +12,12 @@ import { CloudProvider } from "../types/index.js";
  * Earlier template generations named the identity `${cluster}-rulebricks`, and
  * before that provisioned split resources (`-metrics`, `-decision-logs`,
  * `-backups`); those names remain lower-priority fallbacks below.
+ *
+ * The Azure cluster-setup Bicep also derives its globally-unique resource
+ * names from the cluster name: Key Vault `${cluster}-kv`, storage account
+ * `<cluster-stripped-of-separators>data`, ACR `<cluster-stripped>acr`.
+ * Earlier generations used opaque uniqueString hashes (rbkv<hash>, rb<hash>,
+ * <cluster-stripped>acr<hash>), kept as fallbacks for existing deployments.
  */
 
 export type ClusterSetupCategory =
@@ -23,7 +29,8 @@ export type ClusterSetupCategory =
   | "decision-logs-bucket"
   | "backups-bucket"
   | "decision-logs-container"
-  | "backups-container";
+  | "backups-container"
+  | "container-registry";
 
 export interface ClusterSetupDetectOptions {
   provider?: CloudProvider | null;
@@ -81,17 +88,28 @@ function patternsFor(
         "-secrets",
       ];
     case "secrets-vault":
-      // Azure Key Vault names cap at 24 chars; the Bicep default derives from
-      // the cluster name (dashes and length permitting), so prefer that.
-      return [cluster, "rulebricks", "-kv", "vault"];
+      // Azure Key Vault names cap at 24 chars; the cluster-setup template
+      // names the vault `${cluster}-kv`. Earlier generations generated
+      // rbkv<uniqueString> (13-char hash), kept as a fallback.
+      return [
+        `${cluster}-kv`,
+        cluster,
+        "rulebricks",
+        "-kv",
+        /^rbkv[a-z0-9]{13}$/,
+        "vault",
+      ];
     case "decision-logs-bucket":
     case "backups-bucket":
       return [
         `${cluster}-data`,
         "-data",
         // Azure storage account names forbid hyphens; the cluster-setup
-        // template generates rb<uniqueString> (13-char hash).
-        ...(provider === "azure" ? [/^rb[a-z0-9]{13}$/] : []),
+        // template names the account `<cluster-stripped>data` (24-char cap).
+        // Earlier generations generated rb<uniqueString> (13-char hash).
+        ...(provider === "azure"
+          ? [`${stripSeparators(cluster)}data`.slice(0, 24), /^rb[a-z0-9]{13}$/]
+          : []),
         `${cluster}-decision-logs`,
         "-decision-logs",
         `${cluster}-backups`,
@@ -100,9 +118,19 @@ function patternsFor(
     case "decision-logs-container":
     case "backups-container":
       return [`${cluster}-data`, "-data", "rulebricks", "decision-logs", "backups"];
+    case "container-registry":
+      // Azure ACR names are alphanumeric only; the cluster-setup template
+      // names the registry `<cluster-stripped>acr`. The substring match also
+      // covers earlier generations' `<cluster-stripped>acr<uniqueString>`.
+      return [`${stripSeparators(cluster)}acr`];
     default:
       return [];
   }
+}
+
+/** Azure storage/ACR names forbid the separators cluster names commonly use. */
+function stripSeparators(name: string): string {
+  return name.toLowerCase().replace(/[-_]/g, "");
 }
 
 /**

@@ -117,6 +117,8 @@ param privateDnsIntegrationMode = 'policy'
 // Storage is required for decision logs/backups
 param createStorage = true
 param existingStorageAccountId = ''
+// Uncomment to override the account name (taken, or pinning a pre-rename name):
+// param storageAccountName = 'rulebricksdata2'
 param allowStorageSharedKeyAccess = false
 param enableBlobVersioning = true
 param blobSoftDeleteRetentionDays = 30
@@ -126,15 +128,17 @@ param createStorageDeleteLock = false
 param enableMetricsRemoteWrite = true
 param createMonitorWorkspace = true
 param createManagedGrafana = true
+// Uncomment to override the workspace name (taken, or pinning a pre-rename name):
+// param grafanaName = 'rulebricks-grafana2'
 
 // Key Vault-backed secrets. Blank writer overrides use the CLI operator.
 param enableKeyVaultIntegration = true
 param createKeyVault = true
 param existingKeyVaultId = ''
-// Uncomment and customize if Azure reports the generated global name is in use:
-// param keyVaultName = 'rbkv-<globally-unique-name>'
+// Uncomment to override the vault name (taken, or pinning a pre-rename name):
+// param keyVaultName = 'rulebricks-kv2'
 // Change to 'recover' only when redeploying a soft-deleted vault with the
-// generated keyVaultName after resource-group teardown.
+// same keyVaultName after resource-group teardown.
 param keyVaultCreateMode = 'default'
 param enableKeyVaultPurgeProtection = true
 param keyVaultSoftDeleteRetentionDays = 90
@@ -142,6 +146,8 @@ param keyVaultSoftDeleteRetentionDays = 90
 // ACR is used for the Rulebricks image/chart mirror
 param createContainerRegistry = true
 param existingContainerRegistryId = ''
+// Uncomment to override the registry name (taken, or pinning a pre-rename name):
+// param containerRegistryName = 'rulebricksacr2'
 param existingContainerRegistryPermissionMode = 'legacyRbac'
 param containerRegistrySku = 'Standard'
 

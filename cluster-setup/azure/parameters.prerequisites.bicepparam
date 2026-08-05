@@ -136,6 +136,10 @@ param existingExternalDnsIdentityId = ''
 // Standard deployment creates ACS with its Azure-managed sender. Set false and
 // provide existingCommunicationServiceId when messaging is platform-owned.
 param createAcsEmail = false
+// Created ACS resources default to clean names (rulebricks-email,
+// rulebricks-comms), which must be unique across Azure. Uncomment to override
+// param emailServiceName = 'rulebricks-email2'
+// param communicationServiceName = 'rulebricks-comms2'
 // Portal: Communication Services → your ACS → JSON View → id
 // Looks like: /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Communication/communicationServices/<name>
 param existingCommunicationServiceId = ''

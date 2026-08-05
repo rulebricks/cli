@@ -141,12 +141,14 @@ export function DomainStep({
       if (zone && exactReferences) {
         identityId = azureExternalDnsIdentityId;
       } else if (zone && state.clusterName && !hasExactReferences) {
-        // Subscription-wide: the prerequisites template may have placed the
-        // identity next to the zone in a platform resource group.
+        // Deployment resource group first, then subscription-wide: the
+        // prerequisites template may have placed the identity next to the
+        // zone in a platform resource group.
         identityId =
           (
             await findAzureManagedIdentity(
               `${state.clusterName}-external-dns`,
+              state.azureResourceGroup || undefined,
             )
           )?.id || "";
       }

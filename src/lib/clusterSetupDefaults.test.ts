@@ -42,6 +42,68 @@ test("still resolves the legacy -rulebricks identity on existing clusters", () =
   );
 });
 
+test("prefers the clean Azure vault name and falls back to the legacy hash", () => {
+  // Current cluster-setup names the vault `${cluster}-kv`.
+  assert.equal(
+    findClusterSetupDefault(
+      ["corp-shared-secrets", "rulebricks-kv", "other-vault"],
+      "secrets-vault",
+      { provider: "azure", clusterName: "rulebricks" },
+    ),
+    "rulebricks-kv",
+  );
+  // Deployments from before the clean-name scheme: rbkv<13-char hash>.
+  assert.equal(
+    findClusterSetupDefault(
+      ["corp-shared-secrets", "rbkv7h2k9d3m1q4w8"],
+      "secrets-vault",
+      { provider: "azure", clusterName: "rulebricks" },
+    ),
+    "rbkv7h2k9d3m1q4w8",
+  );
+});
+
+test("prefers the clean Azure storage account name and falls back to the legacy hash", () => {
+  // Current cluster-setup names the account `<cluster-stripped>data`.
+  assert.equal(
+    findClusterSetupDefault(
+      ["companybackups", "rulebricksclusterdata"],
+      "decision-logs-bucket",
+      { provider: "azure", clusterName: "rulebricks-cluster" },
+    ),
+    "rulebricksclusterdata",
+  );
+  // Deployments from before the clean-name scheme: rb<13-char hash>.
+  assert.equal(
+    findClusterSetupDefault(
+      ["companybackups", "rb7h2k9d3m1q4w8"],
+      "backups-bucket",
+      { provider: "azure", clusterName: "rulebricks-cluster" },
+    ),
+    "rb7h2k9d3m1q4w8",
+  );
+});
+
+test("matches the cluster-setup ACR by stripped cluster name, hashed or not", () => {
+  assert.equal(
+    findClusterSetupDefault(
+      ["sharedplatformacr", "rulebricksacr"],
+      "container-registry",
+      { provider: "azure", clusterName: "rulebricks" },
+    ),
+    "rulebricksacr",
+  );
+  // Deployments from before the clean-name scheme appended a uniqueString.
+  assert.equal(
+    findClusterSetupDefault(
+      ["sharedplatformacr", "rulebricksacrh2k9d3m1q4w8"],
+      "container-registry",
+      { provider: "azure", clusterName: "rulebricks" },
+    ),
+    "rulebricksacrh2k9d3m1q4w8",
+  );
+});
+
 test("flags EKS infrastructure roles across provisioning conventions", () => {
   const infraRoles = [
     // terraform-aws-eks name_prefix: cluster + node group roles.

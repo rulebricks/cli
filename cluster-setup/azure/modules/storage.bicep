@@ -1,4 +1,5 @@
-param clusterName string
+@description('Name for a created account; must be unique across Azure (main.bicep passes its storageAccountName param).')
+param storageAccountName string
 param location string
 param tags object
 
@@ -26,8 +27,7 @@ var storageBlobDataContributorRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 )
-var generatedStorageAccountName = take('rb${uniqueString(resourceGroup().id, clusterName)}', 24)
-var effectiveStorageAccountName = createStorage ? generatedStorageAccountName : existingStorageAccountName
+var effectiveStorageAccountName = createStorage ? storageAccountName : existingStorageAccountName
 
 // Blob access is unconditional: decision-log export is required by ClickHouse
 // and the in-app log UI, and database backups share the same container (as the
@@ -35,7 +35,7 @@ var effectiveStorageAccountName = createStorage ? generatedStorageAccountName : 
 // supported deployment without it.
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = if (createStorage) {
-  name: generatedStorageAccountName
+  name: storageAccountName
   location: location
   sku: {
     name: storageSkuName
@@ -90,7 +90,7 @@ resource blobRoleCreated 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
 }
 
 resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = if (createStorage && enablePrivateEndpoint) {
-  name: '${generatedStorageAccountName}-blob-pe'
+  name: '${storageAccountName}-blob-pe'
   location: location
   tags: tags
   properties: {

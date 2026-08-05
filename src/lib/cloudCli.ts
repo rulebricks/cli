@@ -1300,32 +1300,63 @@ export interface AzureAcsResource {
 }
 
 /**
- * List ACS communication services in the active subscription. Deliberately
- * subscription-wide because enterprise messaging resources often live in a
- * platform-owned resource group.
+ * Shell-quoted `--resource-group` flag for string-form az invocations.
+ * Quoted because resource group names may contain parentheses and periods.
  */
-export async function listAzureAcsResources(): Promise<AzureAcsResource[]> {
-  try {
-    const res = await execCommand(
-      `az resource list --resource-type Microsoft.Communication/communicationServices --query "[].{name:name, resourceGroup:resourceGroup, id:id}" --output json`,
-      { intent: "Discover managed email", provider: "azure" },
-    );
-    const rows = JSON.parse(res.stdout || "[]") as Array<{
-      name?: string;
-      resourceGroup?: string;
-      id?: string;
-    }>;
-    return rows
-      .filter((row) => row.name && row.id)
-      .map((row) => ({
-        name: row.name!,
-        resourceGroup: row.resourceGroup || "",
-        id: row.id!,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  } catch {
-    return [];
-  }
+function azureRgFlag(resourceGroup?: string): string {
+  const rg = resourceGroup?.trim();
+  return rg ? ` --resource-group "${rg}"` : "";
+}
+
+/**
+ * Azure discovery policy: list only the deployment's resource group, falling
+ * back to the subscription-wide listing when the group yields nothing. The
+ * scoped path keeps pickers from surfacing unrelated resources across the
+ * subscription; the fallback keeps bring-your-own configurations working,
+ * since platform-owned vaults/registries/ACS legitimately live outside the
+ * deployment's group.
+ */
+async function withResourceGroupFallback<T>(
+  resourceGroup: string | undefined,
+  list: (resourceGroup?: string) => Promise<T[]>,
+): Promise<T[]> {
+  const rg = resourceGroup?.trim();
+  if (!rg) return list(undefined);
+  const scoped = await list(rg);
+  return scoped.length > 0 ? scoped : list(undefined);
+}
+
+/**
+ * List ACS communication services, preferring the deployment's resource group
+ * and falling back subscription-wide - enterprise messaging resources often
+ * live in a platform-owned resource group.
+ */
+export async function listAzureAcsResources(
+  resourceGroup?: string,
+): Promise<AzureAcsResource[]> {
+  return withResourceGroupFallback(resourceGroup, async (rg) => {
+    try {
+      const res = await execCommand(
+        `az resource list${azureRgFlag(rg)} --resource-type Microsoft.Communication/communicationServices --query "[].{name:name, resourceGroup:resourceGroup, id:id}" --output json`,
+        { intent: "Discover managed email", provider: "azure" },
+      );
+      const rows = JSON.parse(res.stdout || "[]") as Array<{
+        name?: string;
+        resourceGroup?: string;
+        id?: string;
+      }>;
+      return rows
+        .filter((row) => row.name && row.id)
+        .map((row) => ({
+          name: row.name!,
+          resourceGroup: row.resourceGroup || "",
+          id: row.id!,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      return [];
+    }
+  });
 }
 
 export interface AzureAcsSmtpUsername {
@@ -1409,41 +1440,54 @@ export async function listAcsSmtpUsernames(
 }
 
 /**
- * True when a user-assigned managed identity of the given name exists
- * anywhere in the subscription - used to confirm the cluster-setup
- * external-dns identity is present before the wizard commits to auto-managed
- * DNS. Subscription-wide because the prerequisites template may place the
- * identity in a platform team's resource group, not the deployment's own.
+ * True when a user-assigned managed identity of the given name exists - used
+ * to confirm the cluster-setup external-dns identity is present before the
+ * wizard commits to auto-managed DNS. Checks the deployment's resource group
+ * first, then subscription-wide, because the prerequisites template may place
+ * the identity in a platform team's resource group, not the deployment's own.
  */
 export async function azureManagedIdentityExists(
   name: string,
+  resourceGroup?: string,
 ): Promise<boolean> {
-  return Boolean(await findAzureManagedIdentity(name));
+  return Boolean(await findAzureManagedIdentity(name, resourceGroup));
 }
 
 export async function findAzureManagedIdentity(
   name: string,
+  resourceGroup?: string,
 ): Promise<AzureManagedIdentity | null> {
   if (!name) return null;
-  try {
-    const res = await execCommandArgs(
-      "az",
-      [
-        "identity",
-        "list",
-        "--query",
-        `[?name=='${name}'] | [0].{id:id,name:name,clientId:clientId,resourceGroup:resourceGroup}`,
-        "--output",
-        "json",
-      ],
-      { intent: "Discover DNS zones", provider: "azure" },
-    );
-    if (!res.stdout.trim()) return null;
-    const identity = JSON.parse(res.stdout) as AzureManagedIdentity | null;
-    return identity?.id && identity.clientId ? identity : null;
-  } catch {
-    return null;
+  const lookup = async (rg?: string) => {
+    try {
+      const res = await execCommandArgs(
+        "az",
+        [
+          "identity",
+          "list",
+          ...(rg ? ["--resource-group", rg] : []),
+          "--query",
+          `[?name=='${name}'] | [0].{id:id,name:name,clientId:clientId,resourceGroup:resourceGroup}`,
+          "--output",
+          "json",
+        ],
+        { intent: "Discover DNS zones", provider: "azure" },
+      );
+      if (!res.stdout.trim()) return null;
+      const identity = JSON.parse(res.stdout) as AzureManagedIdentity | null;
+      return identity?.id && identity.clientId ? identity : null;
+    } catch {
+      return null;
+    }
+  };
+  const rg = resourceGroup?.trim();
+  if (rg) {
+    const scoped = await lookup(rg);
+    if (scoped) return scoped;
+    // Not in the deployment's group; the prerequisites template may have
+    // placed it in a platform-owned one, so widen to the subscription.
   }
+  return lookup(undefined);
 }
 
 export interface AzureDnsZoneInfo {
@@ -2325,25 +2369,27 @@ export async function getAzureTenantId(): Promise<string | null> {
 
 /**
  * List Azure user-assigned managed identities for selection (workload identity
- * client IDs). Returns an empty list on any failure so callers can fall back to
- * manual entry.
+ * client IDs), preferring the deployment's resource group. Returns an empty
+ * list on any failure so callers can fall back to manual entry.
  */
-export async function listAzureManagedIdentities(): Promise<
-  AzureManagedIdentity[]
-> {
-  try {
-    const result = await execCommand(
-      'az identity list --query "[].{id:id,name:name,clientId:clientId,resourceGroup:resourceGroup}" --output json',
-    );
-    if (result.stderr && !result.stdout) {
+export async function listAzureManagedIdentities(
+  resourceGroup?: string,
+): Promise<AzureManagedIdentity[]> {
+  return withResourceGroupFallback(resourceGroup, async (rg) => {
+    try {
+      const result = await execCommand(
+        `az identity list${azureRgFlag(rg)} --query "[].{id:id,name:name,clientId:clientId,resourceGroup:resourceGroup}" --output json`,
+      );
+      if (result.stderr && !result.stdout) {
+        return [];
+      }
+
+      const identities = JSON.parse(result.stdout) as AzureManagedIdentity[];
+      return identities.sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
       return [];
     }
-
-    const identities = JSON.parse(result.stdout) as AzureManagedIdentity[];
-    return identities.sort((a, b) => a.name.localeCompare(b.name));
-  } catch {
-    return [];
-  }
+  });
 }
 
 /**
@@ -2359,47 +2405,53 @@ export interface RemoteWriteTarget {
  * Discovers Azure Monitor Prometheus remote_write targets: every Data Collection
  * Rule that ingests the Microsoft-PrometheusMetrics stream, paired with its Data
  * Collection Endpoint's metrics-ingestion endpoint, assembled into the exact
- * remote_write URL. Works for any DCR the caller can see (not just ones we made).
+ * remote_write URL. Prefers the deployment's resource group (where cluster-setup
+ * creates the DCE/DCR pair) and falls back subscription-wide for bring-your-own
+ * rules living elsewhere.
  */
-export async function listAzurePrometheusTargets(): Promise<RemoteWriteTarget[]> {
-  try {
-    const dceResult = await execCommand(
-      'az monitor data-collection endpoint list --query "[].{id:id,endpoint:metricsIngestion.endpoint}" --output json',
-    );
-    const dces = JSON.parse(dceResult.stdout || "[]") as {
-      id: string;
-      endpoint?: string;
-    }[];
-    const endpointById = new Map<string, string>();
-    for (const dce of dces) {
-      if (dce.id && dce.endpoint) {
-        endpointById.set(dce.id.toLowerCase(), dce.endpoint);
+export async function listAzurePrometheusTargets(
+  resourceGroup?: string,
+): Promise<RemoteWriteTarget[]> {
+  return withResourceGroupFallback(resourceGroup, async (rg) => {
+    try {
+      const dceResult = await execCommand(
+        `az monitor data-collection endpoint list${azureRgFlag(rg)} --query "[].{id:id,endpoint:metricsIngestion.endpoint}" --output json`,
+      );
+      const dces = JSON.parse(dceResult.stdout || "[]") as {
+        id: string;
+        endpoint?: string;
+      }[];
+      const endpointById = new Map<string, string>();
+      for (const dce of dces) {
+        if (dce.id && dce.endpoint) {
+          endpointById.set(dce.id.toLowerCase(), dce.endpoint);
+        }
       }
-    }
 
-    const dcrResult = await execCommand(
-      'az monitor data-collection rule list --query "[].{name:name,immutableId:immutableId,dce:dataCollectionEndpointId,streams:dataFlows[].streams[]}" --output json',
-    );
-    const dcrs = JSON.parse(dcrResult.stdout || "[]") as {
-      name: string;
-      immutableId?: string;
-      dce?: string;
-      streams?: string[];
-    }[];
+      const dcrResult = await execCommand(
+        `az monitor data-collection rule list${azureRgFlag(rg)} --query "[].{name:name,immutableId:immutableId,dce:dataCollectionEndpointId,streams:dataFlows[].streams[]}" --output json`,
+      );
+      const dcrs = JSON.parse(dcrResult.stdout || "[]") as {
+        name: string;
+        immutableId?: string;
+        dce?: string;
+        streams?: string[];
+      }[];
 
-    const targets: RemoteWriteTarget[] = [];
-    for (const dcr of dcrs) {
-      if (!dcr.immutableId || !dcr.dce) continue;
-      if (!(dcr.streams || []).includes("Microsoft-PrometheusMetrics")) continue;
-      const endpoint = endpointById.get(dcr.dce.toLowerCase());
-      if (!endpoint) continue;
-      const url = `${endpoint.replace(/\/+$/, "")}/dataCollectionRules/${dcr.immutableId}/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24`;
-      targets.push({ name: dcr.name, url });
+      const targets: RemoteWriteTarget[] = [];
+      for (const dcr of dcrs) {
+        if (!dcr.immutableId || !dcr.dce) continue;
+        if (!(dcr.streams || []).includes("Microsoft-PrometheusMetrics")) continue;
+        const endpoint = endpointById.get(dcr.dce.toLowerCase());
+        if (!endpoint) continue;
+        const url = `${endpoint.replace(/\/+$/, "")}/dataCollectionRules/${dcr.immutableId}/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24`;
+        targets.push({ name: dcr.name, url });
+      }
+      return targets.sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      return [];
     }
-    return targets.sort((a, b) => a.name.localeCompare(b.name));
-  } catch {
-    return [];
-  }
+  });
 }
 
 /**
@@ -2456,23 +2508,72 @@ export async function listAzureRegions(): Promise<string[]> {
   }
 }
 
+export interface AzureResourceGroupInfo {
+  name: string;
+  location: string;
+}
+
 /**
- * List Azure storage accounts (containers require a storage account)
+ * Look up a resource group by name; null when it does not exist or the caller
+ * cannot read it. The wizard validates operator input with this before every
+ * subsequent az command is scoped to the group, and uses the group's location
+ * as the default region.
  */
-export async function listAzureStorageAccounts(): Promise<string[]> {
+export async function getAzureResourceGroupInfo(
+  name: string,
+): Promise<AzureResourceGroupInfo | null> {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
   try {
-    const result = await execCommand(
-      'az storage account list --query "[].name" --output json',
+    const result = await execCommandArgs(
+      "az",
+      [
+        "group",
+        "show",
+        "--name",
+        trimmed,
+        "--query",
+        "{name:name, location:location}",
+        "--output",
+        "json",
+      ],
+      { intent: "Validate resource group", provider: "azure" },
     );
-    if (result.stderr && !result.stdout) {
+    if (!result.stdout.trim()) return null;
+    const parsed = JSON.parse(result.stdout) as {
+      name?: string;
+      location?: string;
+    };
+    return parsed?.name
+      ? { name: parsed.name, location: parsed.location || "" }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * List Azure storage accounts (containers require a storage account),
+ * preferring the deployment's resource group.
+ */
+export async function listAzureStorageAccounts(
+  resourceGroup?: string,
+): Promise<string[]> {
+  return withResourceGroupFallback(resourceGroup, async (rg) => {
+    try {
+      const result = await execCommand(
+        `az storage account list${azureRgFlag(rg)} --query "[].name" --output json`,
+      );
+      if (result.stderr && !result.stdout) {
+        return [];
+      }
+
+      const accounts = JSON.parse(result.stdout);
+      return accounts.sort();
+    } catch {
       return [];
     }
-
-    const accounts = JSON.parse(result.stdout);
-    return accounts.sort();
-  } catch {
-    return [];
-  }
+  });
 }
 
 /**
@@ -2658,38 +2759,42 @@ export interface AzureContainerRegistry {
 }
 
 /**
- * List Azure Container Registries across the subscription. The wizard's
- * image-source step offers the deployment's registry as the image host.
- * Subscription-wide because it may live in another resource group.
+ * List Azure Container Registries, preferring the deployment's resource group
+ * (where cluster-setup creates the registry) and falling back
+ * subscription-wide for registries living in a platform-owned group. The
+ * wizard's image-source step offers the deployment's registry as the image
+ * host.
  */
-export async function listAzureContainerRegistries(): Promise<
-  AzureContainerRegistry[]
-> {
-  try {
-    const res = await execCommand(
-      `az acr list --query "[].{id:id,name:name,loginServer:loginServer,resourceGroup:resourceGroup,sku:sku.name}" --output json`,
-      { intent: "Discover container registries", provider: "azure" },
-    );
-    const rows = JSON.parse(res.stdout || "[]") as Array<{
-      id?: string;
-      name?: string;
-      loginServer?: string;
-      resourceGroup?: string;
-      sku?: string;
-    }>;
-    return rows
-      .filter((row) => row.id && row.name && row.loginServer)
-      .map((row) => ({
-        id: row.id!,
-        name: row.name!,
-        loginServer: row.loginServer!,
-        resourceGroup: row.resourceGroup || "",
-        sku: row.sku || "",
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  } catch {
-    return [];
-  }
+export async function listAzureContainerRegistries(
+  resourceGroup?: string,
+): Promise<AzureContainerRegistry[]> {
+  return withResourceGroupFallback(resourceGroup, async (rg) => {
+    try {
+      const res = await execCommand(
+        `az acr list${azureRgFlag(rg)} --query "[].{id:id,name:name,loginServer:loginServer,resourceGroup:resourceGroup,sku:sku.name}" --output json`,
+        { intent: "Discover container registries", provider: "azure" },
+      );
+      const rows = JSON.parse(res.stdout || "[]") as Array<{
+        id?: string;
+        name?: string;
+        loginServer?: string;
+        resourceGroup?: string;
+        sku?: string;
+      }>;
+      return rows
+        .filter((row) => row.id && row.name && row.loginServer)
+        .map((row) => ({
+          id: row.id!,
+          name: row.name!,
+          loginServer: row.loginServer!,
+          resourceGroup: row.resourceGroup || "",
+          sku: row.sku || "",
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      return [];
+    }
+  });
 }
 
 /**
@@ -3185,16 +3290,21 @@ export async function helmRegistryLoginToAcr(
 }
 
 /**
- * Discover running AKS clusters in a selected Azure location.
+ * Discover running AKS clusters in a selected Azure location. When a resource
+ * group is given the listing is scoped to it - and the location filter is
+ * dropped, so a region mismatch cannot hide the group's clusters.
  */
 export async function discoverAksClustersInRegion(
   region: string,
+  resourceGroup?: string,
 ): Promise<DiscoveredCluster[]> {
   try {
     const result = await execCommand(
-      'az aks list --query "[].{name:name,resourceGroup:resourceGroup,location:location,kubernetesVersion:kubernetesVersion,powerState:powerState,agentPoolProfiles:agentPoolProfiles}" --output json',
+      `az aks list${azureRgFlag(resourceGroup)} --query "[].{name:name,resourceGroup:resourceGroup,location:location,kubernetesVersion:kubernetesVersion,powerState:powerState,agentPoolProfiles:agentPoolProfiles}" --output json`,
       {
-        intent: `Discover clusters in ${region}`,
+        intent: resourceGroup?.trim()
+          ? `Discover clusters in ${resourceGroup.trim()}`
+          : `Discover clusters in ${region}`,
         provider: "azure",
       },
     );
@@ -3214,7 +3324,8 @@ export async function discoverAksClustersInRegion(
     return clusters
       .filter(
         (cluster) =>
-          cluster.location === region && cluster.powerState?.code === "Running",
+          (resourceGroup?.trim() || cluster.location === region) &&
+          cluster.powerState?.code === "Running",
       )
       .map((cluster) => ({
         provider: "azure" as const,
@@ -3294,8 +3405,9 @@ export async function listRegionsWithFallback(
  */
 export async function listAzureWorkloadIdentities(
   clusterName?: string,
+  resourceGroup?: string,
 ): Promise<AzureManagedIdentity[]> {
-  const identities = await listAzureManagedIdentities();
+  const identities = await listAzureManagedIdentities(resourceGroup);
   // No unfiltered fallback: an empty list drops the user into manual entry,
   // which beats offering an agentpool/control-plane identity that federates
   // fine and then fails at runtime with authorization errors.
@@ -3312,47 +3424,56 @@ export interface AzureKeyVault {
 }
 
 /**
- * List Key Vaults visible to the logged-in Azure CLI (CLI secrets step).
+ * List Key Vaults for the CLI secrets step, preferring the deployment's
+ * resource group (where cluster-setup creates the vault) and falling back
+ * subscription-wide for bring-your-own vaults living elsewhere.
  */
-export async function listAzureKeyVaults(): Promise<AzureKeyVault[]> {
-  try {
-    const result = await execCommand(
-      'az keyvault list --query "[].{name:name, uri:properties.vaultUri, resourceGroup:resourceGroup}" --output json',
-      { intent: "Discover Key Vaults", provider: "azure" },
-    );
-    if (result.stderr && !result.stdout) {
+export async function listAzureKeyVaults(
+  resourceGroup?: string,
+): Promise<AzureKeyVault[]> {
+  return withResourceGroupFallback(resourceGroup, async (rg) => {
+    try {
+      const result = await execCommand(
+        `az keyvault list${azureRgFlag(rg)} --query "[].{name:name, uri:properties.vaultUri, resourceGroup:resourceGroup}" --output json`,
+        { intent: "Discover Key Vaults", provider: "azure" },
+      );
+      if (result.stderr && !result.stdout) {
+        return [];
+      }
+      const vaults = JSON.parse(result.stdout) as Array<{
+        name: string;
+        uri: string | null;
+        resourceGroup?: string;
+      }>;
+      return vaults
+        .map((v) => ({
+          name: v.name,
+          // vaultUri is null in `az keyvault list` for some API versions; the
+          // canonical public URI is derivable from the name.
+          uri: v.uri || `https://${v.name}.vault.azure.net/`,
+          resourceGroup: v.resourceGroup,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
       return [];
     }
-    const vaults = JSON.parse(result.stdout) as Array<{
-      name: string;
-      uri: string | null;
-      resourceGroup?: string;
-    }>;
-    return vaults
-      .map((v) => ({
-        name: v.name,
-        // vaultUri is null in `az keyvault list` for some API versions; the
-        // canonical public URI is derivable from the name.
-        uri: v.uri || `https://${v.name}.vault.azure.net/`,
-        resourceGroup: v.resourceGroup,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  } catch {
-    return [];
-  }
+  });
 }
 
 /**
  * List buckets/storage for a specific provider
  */
-export async function listBuckets(provider: CloudProvider): Promise<string[]> {
+export async function listBuckets(
+  provider: CloudProvider,
+  options?: { azureResourceGroup?: string },
+): Promise<string[]> {
   switch (provider) {
     case "aws":
       return listS3Buckets();
     case "gcp":
       return listGcsBuckets();
     case "azure":
-      return listAzureStorageAccounts();
+      return listAzureStorageAccounts(options?.azureResourceGroup);
     default:
       return [];
   }
@@ -3403,6 +3524,7 @@ export async function listManagedClusters(
 export async function discoverClustersInRegion(
   provider: CloudProvider,
   region: string,
+  options?: { azureResourceGroup?: string },
 ): Promise<DiscoveredCluster[]> {
   switch (provider) {
     case "aws":
@@ -3410,7 +3532,7 @@ export async function discoverClustersInRegion(
     case "gcp":
       return discoverGkeClustersInRegion(region);
     case "azure":
-      return discoverAksClustersInRegion(region);
+      return discoverAksClustersInRegion(region, options?.azureResourceGroup);
     default:
       return [];
   }
@@ -3641,25 +3763,29 @@ export async function listGcsBucketsInRegion(
 }
 
 /**
- * List Azure storage accounts in a specific region
+ * List Azure storage accounts in a specific region, preferring the
+ * deployment's resource group.
  */
 export async function listAzureStorageAccountsInRegion(
   region: string,
+  resourceGroup?: string,
 ): Promise<string[]> {
-  try {
-    const result = await execCommand(
-      `az storage account list --query "[?primaryLocation=='${region}'].name" --output json`,
-    );
+  return withResourceGroupFallback(resourceGroup, async (rg) => {
+    try {
+      const result = await execCommand(
+        `az storage account list${azureRgFlag(rg)} --query "[?primaryLocation=='${region}'].name" --output json`,
+      );
 
-    if (result.stderr && !result.stdout) {
+      if (result.stderr && !result.stdout) {
+        return [];
+      }
+
+      const accounts = JSON.parse(result.stdout) as string[];
+      return accounts.sort();
+    } catch {
       return [];
     }
-
-    const accounts = JSON.parse(result.stdout) as string[];
-    return accounts.sort();
-  } catch {
-    return [];
-  }
+  });
 }
 
 /**
@@ -3668,6 +3794,7 @@ export async function listAzureStorageAccountsInRegion(
 export async function listBucketsInRegion(
   provider: CloudProvider,
   region: string,
+  options?: { azureResourceGroup?: string },
 ): Promise<string[]> {
   switch (provider) {
     case "aws":
@@ -3675,7 +3802,10 @@ export async function listBucketsInRegion(
     case "gcp":
       return listGcsBucketsInRegion(region);
     case "azure":
-      return listAzureStorageAccountsInRegion(region);
+      return listAzureStorageAccountsInRegion(
+        region,
+        options?.azureResourceGroup,
+      );
     default:
       return [];
   }
@@ -3789,15 +3919,24 @@ export async function listElastiCacheInstances(
 }
 
 /**
- * List Azure Cache for Redis instances in the subscription.
+ * List Azure Cache for Redis instances, preferring the deployment's resource
+ * group and falling back subscription-wide.
  */
-export async function listAzureRedisInstances(): Promise<
-  DiscoveredRedisInstance[]
-> {
+export async function listAzureRedisInstances(
+  resourceGroup?: string,
+): Promise<DiscoveredRedisInstance[]> {
+  return withResourceGroupFallback(resourceGroup, (rg) =>
+    listAzureRedisInstancesIn(rg),
+  );
+}
+
+async function listAzureRedisInstancesIn(
+  resourceGroup?: string,
+): Promise<DiscoveredRedisInstance[]> {
   const instances: DiscoveredRedisInstance[] = [];
   try {
     const result = await execCommand(
-      'az redis list --query "[].{name:name,host:hostName,port:port,sslPort:sslPort,rg:resourceGroup}" --output json',
+      `az redis list${azureRgFlag(resourceGroup)} --query "[].{name:name,host:hostName,port:port,sslPort:sslPort,rg:resourceGroup}" --output json`,
       { intent: "Discover managed Redis", provider: "azure" },
     );
     const caches = JSON.parse(result.stdout || "[]") as Array<{
@@ -3828,7 +3967,7 @@ export async function listAzureRedisInstances(): Promise<
     // Requires the `redisenterprise` az extension; when absent this fails
     // and the instance can still be entered manually.
     const result = await execCommand(
-      'az redisenterprise list --query "[].{name:name,host:hostName,rg:resourceGroup}" --output json',
+      `az redisenterprise list${azureRgFlag(resourceGroup)} --query "[].{name:name,host:hostName,rg:resourceGroup}" --output json`,
       { intent: "Discover managed Redis", provider: "azure" },
     );
     const clusters = JSON.parse(result.stdout || "[]") as Array<{
@@ -3892,13 +4031,13 @@ export async function listMemorystoreInstances(
 export async function listManagedRedis(
   provider: CloudProvider,
   region: string,
-  options: { clusterName?: string } = {},
+  options: { clusterName?: string; azureResourceGroup?: string } = {},
 ): Promise<DiscoveredRedisInstance[]> {
   switch (provider) {
     case "aws":
       return listElastiCacheInstances(region, options.clusterName);
     case "azure":
-      return listAzureRedisInstances();
+      return listAzureRedisInstances(options.azureResourceGroup);
     case "gcp":
       return listMemorystoreInstances(region);
     default:
@@ -3960,36 +4099,39 @@ export async function getMskBootstrapBrokers(
 }
 
 /**
- * List Event Hubs namespaces; the Kafka endpoint is <namespace>:9093.
+ * List Event Hubs namespaces, preferring the deployment's resource group; the
+ * Kafka endpoint is <namespace>:9093.
  */
-export async function listEventHubsNamespaces(): Promise<
-  DiscoveredKafkaCluster[]
-> {
-  try {
-    const result = await execCommand(
-      'az eventhubs namespace list --query "[].{name:name,rg:resourceGroup,host:serviceBusEndpoint}" --output json',
-      { intent: "Discover managed Kafka", provider: "azure" },
-    );
-    const namespaces = JSON.parse(result.stdout || "[]") as Array<{
-      name: string;
-      rg?: string;
-      host?: string;
-    }>;
-    return namespaces
-      .map((ns) => {
-        const host = ns.host
-          ? new URL(ns.host).hostname
-          : `${ns.name}.servicebus.windows.net`;
-        return {
-          name: ns.name,
-          brokers: `${host}:9093`,
-          resourceGroup: ns.rg,
-        };
-      })
-      .sort((a, b) => a.name.localeCompare(b.name));
-  } catch {
-    return [];
-  }
+export async function listEventHubsNamespaces(
+  resourceGroup?: string,
+): Promise<DiscoveredKafkaCluster[]> {
+  return withResourceGroupFallback(resourceGroup, async (rg) => {
+    try {
+      const result = await execCommand(
+        `az eventhubs namespace list${azureRgFlag(rg)} --query "[].{name:name,rg:resourceGroup,host:serviceBusEndpoint}" --output json`,
+        { intent: "Discover managed Kafka", provider: "azure" },
+      );
+      const namespaces = JSON.parse(result.stdout || "[]") as Array<{
+        name: string;
+        rg?: string;
+        host?: string;
+      }>;
+      return namespaces
+        .map((ns) => {
+          const host = ns.host
+            ? new URL(ns.host).hostname
+            : `${ns.name}.servicebus.windows.net`;
+          return {
+            name: ns.name,
+            brokers: `${host}:9093`,
+            resourceGroup: ns.rg,
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      return [];
+    }
+  });
 }
 
 /**
@@ -4024,12 +4166,13 @@ export async function listGcpKafkaClusters(
 export async function listManagedKafka(
   provider: CloudProvider,
   region: string,
+  options: { azureResourceGroup?: string } = {},
 ): Promise<DiscoveredKafkaCluster[]> {
   switch (provider) {
     case "aws":
       return listMskClusters(region);
     case "azure":
-      return listEventHubsNamespaces();
+      return listEventHubsNamespaces(options.azureResourceGroup);
     case "gcp":
       return listGcpKafkaClusters(region);
     default:
@@ -4113,33 +4256,36 @@ export async function listRdsPostgresInstances(
 }
 
 /**
- * List Azure Database for PostgreSQL flexible servers.
+ * List Azure Database for PostgreSQL flexible servers, preferring the
+ * deployment's resource group.
  */
-export async function listAzurePostgresServers(): Promise<
-  DiscoveredPostgresInstance[]
-> {
-  try {
-    const result = await execCommand(
-      'az postgres flexible-server list --query "[].{name:name,host:fullyQualifiedDomainName,user:administratorLogin}" --output json',
-      { intent: "Discover managed Postgres", provider: "azure" },
-    );
-    const servers = JSON.parse(result.stdout || "[]") as Array<{
-      name: string;
-      host?: string;
-      user?: string;
-    }>;
-    return servers
-      .filter((server) => server.host)
-      .map((server) => ({
-        name: server.name,
-        host: server.host as string,
-        port: 5432,
-        masterUsername: server.user || undefined,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  } catch {
-    return [];
-  }
+export async function listAzurePostgresServers(
+  resourceGroup?: string,
+): Promise<DiscoveredPostgresInstance[]> {
+  return withResourceGroupFallback(resourceGroup, async (rg) => {
+    try {
+      const result = await execCommand(
+        `az postgres flexible-server list${azureRgFlag(rg)} --query "[].{name:name,host:fullyQualifiedDomainName,user:administratorLogin}" --output json`,
+        { intent: "Discover managed Postgres", provider: "azure" },
+      );
+      const servers = JSON.parse(result.stdout || "[]") as Array<{
+        name: string;
+        host?: string;
+        user?: string;
+      }>;
+      return servers
+        .filter((server) => server.host)
+        .map((server) => ({
+          name: server.name,
+          host: server.host as string,
+          port: 5432,
+          masterUsername: server.user || undefined,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      return [];
+    }
+  });
 }
 
 /**
@@ -4184,12 +4330,13 @@ export async function listCloudSqlPostgresInstances(): Promise<
 export async function listManagedPostgres(
   provider: CloudProvider,
   region: string,
+  options: { azureResourceGroup?: string } = {},
 ): Promise<DiscoveredPostgresInstance[]> {
   switch (provider) {
     case "aws":
       return listRdsPostgresInstances(region);
     case "azure":
-      return listAzurePostgresServers();
+      return listAzurePostgresServers(options.azureResourceGroup);
     case "gcp":
       return listCloudSqlPostgresInstances();
     default:

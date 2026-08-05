@@ -209,6 +209,12 @@ param existingCommunicationServiceId string = ''
 @description('REQUIRED when createAcsEmail is true. Client/application ID of the existing Entra application used for ACS SMTP authentication. Its client secret remains a secure out-of-band handoff.')
 param acsSmtpEntraApplicationId string = ''
 
+@description('Name of a created ACS email service (unique across Azure) - override it if the deployment reports the name is already in use.')
+param emailServiceName string = take('${toLower(clusterName)}-email', 63)
+
+@description('Name of a created ACS communication service. Its endpoint is public DNS, so it must be unique across Azure - override it if the deployment reports the name is already in use. Returned as a full resource ID for main.bicep; no name/resource-group reconstruction is required.')
+param communicationServiceName string = take('${toLower(clusterName)}-comms', 63)
+
 // ACS data-at-rest region ('United States', 'Europe', ...). Domains can only
 // be linked into a communication service with the same data location, so
 // every ACS resource here shares this one value.
@@ -423,10 +429,6 @@ var brandedDomainLabel = (!createDnsRecords || emailSenderDomain == dnsZoneName)
 var dkimSelector1 = 'selector1-azurecomm-prod-net._domainkey'
 var dkimSelector2 = 'selector2-azurecomm-prod-net._domainkey'
 
-var emailServiceName = take('rbemail${uniqueString(resourceGroup().id, validatedClusterName)}', 63)
-// Returned as a full resource ID for main.bicep; no name/resource-group
-// reconstruction is required.
-var communicationServiceName = take('rbcomm${uniqueString(resourceGroup().id, validatedClusterName)}', 63)
 var acsSmtpUsernameResourceName = take('${replace(toLower(validatedClusterName), '_', '-')}-smtp', 253)
 var acsSmtpUsername = take('${replace(toLower(validatedClusterName), '_', '-')}-smtp-user', 253)
 

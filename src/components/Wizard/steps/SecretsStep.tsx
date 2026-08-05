@@ -245,9 +245,11 @@ export function SecretsStep({
           label="Select the Key Vault"
           hint="The vault holding this deployment's secrets - from cluster-setup (keyVaultName output) or any existing RBAC-enabled vault. Create one and press R to refresh."
           loadingLabel="Loading Key Vaults..."
-          emptyHint="None found. Press R to refresh or enter a vault name manually."
+          emptyHint={`None found in ${state.azureResourceGroup ? `resource group ${state.azureResourceGroup} or ` : ""}the subscription. Press R to refresh or enter a vault name manually.`}
           load={async () =>
-            (await listAzureKeyVaults()).map((v) => ({
+            (
+              await listAzureKeyVaults(state.azureResourceGroup || undefined)
+            ).map((v) => ({
               label: v.name,
               value: v.name,
             }))
@@ -311,7 +313,10 @@ export function SecretsStep({
           emptyHint="None found. Press R to refresh or enter a client ID manually."
           load={async () => {
             const [identities, tenant] = await Promise.all([
-              listAzureWorkloadIdentities(state.clusterName),
+              listAzureWorkloadIdentities(
+                state.clusterName,
+                state.azureResourceGroup || undefined,
+              ),
               getAzureTenantId(),
             ]);
             if (tenant) {

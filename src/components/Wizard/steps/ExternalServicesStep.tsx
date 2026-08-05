@@ -475,7 +475,10 @@ export function ExternalServicesStep({
             const instances = await listManagedRedis(
               provider as CloudProvider,
               state.region,
-              { clusterName: state.clusterName },
+              {
+                clusterName: state.clusterName,
+                azureResourceGroup: state.azureResourceGroup || undefined,
+              },
             );
             redisByName.clear();
             for (const instance of instances) {
@@ -616,6 +619,7 @@ export function ExternalServicesStep({
             const clusters = await listManagedKafka(
               provider as CloudProvider,
               state.region,
+              { azureResourceGroup: state.azureResourceGroup || undefined },
             );
             kafkaByName.clear();
             for (const cluster of clusters) {
@@ -842,6 +846,7 @@ export function ExternalServicesStep({
             const instances = await listManagedPostgres(
               provider as CloudProvider,
               state.region,
+              { azureResourceGroup: state.azureResourceGroup || undefined },
             );
             pgByName.clear();
             for (const instance of instances) {

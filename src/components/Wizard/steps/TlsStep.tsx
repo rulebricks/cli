@@ -366,6 +366,14 @@ export function TlsStep({ onComplete, onBack, entryDirection }: TlsStepProps) {
             )}
             <Box marginTop={1}>
               <WizardSelect
+                // The coverage banner above re-reads the PEM files on every
+                // render, but ink-select-input keeps its highlight from mount
+                // (and snaps to item 0, "Add a certificate", whenever the
+                // items list changes). Without this key, fixing a cert file
+                // on disk turns the banner green while Enter still triggers
+                // "add" - keying on cert count + coverage remounts the select
+                // so its default follows what the banner shows.
+                key={`tls-review-${state.tlsCertificates.length}-${coverage.missing.length === 0 ? "covered" : "missing"}`}
                 label=""
                 items={[
                   { label: "Add a certificate", value: "add" },

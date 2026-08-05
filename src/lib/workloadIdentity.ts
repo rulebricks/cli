@@ -489,9 +489,10 @@ export async function deriveConventionalAzureExternalDnsClientId(
 /**
  * Azure counterpart of deriveConventionalAwsRole: resolve the client ID of a
  * cluster-setup user-assigned identity by its `<cluster>-<suffix>` naming
- * convention. The lookup is subscription-wide: the prerequisites template may
- * place an identity (external-dns) in a platform team's resource group, not
- * the deployment's own. The deployment's resource group wins when the name
+ * convention. The deployment's resource group is checked first; when the name
+ * is not there, the lookup widens to the subscription, because the
+ * prerequisites template may place an identity (external-dns) in a platform
+ * team's resource group. The deployment's resource group wins when the name
  * appears in several. Undefined when the identity does not exist.
  */
 export async function deriveConventionalAzureIdentityClientId(
@@ -500,22 +501,30 @@ export async function deriveConventionalAzureIdentityClientId(
 ): Promise<string | undefined> {
   const cluster = config.infrastructure.clusterName;
   if (!cluster) return undefined;
-  const res = await run(
-    `az identity list --query ${shq(
-      `[?name=='${cluster}-${suffix}'].{clientId:clientId,resourceGroup:resourceGroup}`,
-    )} --output json`,
-    { intent: "Configure workload identity (Azure)", provider: "azure" },
-  );
-  if (res.code !== 0) return undefined;
-  let identities: Array<{ clientId?: string; resourceGroup?: string }>;
-  try {
-    identities = JSON.parse(res.stdout || "[]");
-  } catch {
-    return undefined;
+  const list = async (
+    scope?: string,
+  ): Promise<Array<{ clientId?: string; resourceGroup?: string }>> => {
+    const res = await run(
+      `az identity list${scope ? ` --resource-group ${shq(scope)}` : ""} --query ${shq(
+        `[?name=='${cluster}-${suffix}'].{clientId:clientId,resourceGroup:resourceGroup}`,
+      )} --output json`,
+      { intent: "Configure workload identity (Azure)", provider: "azure" },
+    );
+    if (res.code !== 0) return [];
+    try {
+      return JSON.parse(res.stdout || "[]");
+    } catch {
+      return [];
+    }
+  };
+  const rg = (config.infrastructure.azureResourceGroup || "").trim();
+  let identities = rg ? await list(rg) : [];
+  if (identities.length === 0) {
+    identities = await list(undefined);
   }
-  const rg = (config.infrastructure.azureResourceGroup || "").toLowerCase();
+  const rgLower = rg.toLowerCase();
   const preferred =
-    identities.find((i) => (i.resourceGroup || "").toLowerCase() === rg) ??
+    identities.find((i) => (i.resourceGroup || "").toLowerCase() === rgLower) ??
     identities[0];
   return preferred?.clientId || undefined;
 }
@@ -901,6 +910,53 @@ async function removeAws(
   return { removed };
 }
 
+/**
+ * Resolve a user-assigned identity's name and resource group from its client
+ * ID, checking the deployment's resource group first (where cluster-setup
+ * places workload identities) and widening to the subscription when it is not
+ * there - the wizard offers identities from any resource group, so a valid
+ * identity living outside the cluster's group must still resolve. The last
+ * az result is returned so callers can distinguish "not found" from RBAC
+ * denial.
+ */
+async function lookupAzureIdentityByClientId(
+  clientId: string,
+  resourceGroup: string | undefined,
+  intent: string,
+): Promise<{
+  identity: { name: string; resourceGroup: string } | null;
+  lastResult: { code: number; stdout: string; stderr: string };
+}> {
+  const lookup = async (rg?: string) => {
+    const res = await run(
+      `az identity list${rg ? ` --resource-group ${shq(rg)}` : ""} --query "[?clientId=='${clientId}'].{name: name, resourceGroup: resourceGroup} | [0]" --output json`,
+      { intent, provider: "azure" },
+    );
+    let identity: { name: string; resourceGroup: string } | null = null;
+    try {
+      const parsed = JSON.parse(res.stdout) as {
+        name?: string;
+        resourceGroup?: string;
+      } | null;
+      if (parsed?.name && parsed.resourceGroup) {
+        identity = { name: parsed.name, resourceGroup: parsed.resourceGroup };
+      }
+    } catch {
+      // Treated as not found by callers.
+    }
+    return { identity, res };
+  };
+  const rg = resourceGroup?.trim();
+  if (rg) {
+    const scoped = await lookup(rg);
+    if (scoped.identity) {
+      return { identity: scoped.identity, lastResult: scoped.res };
+    }
+  }
+  const wide = await lookup(undefined);
+  return { identity: wide.identity, lastResult: wide.res };
+}
+
 async function removeAzure(
   config: DeploymentConfig,
   namespace: string,
@@ -933,22 +989,14 @@ async function removeAzure(
       }
     }
     if (identity === undefined) {
-      const lookupRes = await run(
-        `az identity list --query "[?clientId=='${clientId}'].{name: name, resourceGroup: resourceGroup} | [0]" --output json`,
-        { intent, provider: "azure" },
+      // Identity gone (e.g. cluster-setup already torn down) resolves to
+      // null: nothing to remove.
+      const lookup = await lookupAzureIdentityByClientId(
+        clientId,
+        config.infrastructure.azureResourceGroup,
+        intent,
       );
-      identity = null;
-      try {
-        const parsed = JSON.parse(lookupRes.stdout) as {
-          name?: string;
-          resourceGroup?: string;
-        } | null;
-        if (parsed?.name && parsed.resourceGroup) {
-          identity = { name: parsed.name, resourceGroup: parsed.resourceGroup };
-        }
-      } catch {
-        // Identity gone (e.g. cluster-setup already torn down): nothing to remove.
-      }
+      identity = lookup.identity;
       identityByClientId.set(clientId, identity);
     }
     if (!identity) continue;
@@ -1070,9 +1118,9 @@ async function ensureAzure(
   }
 
   // Resolve identity name + resource group once per distinct clientId. The
-  // lookup is subscription-wide: the wizard offers identities from any
-  // resource group, so a valid identity living outside the cluster's RG must
-  // still resolve here.
+  // lookup checks the deployment's resource group first and then widens to
+  // the subscription: the wizard offers identities from any resource group,
+  // so a valid identity living outside the cluster's RG must still resolve.
   interface ResolvedIdentity {
     name: string;
     resourceGroup: string;
@@ -1107,22 +1155,13 @@ async function ensureAzure(
       }
     }
     if (!identity && !lookupDenied.has(clientId)) {
-      const lookupRes = await run(
-        `az identity list --query "[?clientId=='${clientId}'].{name: name, resourceGroup: resourceGroup} | [0]" --output json`,
-        { intent, provider: "azure" },
-      );
-      try {
-        const parsed = JSON.parse(lookupRes.stdout) as {
-          name?: string;
-          resourceGroup?: string;
-        } | null;
-        if (parsed?.name && parsed.resourceGroup) {
-          identity = { name: parsed.name, resourceGroup: parsed.resourceGroup };
-        }
-      } catch {
-        // Treated as not found below.
-      }
-      if (!identity && lookupRes.code !== 0 && isCloudAuthorizationError(lookupRes.stderr)) {
+      const lookup = await lookupAzureIdentityByClientId(clientId, rg, intent);
+      identity = lookup.identity ?? undefined;
+      if (
+        !identity &&
+        lookup.lastResult.code !== 0 &&
+        isCloudAuthorizationError(lookup.lastResult.stderr)
+      ) {
         lookupDenied.add(clientId);
       } else if (!identity) {
         throw new Error(

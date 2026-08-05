@@ -19,6 +19,7 @@ import {
   CloudCliStatus,
   DiscoveredCluster,
   discoverClustersInRegion,
+  getAzureResourceGroupInfo,
   listRegionsWithFallback,
   getGcpProjectId,
   updateKubeconfig,
@@ -80,6 +81,7 @@ export function CloudProviderStep({
   const [resourceGroup, setResourceGroup] = useState(
     state.azureResourceGroup || "",
   );
+  const [rgChecking, setRgChecking] = useState(false);
   const [clustersByKey] = useState(new Map<string, DiscoveredCluster>());
   const [finishing, setFinishing] = useState(false);
 
@@ -295,12 +297,61 @@ export function CloudProviderStep({
       },
     },
     {
+      // Asked as soon as Azure is picked: every az discovery command the
+      // wizard (and later the deploy) runs is scoped to this resource group,
+      // so pickers only surface the deployment's own resources instead of the
+      // whole subscription.
+      id: "azure-rg",
+      when: () => provider === "azure",
+      render: (flow) => (
+        <Box flexDirection="column">
+          <TextField
+            label="Azure resource group"
+            hint="The resource group your cluster-setup deployment targeted. All Azure discovery from here on is scoped to it."
+            value={resourceGroup}
+            onChange={setResourceGroup}
+            placeholder="rulebricks-rg"
+            focus={!rgChecking}
+            onSubmit={async () => {
+              const name = resourceGroup.trim();
+              if (!name) {
+                setError("Resource group is required for Azure deployments");
+                return;
+              }
+              setError(null);
+              setRgChecking(true);
+              const info = await getAzureResourceGroupInfo(name);
+              setRgChecking(false);
+              if (!info) {
+                setError(
+                  `Resource group "${name}" was not found in the active subscription (az account show).`,
+                );
+                return;
+              }
+              setResourceGroup(info.name);
+              dispatch({ type: "SET_AZURE_RG", resourceGroup: info.name });
+              // The group's location is the natural region default.
+              if (!region && info.location) {
+                setRegion(info.location);
+              }
+              flow.next();
+            }}
+          />
+          {rgChecking && <Spinner label="Checking resource group..." />}
+        </Box>
+      ),
+    },
+    {
       id: "region",
       when: () => !!provider && !regionManual,
       render: (flow) => (
         <DiscoveredSelect
           label="Select the cluster's region"
-          hint={`Rulebricks will only search ${provider ? CLOUD_PROVIDER_NAMES[provider] : ""} clusters in this region.`}
+          hint={
+            provider === "azure"
+              ? `Defaults to the resource group's location. Cluster discovery searches the resource group, not the region.`
+              : `Rulebricks will only search ${provider ? CLOUD_PROVIDER_NAMES[provider] : ""} clusters in this region.`
+          }
           loadingLabel="Loading available regions..."
           emptyHint="No regions listed. Press R to refresh or enter one manually."
           load={async () =>
@@ -351,13 +402,24 @@ export function CloudProviderStep({
           <DiscoveredSelect
             label="Select your Kubernetes cluster"
             hint={`${formatClusterColumns("Name", "Location", "Details", "Nodes")}`}
-            loadingLabel={`Fetching ${provider ? CLOUD_PROVIDER_NAMES[provider] : ""} clusters in ${region}...`}
-            emptyHint={`No clusters found in ${region}. Press R to refresh, or enter a name manually (see cluster-setup/ for minimum Rulebricks examples).`}
+            loadingLabel={
+              provider === "azure"
+                ? `Fetching AKS clusters in resource group ${resourceGroup.trim()}...`
+                : `Fetching ${provider ? CLOUD_PROVIDER_NAMES[provider] : ""} clusters in ${region}...`
+            }
+            emptyHint={
+              provider === "azure"
+                ? `No clusters found in resource group ${resourceGroup.trim()}. Press R to refresh, or enter a name manually (see cluster-setup/ for minimum Rulebricks examples).`
+                : `No clusters found in ${region}. Press R to refresh, or enter a name manually (see cluster-setup/ for minimum Rulebricks examples).`
+            }
             manualLabel="Enter cluster name manually…"
             load={async () => {
               const clusters = await discoverClustersInRegion(
                 provider as CloudProvider,
                 region,
+                provider === "azure"
+                  ? { azureResourceGroup: resourceGroup.trim() || undefined }
+                  : undefined,
               );
               clustersByKey.clear();
               for (const cluster of clusters) {
@@ -414,43 +476,13 @@ export function CloudProviderStep({
               type: "SET_CLUSTER_NAME",
               clusterName: clusterName.trim(),
             });
-            if (provider === "azure") {
-              flow.next();
-              return;
-            }
-            finish(
-              { name: clusterName.trim(), region },
-              flow.next,
-            );
-          }}
-        />
-      ),
-    },
-    {
-      id: "azure-rg",
-      when: () => provider === "azure" && clusterManual,
-      render: (flow) => (
-        <TextField
-          label="Enter the cluster's resource group"
-          hint="The Azure resource group containing the AKS cluster (needed for kubeconfig access)."
-          value={resourceGroup}
-          onChange={setResourceGroup}
-          placeholder="my-resource-group"
-          onSubmit={() => {
-            if (!resourceGroup.trim()) {
-              setError("Resource group is required for AKS clusters");
-              return;
-            }
-            setError(null);
-            dispatch({
-              type: "SET_AZURE_RG",
-              resourceGroup: resourceGroup.trim(),
-            });
             finish(
               {
                 name: clusterName.trim(),
                 region,
-                resourceGroup: resourceGroup.trim(),
+                // Azure: already collected and validated up front.
+                resourceGroup:
+                  provider === "azure" ? resourceGroup.trim() : undefined,
               },
               flow.next,
             );

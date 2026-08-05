@@ -289,6 +289,12 @@ param createStorage bool = true
 
 @description('Full storage-account resource ID when createStorage is false. Every created-account setting below is ignored for this read-only BYO path.')
 param existingStorageAccountId string = ''
+
+@description('Name of a created account (24-char limit, lowercase alphanumerics only, unique across Azure) - override it if the deployment reports the name is already in use.')
+param storageAccountName string = take(
+  '${replace(replace(toLower(clusterName), '-', ''), '_', '')}data',
+  24
+)
 // Fixed convention the CLI detects (clusterSetupDefaults.ts): one container
 // holding the decision-logs/ and db-backups/ prefixes. Not parameterized -
 // decision-log export is required by ClickHouse and the in-app log UI, so
@@ -330,7 +336,11 @@ param existingDataCollectionRuleId string = ''
 
 @description('CREATES an Azure Managed Grafana instance wired to the monitor workspace. Skip it if your organization already runs Grafana.')
 param createManagedGrafana bool = false
-param grafanaName string = take('rbgraf${take(uniqueString(resourceGroup().id), 6)}', 23)
+
+@description('Name of a created Grafana workspace (23-char limit). It forms a public endpoint, so it must be unique across Azure - override it if the deployment reports the name is already in use.')
+param grafanaName string = endsWith(take('${toLower(clusterName)}-grafana', 23), '-')
+  ? take('${toLower(clusterName)}-grafana', 22)
+  : take('${toLower(clusterName)}-grafana', 23)
 
 @description('Use organization-owned public DNS resources staged by prerequisites.bicep.')
 param useExternalDns bool = false
@@ -351,7 +361,10 @@ param enableKeyVaultIntegration bool = false
 
 @description('CREATES a Key Vault. False = bring your own via existingKeyVaultId, whose settings this template never modifies.')
 param createKeyVault bool = true
-param keyVaultName string = take('rbkv${uniqueString(resourceGroup().id, clusterName)}', 24)
+@description('Name of a created vault (24-char limit). Vault names become public DNS endpoints, so they must be unique across Azure - override it if the deployment reports the name is already in use.')
+param keyVaultName string = endsWith(take('${toLower(clusterName)}-kv', 24), '-')
+  ? take('${toLower(clusterName)}-kv', 23)
+  : take('${toLower(clusterName)}-kv', 24)
 @allowed([
   'default'
   'recover'
@@ -392,8 +405,9 @@ param existingContainerRegistryId string = ''
 @description('Permission mode of an existing ACR. legacyRbac uses AcrPull; rbacAbac uses Container Registry Repository Reader.')
 param existingContainerRegistryPermissionMode string = 'legacyRbac'
 
+@description('Name of a created registry (alphanumerics only, unique across Azure) - override it if the deployment reports the name is already in use.')
 param containerRegistryName string = take(
-  '${replace(replace(toLower(clusterName), '-', ''), '_', '')}acr${uniqueString(resourceGroup().id)}',
+  '${replace(replace(toLower(clusterName), '-', ''), '_', '')}acr',
   50
 )
 
@@ -491,9 +505,8 @@ var existingStorageName = length(storageIdSegments) > 8 ? storageIdSegments[8] :
 var existingStorageType = length(storageIdSegments) > 8
   ? '${toLower(storageIdSegments[6])}/${toLower(storageIdSegments[7])}'
   : ''
-var generatedStorageAccountName = take('rb${uniqueString(resourceGroup().id, clusterName)}', 24)
 var effectiveStorageAccountId = createStorage
-  ? resourceId('Microsoft.Storage/storageAccounts', generatedStorageAccountName)
+  ? resourceId('Microsoft.Storage/storageAccounts', storageAccountName)
   : existingStorageAccountId
 var effectiveStorageSubscriptionId = createStorage
   ? subscription().subscriptionId
@@ -1006,7 +1019,7 @@ module keyVaultRoleByo 'modules/key-vault-role.bicep' = if (enableKeyVaultIntegr
 module storage 'modules/storage.bicep' = {
   name: '${clusterName}-storage'
   params: {
-    clusterName: clusterName
+    storageAccountName: storageAccountName
     location: location
     tags: resourceTags
     createStorage: createStorage

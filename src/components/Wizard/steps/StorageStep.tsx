@@ -358,7 +358,11 @@ export function StorageStep({
           loadingLabel={`Loading ${bucketLabel.toLowerCase()}s in ${region}...`}
           emptyHint={`None found in ${region}. Press R to refresh or enter manually.`}
           load={async () =>
-            (await listBucketsInRegion(cloud, region)).map((b) => ({
+            (
+              await listBucketsInRegion(cloud, region, {
+                azureResourceGroup: state.azureResourceGroup || undefined,
+              })
+            ).map((b) => ({
               label: b,
               value: b,
             }))
@@ -636,7 +640,10 @@ export function StorageStep({
           emptyHint="None found. Press R to refresh or enter a client ID manually."
           load={async () => {
             const [identities, tenant] = await Promise.all([
-              listAzureWorkloadIdentities(state.clusterName),
+              listAzureWorkloadIdentities(
+                state.clusterName,
+                state.azureResourceGroup || undefined,
+              ),
               azureTenantId
                 ? Promise.resolve<string | null>(null)
                 : getAzureTenantId(),

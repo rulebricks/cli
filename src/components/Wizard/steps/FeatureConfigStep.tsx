@@ -844,7 +844,11 @@ export function FeatureConfigStep({
           loadingLabel="Discovering Azure Monitor data collection rules..."
           emptyHint="None found. Refresh after creating a Prometheus DCR/DCE, or enter a URL manually."
           load={async () =>
-            (await listAzurePrometheusTargets()).map((target) => ({
+            (
+              await listAzurePrometheusTargets(
+                state.azureResourceGroup || undefined,
+              )
+            ).map((target) => ({
               label: target.name,
               value: target.url,
             }))
@@ -967,7 +971,10 @@ export function FeatureConfigStep({
           emptyHint="None found. Press R to refresh or enter a client ID manually."
           load={async () => {
             const [identities, tenant] = await Promise.all([
-              listAzureWorkloadIdentities(state.clusterName),
+              listAzureWorkloadIdentities(
+                state.clusterName,
+                state.azureResourceGroup || undefined,
+              ),
               remoteWriteTenantId
                 ? Promise.resolve<string | null>(null)
                 : getAzureTenantId(),

@@ -25,6 +25,7 @@ import {
   listAzureContainerRegistries,
   AzureContainerRegistry,
 } from "../../../lib/cloudCli.js";
+import { findClusterSetupDefaultIndex } from "../../../lib/clusterSetupDefaults.js";
 
 interface VersionStepProps {
   onComplete: () => void;
@@ -246,8 +247,19 @@ export function VersionStep({
             return items.findIndex((item) => item.value === "mirror");
           }}
           load={async () => {
-            const registries = await listAzureContainerRegistries();
+            const registries = await listAzureContainerRegistries(
+              state.azureResourceGroup || undefined,
+            );
+            // Prefer the cluster-setup registry by name (<cluster-stripped>acr,
+            // hashed on older deployments), then any registry in the
+            // deployment's resource group, then the first one found.
+            const setupIndex = findClusterSetupDefaultIndex(
+              registries.map((r) => r.name),
+              "container-registry",
+              { provider: "azure", clusterName: state.clusterName },
+            );
             const preferred =
+              (setupIndex >= 0 ? registries[setupIndex] : undefined) ??
               registries.find(
                 (r) =>
                   r.resourceGroup.toLowerCase() ===

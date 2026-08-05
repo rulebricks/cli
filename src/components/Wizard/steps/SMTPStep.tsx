@@ -141,7 +141,9 @@ export function SMTPStep({
   const discoverAcs = async () => {
     setAcsDiscovering(true);
     try {
-      const resources = await listAzureAcsResources();
+      const resources = await listAzureAcsResources(
+        state.azureResourceGroup || undefined,
+      );
       setAcsResources(resources);
       acsResourcesRef.current = resources;
       const savedResource =
@@ -318,7 +320,7 @@ export function SMTPStep({
           label="Azure Communication Services resource"
           hint="The communication service that sends your email. Deploy checks the SMTP app access but does not change IAM."
           loadingLabel="Discovering communication services..."
-          emptyHint="None found in this subscription. Press R to refresh, or enter the SMTP username manually."
+          emptyHint={`None found in ${state.azureResourceGroup ? `resource group ${state.azureResourceGroup} or ` : ""}the subscription. Press R to refresh, or enter the SMTP username manually.`}
           initialValue={acsResource || undefined}
           preferRecommended={!state.configLoaded}
           recommendIndex={(items) =>
@@ -331,7 +333,9 @@ export function SMTPStep({
             )
           }
           load={async () => {
-            const resources = await listAzureAcsResources();
+            const resources = await listAzureAcsResources(
+              state.azureResourceGroup || undefined,
+            );
             acsResourcesRef.current = resources;
             setAcsResources(resources);
             return resources.map((r) => ({
