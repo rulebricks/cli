@@ -1194,6 +1194,31 @@ export type DeploymentConfig = z.infer<typeof DeploymentConfigSchema>;
 /** Secrets backend options (see DeploymentConfigSchema.secrets). */
 export type SecretsBackend = NonNullable<DeploymentConfig["secrets"]>["backend"];
 
+export interface LinkedHostGrant {
+  role: string;
+  scope: string;
+  status: "granted" | "pending";
+  /**
+   * Set when a replacement host leaves an assignment to clean up. Otherwise
+   * the containing linked host's principalId is the assignee.
+   */
+  principalId?: string;
+  /**
+   * Unlink only removes assignments this CLI invocation created. Existing
+   * platform-owned assignments are recorded but left untouched.
+   */
+  createdByRulebricks: boolean;
+}
+
+export interface LinkedDeploymentHost {
+  provider: "azure";
+  vmName: string;
+  vmResourceGroup: string;
+  principalId: string;
+  grants: LinkedHostGrant[];
+  linkedAt: string;
+}
+
 // Deployment state tracking
 export interface DeploymentState {
   name: string;
@@ -1228,6 +1253,7 @@ export interface DeploymentState {
     target: string;
     verified: boolean;
   }[];
+  linkedHost?: LinkedDeploymentHost;
 }
 
 // Helm chart version info (legacy)

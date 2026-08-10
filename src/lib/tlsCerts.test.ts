@@ -10,8 +10,20 @@ import {
 } from "./tlsCerts.js";
 import { buildConfigMatrix } from "./configFixtures.js";
 import { DeploymentConfig } from "../types/index.js";
+import { waitForCertificatesReady } from "./kubernetes.js";
 
 const matrix = buildConfigMatrix();
+
+test("certificate readiness wait can be skipped before polling Kubernetes", async () => {
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.doesNotReject(
+    waitForCertificatesReady("unused-test-namespace", {
+      signal: controller.signal,
+    }),
+  );
+});
 
 function cloneFixture(name: string): DeploymentConfig {
   const entry = matrix.find((c) => c.name === name);

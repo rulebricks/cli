@@ -173,16 +173,19 @@ export function DNSWaitScreen({
   ]);
 
   const verifiedCount = records.filter((r) => r.verified).length;
+  const skipHint = onSkip ? " • S or Esc twice to skip" : "";
   const footerText =
     skipConfirmation
       ? "Skip DNS validation? Press S or Esc again to confirm • any other key to cancel"
-      : status === "complete"
-        ? "DNS verified. Continuing deployment..."
-        : status === "checking"
-          ? "Checking DNS records..."
-          : hasChecked
-            ? "We couldn't find one or more DNS records. Please verify they exist and press Enter to try again."
-            : "Press Enter once you've created the DNS records • S or Esc twice to skip DNS validation";
+      : status === "loading-lb"
+        ? `Getting the load balancer address...${skipHint}`
+        : status === "complete"
+          ? "DNS verified. Continuing deployment..."
+          : status === "checking"
+            ? `Checking DNS records...${skipHint}`
+            : hasChecked
+              ? `We couldn't find one or more DNS records. Verify them and press Enter to retry.${skipHint}`
+              : `Press Enter once you've created the DNS records.${skipHint}`;
 
   return (
     <BorderBox title="Configure DNS Records">
@@ -216,6 +219,10 @@ export function DNSWaitScreen({
                 </Text>
               </Box>
             )}
+            <Text color={colors.muted} dimColor>
+              This checks DNS resolution only; it does not connect to the
+              Rulebricks URL.
+            </Text>
             <Text bold>Your load balancer address:</Text>
             <Box marginY={1}>
               <Text color={colors.accent} bold>

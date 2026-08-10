@@ -23,6 +23,10 @@ import { OpenCommand } from "./commands/open.js";
 import { BenchmarkCommand } from "./commands/benchmark.js";
 import { BackupCommand } from "./commands/backup.js";
 import { RestoreCommand } from "./commands/restore.js";
+import {
+  HostLinkCommand,
+  HostUnlinkCommand,
+} from "./commands/host.js";
 import { listDeployments, deploymentExists } from "./lib/config.js";
 import { importValuesFile } from "./lib/valuesImport.js";
 import { DeploymentPicker } from "./components/common/DeploymentPicker.js";
@@ -112,7 +116,7 @@ program
 program
   .command("configure")
   .description(
-    "Update the configuration of an existing deployment (run deploy to apply)",
+    "Update an existing deployment configuration and optionally apply it",
   )
   .argument("[name]", "Deployment name")
   .action(async (name) => {
@@ -133,8 +137,15 @@ program
         }}
       />,
     );
-    if (completion) {
-      printWizardCompletion(completion);
+    const savedCompletion = completion as WizardCompletion | null;
+    if (savedCompletion) {
+      printWizardCompletion(savedCompletion);
+      if (savedCompletion.applyAfterSave) {
+        const { waitUntilExit } = render(
+          <DeployCommand name={savedCompletion.name} forceFull />,
+        );
+        await waitUntilExit();
+      }
     } else {
       console.log(chalk.dim("Cancelled — no changes were saved."));
     }
@@ -363,6 +374,50 @@ program
     }
 
     const { waitUntilExit } = render(<RestoreCommand name={deploymentName} />);
+    await waitUntilExit();
+  });
+
+// Deploy host commands
+const hostCommand = program
+  .command("host")
+  .description("Manage a VM that runs Rulebricks deployment commands");
+
+hostCommand
+  .command("link")
+  .description("Link an Azure VM and grant its managed identity deploy access")
+  .argument("[name]", "Deployment name")
+  .action(async (name) => {
+    const deploymentName = name || (await selectDeployment("link a deploy host"));
+    if (!deploymentName) {
+      console.error(
+        chalk.red('No deployments found. Run "rulebricks init" first.'),
+      );
+      process.exit(1);
+    }
+
+    const { waitUntilExit } = render(
+      <HostLinkCommand name={deploymentName} />,
+    );
+    await waitUntilExit();
+  });
+
+hostCommand
+  .command("unlink")
+  .description("Unlink a deploy host and remove CLI-created role assignments")
+  .argument("[name]", "Deployment name")
+  .action(async (name) => {
+    const deploymentName =
+      name || (await selectDeployment("unlink a deploy host"));
+    if (!deploymentName) {
+      console.error(
+        chalk.red('No deployments found. Run "rulebricks init" first.'),
+      );
+      process.exit(1);
+    }
+
+    const { waitUntilExit } = render(
+      <HostUnlinkCommand name={deploymentName} />,
+    );
     await waitUntilExit();
   });
 

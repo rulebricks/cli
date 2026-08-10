@@ -2367,6 +2367,409 @@ export async function getAzureTenantId(): Promise<string | null> {
   }
 }
 
+export interface AzureVirtualMachine {
+  id: string;
+  name: string;
+  resourceGroup: string;
+  powerState?: string;
+}
+
+export interface AzureResourceGroup {
+  id: string;
+  name: string;
+  location: string;
+}
+
+/** List resource groups visible to the current Azure identity. */
+export async function listAzureResourceGroups(): Promise<AzureResourceGroup[]> {
+  try {
+    const result = await execCommandArgs(
+      "az",
+      [
+        "group",
+        "list",
+        "--query",
+        "[].{id:id,name:name,location:location}",
+        "--output",
+        "json",
+      ],
+      {
+        intent: "Discover deploy hosts",
+        provider: "azure",
+        timeout: 45000,
+      },
+    );
+    if (result.stderr && !result.stdout) return [];
+    const rows = JSON.parse(result.stdout || "[]") as Array<
+      Partial<AzureResourceGroup>
+    >;
+    return rows
+      .filter((row) => row.id && row.name && row.location)
+      .map((row) => ({
+        id: row.id!,
+        name: row.name!,
+        location: row.location!,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch (error) {
+    if (error instanceof CommandDeniedError) throw error;
+    return [];
+  }
+}
+
+/**
+ * List VMs only inside the selected resource group. This keeps enterprise
+ * subscriptions from surfacing unrelated machines in the host picker.
+ */
+export async function listAzureVms(
+  resourceGroup: string,
+): Promise<AzureVirtualMachine[]> {
+  try {
+    const result = await execCommandArgs(
+      "az",
+      [
+        "vm",
+        "list",
+        "--resource-group",
+        resourceGroup,
+        "--show-details",
+        "--query",
+        "[].{id:id,name:name,resourceGroup:resourceGroup,powerState:powerState}",
+        "--output",
+        "json",
+      ],
+      {
+        intent: "Discover deploy hosts",
+        provider: "azure",
+        timeout: 60000,
+      },
+    );
+    if (result.stderr && !result.stdout) return [];
+
+    const rows = JSON.parse(result.stdout || "[]") as Array<
+      Partial<AzureVirtualMachine>
+    >;
+    return rows
+      .filter((row) => row.id && row.name && row.resourceGroup)
+      .map((row) => ({
+        id: row.id!,
+        name: row.name!,
+        resourceGroup: row.resourceGroup!,
+        powerState: row.powerState,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch (error) {
+    if (error instanceof CommandDeniedError) throw error;
+    return [];
+  }
+}
+
+export interface AzureVmIdentity {
+  principalId: string;
+  tenantId?: string;
+}
+
+/** Enable (or return) a VM's system-assigned managed identity. */
+export async function assignVmSystemIdentity(
+  vmName: string,
+  resourceGroup: string,
+): Promise<AzureVmIdentity> {
+  const result = await execCommandArgs(
+    "az",
+    [
+      "vm",
+      "identity",
+      "assign",
+      "--name",
+      vmName,
+      "--resource-group",
+      resourceGroup,
+      "--query",
+      "systemAssignedIdentity",
+      "--output",
+      "tsv",
+      "--only-show-errors",
+    ],
+    {
+      intent: "Configure deploy host",
+      description: `Enable the system-assigned managed identity on ${vmName}`,
+      provider: "azure",
+      mutating: true,
+      timeout: 120000,
+    },
+  );
+  if (result.stderr && !result.stdout) {
+    throw new Error(result.stderr.trim());
+  }
+
+  const principalId = result.stdout.trim();
+  if (
+    !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(
+      principalId,
+    )
+  ) {
+    throw new Error(
+      `Azure did not return a managed identity principal ID for VM "${vmName}".`,
+    );
+  }
+  return { principalId };
+}
+
+export interface AksClusterFacts {
+  id: string;
+  entraRbacEnabled: boolean;
+}
+
+/** Resolve the AKS resource ID and whether Kubernetes authorization uses Entra. */
+export async function getAksClusterFacts(
+  clusterName: string,
+  resourceGroup: string,
+): Promise<AksClusterFacts> {
+  const result = await execCommandArgs(
+    "az",
+    [
+      "aks",
+      "show",
+      "--name",
+      clusterName,
+      "--resource-group",
+      resourceGroup,
+      "--query",
+      "{id:id,entraRbacEnabled:aadProfile.enableAzureRbac}",
+      "--output",
+      "json",
+    ],
+    {
+      intent: "Inspect deploy host access",
+      provider: "azure",
+      timeout: 45000,
+    },
+  );
+  if (result.stderr && !result.stdout) {
+    throw new Error(result.stderr.trim());
+  }
+  const facts = JSON.parse(result.stdout || "{}") as {
+    id?: string;
+    entraRbacEnabled?: boolean;
+  };
+  if (!facts.id) {
+    throw new Error(`AKS cluster "${clusterName}" was not found.`);
+  }
+  return {
+    id: facts.id,
+    entraRbacEnabled: facts.entraRbacEnabled === true,
+  };
+}
+
+/** Resolve a Key Vault's full Azure resource ID. */
+export async function getAzureKeyVaultId(vaultName: string): Promise<string> {
+  const result = await execCommandArgs(
+    "az",
+    [
+      "keyvault",
+      "show",
+      "--name",
+      vaultName,
+      "--query",
+      "id",
+      "--output",
+      "tsv",
+    ],
+    {
+      intent: "Inspect deploy host access",
+      provider: "azure",
+      timeout: 45000,
+    },
+  );
+  const id = result.stdout.trim();
+  if (!id) {
+    throw new Error(
+      result.stderr.trim() || `Key Vault "${vaultName}" was not found.`,
+    );
+  }
+  return id;
+}
+
+export interface AzureRoleAssignmentRequest {
+  principalId: string;
+  role: string;
+  scope: string;
+}
+
+export interface AzureRoleAssignmentOutcome {
+  status: "created" | "existing" | "denied";
+  command: string;
+  detail?: string;
+}
+
+export interface AzureRoleRemovalOutcome {
+  status: "deleted" | "absent" | "denied";
+  command: string;
+  detail?: string;
+}
+
+function formatAzureCliCommand(file: string, args: string[]): string {
+  return [file, ...args.map(displayCommandArg)].join(" ");
+}
+
+export function formatAzureRoleAssignmentCreateCommand(
+  request: AzureRoleAssignmentRequest,
+): string {
+  return formatAzureCliCommand("az", [
+    "role",
+    "assignment",
+    "create",
+    "--assignee-object-id",
+    request.principalId,
+    "--assignee-principal-type",
+    "ServicePrincipal",
+    "--role",
+    request.role,
+    "--scope",
+    request.scope,
+  ]);
+}
+
+export function formatAzureRoleAssignmentDeleteCommand(
+  request: AzureRoleAssignmentRequest,
+): string {
+  return formatAzureCliCommand("az", [
+    "role",
+    "assignment",
+    "delete",
+    "--assignee-object-id",
+    request.principalId,
+    "--role",
+    request.role,
+    "--scope",
+    request.scope,
+  ]);
+}
+
+/**
+ * Idempotently grant one Azure role without requiring Microsoft Graph lookup
+ * permissions. Positive IAM denials are returned for admin handoff.
+ */
+export async function ensureAzureRoleAssignment(
+  request: AzureRoleAssignmentRequest,
+): Promise<AzureRoleAssignmentOutcome> {
+  const command = formatAzureRoleAssignmentCreateCommand(request);
+  const existing = await execCommandArgs(
+    "az",
+    [
+      "role",
+      "assignment",
+      "list",
+      "--assignee-object-id",
+      request.principalId,
+      "--scope",
+      request.scope,
+      "--role",
+      request.role,
+      "--fill-principal-name",
+      "false",
+      "--only-show-errors",
+      "--query",
+      "[0].id",
+      "--output",
+      "tsv",
+    ],
+    {
+      intent: "Inspect deploy host access",
+      provider: "azure",
+      timeout: 45000,
+    },
+  );
+  if (existing.stdout.trim()) {
+    return { status: "existing", command };
+  }
+  if (existing.stderr && !isCloudAuthorizationError(existing.stderr)) {
+    throw new Error(existing.stderr.trim());
+  }
+
+  const created = await execCommandArgs(
+    "az",
+    [
+      "role",
+      "assignment",
+      "create",
+      "--assignee-object-id",
+      request.principalId,
+      "--assignee-principal-type",
+      "ServicePrincipal",
+      "--role",
+      request.role,
+      "--scope",
+      request.scope,
+      "--output",
+      "none",
+      "--only-show-errors",
+    ],
+    {
+      intent: "Grant deploy host access",
+      description: `Grant ${request.role} on ${request.scope}`,
+      provider: "azure",
+      mutating: true,
+      timeout: 90000,
+    },
+  );
+  if (!created.stderr) {
+    return { status: "created", command };
+  }
+  if (/RoleAssignmentExists|already exists/i.test(created.stderr)) {
+    return { status: "existing", command };
+  }
+  if (isCloudAuthorizationError(created.stderr)) {
+    return {
+      status: "denied",
+      command,
+      detail: created.stderr.trim(),
+    };
+  }
+  throw new Error(created.stderr.trim());
+}
+
+/** Remove one exact role assignment; authorization denials are handed back. */
+export async function deleteAzureRoleAssignment(
+  request: AzureRoleAssignmentRequest,
+): Promise<AzureRoleRemovalOutcome> {
+  const command = formatAzureRoleAssignmentDeleteCommand(request);
+  const result = await execCommandArgs(
+    "az",
+    [
+      "role",
+      "assignment",
+      "delete",
+      "--assignee-object-id",
+      request.principalId,
+      "--role",
+      request.role,
+      "--scope",
+      request.scope,
+      "--only-show-errors",
+    ],
+    {
+      intent: "Revoke deploy host access",
+      description: `Remove ${request.role} from the linked deploy host`,
+      provider: "azure",
+      mutating: true,
+      timeout: 90000,
+    },
+  );
+  if (!result.stderr) return { status: "deleted", command };
+  if (/could not be found|No role assignments found|does not exist/i.test(result.stderr)) {
+    return { status: "absent", command };
+  }
+  if (isCloudAuthorizationError(result.stderr)) {
+    return {
+      status: "denied",
+      command,
+      detail: result.stderr.trim(),
+    };
+  }
+  throw new Error(result.stderr.trim());
+}
+
 /**
  * List Azure user-assigned managed identities for selection (workload identity
  * client IDs), preferring the deployment's resource group. Returns an empty
@@ -2954,7 +3357,7 @@ export function parseAzureContainerRegistryId(
   };
 }
 
-async function resolveAzureContainerRegistryId(
+export async function resolveAzureContainerRegistryId(
   registryName: string,
   configuredResourceId?: string,
 ): Promise<string> {

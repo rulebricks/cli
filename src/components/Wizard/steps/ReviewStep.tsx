@@ -13,6 +13,7 @@ import { DNS_PROVIDER_NAMES, CLOUD_PROVIDER_NAMES, LOGGING_SINK_INFO, isSupporte
 
 interface ReviewStepProps {
   onComplete: () => void;
+  onApply?: () => void;
   onBack: () => void;
   allowEditName?: boolean;
 }
@@ -34,6 +35,7 @@ function kafkaPresetLabel(preset: KafkaPreset | null): string {
 
 export function ReviewStep({
   onComplete,
+  onApply,
   onBack,
   allowEditName = true,
 }: ReviewStepProps) {
@@ -54,6 +56,10 @@ export function ReviewStep({
     } else if (key.return) {
       if (state.name && issues.length === 0) {
         onComplete();
+      }
+    } else if (input.toLowerCase() === 'a' && onApply) {
+      if (state.name && issues.length === 0) {
+        onApply();
       }
     } else if (allowEditName && input === 'e') {
       setEditingName(true);
@@ -168,9 +174,16 @@ export function ReviewStep({
   const footer = (
     <Box marginTop={1} flexDirection="column">
       {issues.length === 0 ? (
-        <Text color={colors.success} bold>
-          Press Enter to save this configuration
-        </Text>
+        <>
+          <Text color={colors.success} bold>
+            Press Enter to save and exit
+          </Text>
+          {onApply && (
+            <Text color={colors.accent} bold>
+              Press A to save and deploy
+            </Text>
+          )}
+        </>
       ) : (
         <Text color={colors.muted}>
           Go back (Esc) to fix the items above, then return here to save.

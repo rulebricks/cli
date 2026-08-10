@@ -20,28 +20,39 @@ interface SectionMenuProps {
   sections: SectionMenuItem[];
   onSelect: (id: WizardStepId) => void;
   onReview: () => void;
+  onSave: () => void;
+  onSaveAndApply: () => void;
   /** Called on Esc; nothing has been saved at that point. */
   onExit: () => void;
 }
 
 /**
  * Entry screen for the configure command: pick a config section to update,
- * return here after each edit, then review & save when done. Modeled on
- * CheckboxList's cursor-driven list so the edited markers and per-item
- * descriptions render with full styling control.
+ * return here after each edit, then save, apply, or review. Modeled on
+ * CheckboxList's cursor-driven list so edited markers and per-item descriptions
+ * render with full styling control.
  */
 export function SectionMenu({
   sections,
   onSelect,
   onReview,
+  onSave,
+  onSaveAndApply,
   onExit,
 }: SectionMenuProps) {
   const { colors } = useTheme();
   const [cursor, setCursor] = useState(0);
   const reviewIndex = sections.length;
 
-  useGatedInput((_input, key) => {
-    if (key.upArrow) {
+  useGatedInput((input, key) => {
+    const command = input.toLowerCase();
+    if (command === "s") {
+      onSave();
+    } else if (command === "a") {
+      onSaveAndApply();
+    } else if (command === "r") {
+      onReview();
+    } else if (key.upArrow) {
       setCursor((i) => Math.max(0, i - 1));
     } else if (key.downArrow) {
       setCursor((i) => Math.min(reviewIndex, i + 1));
@@ -66,7 +77,9 @@ export function SectionMenu({
           hints={[
             "↑/↓ to navigate",
             "Enter to select",
-            "Esc to exit without saving",
+            "S save & exit",
+            "A save & deploy",
+            "Esc discard",
           ]}
         />
       }
@@ -74,8 +87,18 @@ export function SectionMenu({
       <Box flexDirection="column" marginY={1}>
         <Text bold>What would you like to update?</Text>
         <Text color="gray" dimColor>
-          Nothing is saved until you review and confirm.
+          Nothing is saved until you choose a save action.
         </Text>
+        <Box marginTop={1}>
+          <Text color={colors.success} bold>
+            S Save & exit
+          </Text>
+          <Text color={colors.muted}> • </Text>
+          <Text color={colors.accent} bold>
+            A Save & deploy
+          </Text>
+          <Text color={colors.muted}> • R Review</Text>
+        </Box>
 
         <Box marginTop={1} flexDirection="column">
           {sections.map((section, index) => {

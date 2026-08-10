@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import { Box, Text, useApp } from "ink";
 import chalk from "chalk";
 import {
@@ -30,6 +30,7 @@ import {
   THEMES,
   LOGO_LINES,
   CommandApprovalProvider,
+  useGatedInput,
 } from "../components/common/index.js";
 import {
   saveDeploymentConfig,
@@ -62,6 +63,8 @@ export interface WizardCompletion {
   mode: "create" | "configure";
   name: string;
   domain: string;
+  /** Configure mode only: immediately deploy the saved configuration. */
+  applyAfterSave?: boolean;
 }
 
 /**
@@ -93,7 +96,9 @@ export function printWizardCompletion(completion: WizardCompletion): void {
     "",
     "  Next steps:",
     ...(completion.mode === "configure"
-      ? [muted(`    Run ${deployCmd} to apply your changes`)]
+      ? completion.applyAfterSave
+        ? [muted(`    Applying changes with ${deployCmd}...`)]
+        : [muted(`    Run ${deployCmd} to apply your changes`)]
       : [
           muted(`    1. Run ${deployCmd} to deploy`),
           muted("    2. Configure your DNS records when prompted"),
@@ -192,6 +197,7 @@ function WizardStepController({
     () => new Set(),
   );
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   // Track pending navigation to handle React's async state updates
@@ -201,6 +207,16 @@ function WizardStepController({
   const [navDirection, setNavDirection] = useState<"forward" | "back">(
     "forward",
   );
+
+  useGatedInput((_input, key) => {
+    if (error && key.escape) {
+      setError(null);
+      savingRef.current = false;
+      if (mode === "configure") {
+        setCurrentStep("menu");
+      }
+    }
+  });
 
   // Get list of active steps based on config
   const getActiveSteps = useCallback((): StepId[] => {
@@ -282,7 +298,9 @@ function WizardStepController({
     setPendingNav("back");
   }, []);
 
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(async (applyAfterSave = false) => {
+    if (savingRef.current) return;
+
     const config = toConfig({
       nodeArchitecture: state.nodeArchitecture || undefined,
       arm64TolerationRequired:
@@ -306,6 +324,7 @@ function WizardStepController({
       return;
     }
 
+    savingRef.current = true;
     setSaving(true);
     try {
       if (await deploymentExists(config.name)) {
@@ -320,6 +339,7 @@ function WizardStepController({
             mode: "configure",
             name: config.name,
             domain: config.domain,
+            applyAfterSave,
           });
           exit();
           return;
@@ -328,6 +348,7 @@ function WizardStepController({
         setError(
           `Deployment "${config.name}" already exists. Choose a different name.`,
         );
+        savingRef.current = false;
         setSaving(false);
         return;
       }
@@ -355,6 +376,7 @@ function WizardStepController({
       setError(
         err instanceof Error ? err.message : "Failed to save configuration",
       );
+      savingRef.current = false;
       setSaving(false);
     }
   }, [toConfig, configIssues, state, exit, onSaveComplete, mode]);
@@ -398,7 +420,9 @@ function WizardStepController({
           </Text>
           <Text color={colors.error}>{error}</Text>
           <Box marginTop={1}>
-            <Text color={colors.muted}>Press Ctrl+C to exit and try again</Text>
+            <Text color={colors.muted}>
+              Press Esc to return or Ctrl+C to exit
+            </Text>
           </Box>
         </Box>
       </WizardShell>
@@ -424,6 +448,8 @@ function WizardStepController({
             setNavDirection("forward");
             setCurrentStep("review");
           }}
+          onSave={() => void handleSave(false)}
+          onSaveAndApply={() => void handleSave(true)}
           onExit={() => exit()}
         />
       );
@@ -462,7 +488,12 @@ function WizardStepController({
       case "review":
         return (
           <ReviewStep
-            onComplete={handleSave}
+            onComplete={() => void handleSave(false)}
+            onApply={
+              mode === "configure"
+                ? () => void handleSave(true)
+                : undefined
+            }
             onBack={goBack}
             allowEditName={mode === "create"}
           />

@@ -10,6 +10,7 @@ import {
   StatusLine,
   ThemeProvider,
   useTheme,
+  useGatedInput,
   Logo,
   CommandApprovalProvider,
 } from "../components/common/index.js";
@@ -203,10 +204,17 @@ function DeployCommandInner({
   const chartSourceRef = useRef<{ chartRef?: string; version?: string }>({
     version,
   });
+  const certificateWaitAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     runDeployment();
   }, []);
+
+  useGatedInput((input) => {
+    if (step === "cert-check" && input.toLowerCase() === "s") {
+      certificateWaitAbortRef.current?.abort();
+    }
+  });
 
   const markRunning = (key: keyof StepStatus) => {
     setStatus((s) => ({ ...s, [key]: "running" }));
@@ -1106,14 +1114,29 @@ function DeployCommandInner({
   }
 
   async function verifyCertificates(namespace: string): Promise<void> {
+    const controller = new AbortController();
+    certificateWaitAbortRef.current = controller;
     try {
-      await waitForCertificatesReady(namespace);
-      markSuccess("certCheck");
+      await waitForCertificatesReady(namespace, {
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) {
+        setStatus((s) => ({ ...s, certCheck: "skipped" }));
+        setTlsWarning(
+          "TLS certificate readiness check skipped. Certificates may still be issuing; check them later with `rulebricks status`.",
+        );
+      } else {
+        markSuccess("certCheck");
+      }
     } catch {
       setStatus((s) => ({ ...s, certCheck: "error" }));
       setTlsWarning(
         "TLS certificates are still being issued. HTTPS may not be available yet.",
       );
+    } finally {
+      if (certificateWaitAbortRef.current === controller) {
+        certificateWaitAbortRef.current = null;
+      }
     }
   }
 
@@ -1379,6 +1402,17 @@ function DeployCommandInner({
         <Box marginTop={1}>
           <Spinner label={getStepLabel(step, useExternalDns)} />
         </Box>
+        {step === "cert-check" && (
+          <Box flexDirection="column" marginLeft={2}>
+            <Text color={colors.muted} dimColor>
+              Readiness is checked through Kubernetes; public URL access is not
+              required.
+            </Text>
+            <Text color={colors.muted} dimColor>
+              Press S to skip waiting for certificate readiness.
+            </Text>
+          </Box>
+        )}
       </Box>
     </BorderBox>
   );

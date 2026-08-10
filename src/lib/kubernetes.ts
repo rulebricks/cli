@@ -17,8 +17,18 @@ function getErrorMessage(error: unknown): string {
 /**
  * Sleep for a specified number of milliseconds
  */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener("abort", finish, { once: true });
+  });
 }
 
 /**
@@ -762,19 +772,24 @@ export async function waitForCertificatesReady(
     timeoutMs?: number;
     pollIntervalMs?: number;
     maxRetries?: number;
+    /** Stop waiting without treating certificate readiness as a failure. */
+    signal?: AbortSignal;
   },
 ): Promise<void> {
   const {
     timeoutMs = 120_000,
     pollIntervalMs = 5_000,
     maxRetries = 1,
+    signal,
   } = options ?? {};
 
   let retriesUsed = 0;
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
+    if (signal?.aborted) return;
     const certs = await getCertificateStatus(namespace);
+    if (signal?.aborted) return;
 
     if (certs.length === 0) return;
     if (certs.every((c) => c.ready)) return;
@@ -782,14 +797,16 @@ export async function waitForCertificatesReady(
     const failed = certs.filter((c) => c.failed);
     if (failed.length > 0 && retriesUsed < maxRetries) {
       for (const cert of failed) {
+        if (signal?.aborted) return;
         await recreateFailedCertificate(namespace, cert.name);
       }
       retriesUsed++;
     }
 
-    await sleep(pollIntervalMs);
+    await sleep(pollIntervalMs, signal);
   }
 
+  if (signal?.aborted) return;
   // Final check after timeout
   const certs = await getCertificateStatus(namespace);
   if (certs.length > 0 && certs.every((c) => c.ready)) return;
