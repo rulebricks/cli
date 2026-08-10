@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
+# Before running this script, run: 
+#   rulebricks host link
 #
-# Prepare a linked Azure VM to run Rulebricks deployment commands.
+# Sets up a linked Azure VM to execute Rulebricks deployments:
+#   1. Installs & upgrades all required CLI tools
+#   2. Copies your local ~/.rulebricks config files to the VM
+#   3. Verifies your VM can access Azure and the AKS cluster
 #
-# This script runs on the deployer's machine. It uses Azure Run Command rather
-# than SSH, so the target VM needs a working Azure VM agent but no public IP or
-# inbound management port.
+# This script runs on the deployer's local machine.
+# 
+# After, the VM can run: 
+#   rulebricks deploy <deployment-name>
 
 set -euo pipefail
 
@@ -787,5 +793,5 @@ else
 fi
 
 printf '\nREADY: %s is prepared on %s.\n' "$DEPLOYMENT_NAME" "$VM_NAME"
-printf 'Re-run this script before remote deploys to sync the latest local configuration and CLI version.\n'
+printf 'Re-run this script to sync your latest Rulebricks configurations and CLI version.\n'
 printf 'The VM can now run: rulebricks deploy %s\n' "$DEPLOYMENT_NAME"
