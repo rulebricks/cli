@@ -914,7 +914,13 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
             </Box>
           )}
           <Box flexDirection="column" marginTop={1}>
-            <Text bold>On the linked VM:</Text>
+            <Text bold>Set up and sync the linked VM from this machine:</Text>
+            <Text color={colors.accentBright}>
+              azure/scripts/setup-deploy-host.sh {name}
+            </Text>
+          </Box>
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold>Or, set things up manually on the linked VM:</Text>
             <Text color={colors.accentBright}>az login --identity</Text>
             <Text color={colors.accentBright}>
               az aks get-credentials --resource-group{" "}
@@ -925,10 +931,6 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
             <Text color={colors.accentBright}>rulebricks deploy {name}</Text>
           </Box>
           <Box flexDirection="column" marginTop={1}>
-            <Text color={colors.muted}>
-              Future configure, deploy, upgrade, status, and logs commands can
-              run from this VM without an interactive Azure login.
-            </Text>
             <Text color={colors.muted}>
               Run rulebricks host unlink {name} to remove CLI-created grants.
             </Text>
@@ -1191,6 +1193,17 @@ function HostUnlinkCommandInner({ name }: HostCommandProps) {
                 {command}
               </Text>
             ))}
+          </Box>
+        )}
+        {host && (
+          <Box flexDirection="column" marginTop={1}>
+            <Text color={colors.muted}>
+              To remove copied configuration while leaving tools installed:
+            </Text>
+            <Text color={colors.accentBright}>
+              rulebricks-host-setup {name} --remove --vm {host.vmName}{" "}
+              --resource-group {host.vmResourceGroup}
+            </Text>
           </Box>
         )}
         <Box marginTop={1}>
