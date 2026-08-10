@@ -1072,8 +1072,12 @@ function generateKafkaConfig(): Record<string, string> {
     "socket.receive.buffer.bytes": "1048576",
     "socket.request.max.bytes": "209715200",
     // Broker-wide max record size; must exceed every per-topic max.message.bytes.
-    "message.max.bytes": "2097152",
-    "replica.fetch.max.bytes": "4194304",
+    // 8 MiB (large-payload profile): request chunks are planner-capped at
+    // 2 MiB input, but worker RESPONSES ride as one message each - this gives
+    // 4x response-amplification headroom. Kept in lockstep with the chart's
+    // kafka.config and the rpc topic caps below.
+    "message.max.bytes": "8388608",
+    "replica.fetch.max.bytes": "16777216",
     // Broker-wide default retention; the application topics carry tighter caps.
     "log.retention.bytes": "536870912",
     "log.segment.bytes": "1073741824",
@@ -1129,12 +1133,16 @@ function generateKafkaTopics(
   }
 
   const prefix = effectiveTopicPrefix(config);
+  // retention.bytes is a PER-PARTITION cap sized for in-flight large-batch
+  // traffic (128 MiB requests spread ~1 MiB/partition); max.message.bytes
+  // matches the broker's message.max.bytes (8 MiB) so worker responses keep
+  // amplification headroom. In lockstep with the chart's kafka.topics.
   const rpcTopicConfig = {
     "retention.ms": "300000",
     "segment.ms": "300000",
     "segment.bytes": "67108864",
-    "retention.bytes": "67108864",
-    "max.message.bytes": "2097152",
+    "retention.bytes": "134217728",
+    "max.message.bytes": "8388608",
   };
 
   return [
@@ -2154,13 +2162,13 @@ export function buildHelmValues(
           enabled: true,
           tolerations: operationalDaemonSetTolerations,
         },
-        // No chunking env vars: HPS's self-tuning planner (kafka-queue.js
-        // planTargetChunkCount) sizes chunk fan-out per request from data
-        // volume, learned per-flow cost, and fleet width. The legacy
-        // FLOW_CHUNK_MAX_ITEMS knob is gone from HPS; the planner's optional
-        // bounds (CHUNK_TARGET_BYTES, CHUNK_TARGET_MS, CHUNK_COLD_ITEMS,
-        // CHUNK_FLEET_FACTOR, CHUNK_MAX_CHUNKS) all have safe derived
-        // defaults and are deliberately not surfaced as deployment dials.
+        // No chunking/limit env vars here: HPS's self-tuning planner
+        // (kafka-queue.js planTargetChunkCount) sizes chunk fan-out per
+        // request, and the payload/deadline envelope (body limit, RPC
+        // deadline, chunk bounds, admission gate) is owned by the CHART's
+        // hps.limits defaults - kept in lockstep with its Kafka message caps
+        // and Traefik timeouts. Deployments tune hps.limits via values
+        // overrides, not the CLI.
 
         // Service account (annotated with the MSK IAM role for external Kafka)
         serviceAccount: generateHpsServiceAccount(config),
@@ -2232,12 +2240,12 @@ export function buildHelmValues(
       replicas: TOPIC_REPLICATION_FACTOR,
       storage: {
         // Must cover the per-topic retention.bytes caps: logs 24 x 1Gi = 24Gi
-        // plus solution/solution-response 2 x 128 x 64Mi = 16Gi, leaving
+        // plus solution/solution-response 2 x 128 x 128Mi = 32Gi, leaving
         // ~10Gi for KRaft metadata / active segments / fs overhead. A full
         // disk halts the broker and takes the whole request path down with
         // it (observed at 50k solutions/s). validateValuesInvariants enforces
         // caps <= 85% of this size.
-        size: "50Gi",
+        size: "75Gi",
         class: storageClass,
       },
       // Critical tier: the broker must always be able to preempt burst workers.
@@ -2410,6 +2418,18 @@ export function buildHelmValues(
       },
       service: {
         type: "LoadBalancer",
+        // Azure's L4 load balancer severs idle TCP flows after 4 minutes by
+        // default - below the 300s execution deadline (a request awaiting its
+        // response moves no bytes). 10 minutes clears it; AWS NLB (350s
+        // fixed) and GCP passthrough LBs need no equivalent.
+        ...(config.infrastructure.provider === "azure"
+          ? {
+              annotations: {
+                "service.beta.kubernetes.io/azure-load-balancer-tcp-idle-timeout":
+                  "10",
+              },
+            }
+          : {}),
       },
       ports: {
         web: {

@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useApp } from "ink";
 import { platform } from "os";
-import { readFileSync } from "fs";
+import { readFileSync, promises as fs } from "fs";
+import path from "path";
 import { execa } from "execa";
 import {
   BorderBox,
@@ -17,6 +18,8 @@ import {
   loadDeploymentConfig,
   loadDeploymentState,
   loadHelmValues,
+  getDeploymentDir,
+  getHelmValuesPath,
   saveDeploymentState,
   updateDeploymentStatus,
 } from "../lib/config.js";
@@ -25,6 +28,8 @@ import {
   installOrUpgradeChart,
   upgradeChart,
   isHelmInstalled,
+  latestReleaseStatus,
+  getDeployedChartVersion,
 } from "../lib/helm.js";
 import { assertValidHelmValues } from "../lib/validateValues.js";
 import {
@@ -61,6 +66,7 @@ import {
   wantsManagedDns,
 } from "../lib/workloadIdentity.js";
 import {
+  deriveTlsEnabled,
   generateHelmValuesPreservingEdits,
   updateHelmValuesForTLS,
 } from "../lib/helmValues.js";
@@ -80,6 +86,7 @@ import { setupExternalSecrets } from "../lib/eso.js";
 import {
   runInstallSequence,
   secretModeForConfig,
+  shouldResumeDnsTlsSetup,
   SecretMode,
 } from "../lib/deploySequence.js";
 import { CommandDeniedError } from "../lib/commandApproval.js";
@@ -106,10 +113,31 @@ interface DeployCommandProps {
   // ESO backends only: overwrite provider entries with the config's values
   // (default is create-if-absent so client-rotated values are preserved).
   syncSecrets?: boolean;
+  // Bypass DNS/TLS resume detection and run the complete deployment pipeline.
+  forceFull?: boolean;
 }
 
 function getConfigProductVersion(config: DeploymentConfig): string {
   return config.version;
+}
+
+async function getDeploymentFileModificationTimes(name: string): Promise<{
+  configModifiedAtMs?: number;
+  valuesModifiedAtMs?: number;
+}> {
+  try {
+    const [configStats, valuesStats] = await Promise.all([
+      fs.stat(path.join(getDeploymentDir(name), "config.yaml")),
+      fs.stat(getHelmValuesPath(name)),
+    ]);
+    return {
+      configModifiedAtMs: configStats.mtimeMs,
+      valuesModifiedAtMs: valuesStats.mtimeMs,
+    };
+  } catch {
+    // Missing/unreadable files make the resume decision fail closed.
+    return {};
+  }
 }
 
 type DeployStep =
@@ -142,6 +170,7 @@ function DeployCommandInner({
   assumeDnsConfigured = false,
   inlineSecrets = false,
   syncSecrets = false,
+  forceFull = false,
 }: DeployCommandProps) {
   const { exit } = useApp();
   const { colors } = useTheme();
@@ -155,6 +184,7 @@ function DeployCommandInner({
   const [dnsWarning, setDnsWarning] = useState<string | null>(null);
   const [secretsWarning, setSecretsWarning] = useState<string | null>(null);
   const [smtpWarning, setSmtpWarning] = useState<string | null>(null);
+  const [resumingDnsTls, setResumingDnsTls] = useState(false);
   const [status, setStatus] = useState<StepStatus>({
     preflight: "pending",
     federation: "pending",
@@ -304,11 +334,80 @@ function DeployCommandInner({
         status: "deploying",
       };
 
-      await saveDeploymentState(name, { ...state, status: "deploying" });
+      // Preserve a pending existing status until resume detection completes,
+      // but create state up front for a first deploy so preflight failures are
+      // still recorded by failDeployment().
+      if (!existingState) {
+        await saveDeploymentState(name, state);
+      }
 
       setStep("preflight");
       markRunning("preflight");
-      await runPreflightChecks(cfg);
+      await runCorePreflightChecks(cfg);
+
+      const explicitFullDeploy =
+        forceFull ||
+        Boolean(version) ||
+        inlineSecrets ||
+        syncSecrets ||
+        !regenerateValues;
+      const shouldProbeResume =
+        !explicitFullDeploy &&
+        !externalDnsEnabled &&
+        !assumeDnsConfigured &&
+        !skipDns;
+      let deployedChartVersion: string | undefined;
+      let resumeDnsTls = false;
+
+      if (shouldProbeResume) {
+        const [fileTimes, releaseStatus, chartVersion, existingValues] =
+          await Promise.all([
+            getDeploymentFileModificationTimes(name),
+            latestReleaseStatus(getReleaseName(cfg.name), getNamespace(cfg.name)),
+            getDeployedChartVersion(
+              getReleaseName(cfg.name),
+              getNamespace(cfg.name),
+            ),
+            loadHelmValues(name),
+          ]);
+        deployedChartVersion = chartVersion;
+        resumeDnsTls =
+          Boolean(deployedChartVersion) &&
+          shouldResumeDnsTlsSetup({
+            forceFull: false,
+            valuesExist: existingValues !== null,
+            releaseStatus,
+            deploymentStatus: existingState?.status,
+            tlsEnabled: deriveTlsEnabled(existingValues),
+            ...fileTimes,
+          });
+      }
+
+      if (resumeDnsTls) {
+        chartSourceRef.current = {
+          chartRef: chartOciRef(cfg),
+          version: deployedChartVersion,
+        };
+        await saveDeploymentState(name, {
+          ...state,
+          status: "waiting-dns",
+          updatedAt: new Date().toISOString(),
+        });
+        setResumingDnsTls(true);
+        setStatus((s) => ({
+          ...s,
+          preflight: "success",
+          federation: "skipped",
+          helmInstall: "success",
+          dnsConfig: "running",
+        }));
+        setStep("dns-wait");
+        return;
+      }
+
+      await saveDeploymentState(name, { ...state, status: "deploying" });
+      setStep("preflight");
+      await runDeploymentPreflightChecks(cfg);
       // Bring-your-own certificates: read and validate the PEM files now
       // (key pairing, expiry, SAN coverage of every served hostname) so a
       // gap fails here with the exact missing hostname instead of surfacing
@@ -742,7 +841,7 @@ function DeployCommandInner({
     }
   }
 
-  async function runPreflightChecks(cfg: DeploymentConfig): Promise<void> {
+  async function runCorePreflightChecks(cfg: DeploymentConfig): Promise<void> {
     const [helm, kubectl] = await Promise.all([
       isHelmInstalled(),
       isKubectlInstalled(),
@@ -813,7 +912,11 @@ function DeployCommandInner({
       ...s,
       kubeconfig: s.kubeconfig === "success" ? "success" : "skipped",
     }));
+  }
 
+  async function runDeploymentPreflightChecks(
+    cfg: DeploymentConfig,
+  ): Promise<void> {
     // External AWS Aurora needs logical replication for Supabase Realtime - a
     // static cluster parameter bootstrap.sql can't set - so catch it here before
     // a long deploy ends in a Realtime crashloop. Fail-open: the check returns
@@ -1082,6 +1185,7 @@ function DeployCommandInner({
         }
         valkeyAdminHostname={config.features.cache?.valkeyAdmin?.hostname}
         namespace={getNamespace(config.name)}
+        resumeExistingDeployment={resumingDnsTls}
         onComplete={handleDnsComplete}
         onSkip={handleDnsSkip}
       />
@@ -1089,10 +1193,13 @@ function DeployCommandInner({
   }
 
   if (step === "complete") {
-    const tlsSkipped =
-      status.helmUpgradeTls === "skipped" &&
+    const dnsSkipped =
+      status.dnsConfig === "skipped" &&
       !useExternalDns &&
       !assumeDnsConfigured;
+    const tlsMode = config?.tls?.mode ?? "auto";
+    const nonAutoTls = tlsMode !== "auto";
+    const tlsPending = dnsSkipped && !nonAutoTls;
 
     return (
       <BorderBox title="Deployment Complete">
@@ -1113,11 +1220,28 @@ function DeployCommandInner({
                 DNS records will be created automatically by external-dns
               </Text>
             )}
-            {tlsSkipped && (
+            {nonAutoTls && (
+              <Text color={colors.success}>
+                TLS: enabled (
+                {tlsMode === "provided"
+                  ? "provided certificates"
+                  : "external certificate issuer"}
+                )
+              </Text>
+            )}
+            {tlsPending && (
               <Box marginTop={1}>
                 <Text color={colors.warning}>
                   ⚠ TLS not configured. Run `rulebricks deploy {name}` again
                   after DNS setup.
+                </Text>
+              </Box>
+            )}
+            {dnsSkipped && nonAutoTls && (
+              <Box marginTop={1}>
+                <Text color={colors.warning}>
+                  ⚠ DNS validation skipped. TLS is already enabled; run
+                  `rulebricks deploy {name}` again to verify DNS records.
                 </Text>
               </Box>
             )}
@@ -1160,10 +1284,16 @@ function DeployCommandInner({
               {" "}
               • Run `rulebricks status {name}` to check deployment health
             </Text>
-            {tlsSkipped && (
+            {tlsPending && (
               <Text color={colors.muted}>
                 {" "}
-                • Configure DNS and re-run deploy for TLS
+                • Configure DNS and re-run deploy to enable TLS
+              </Text>
+            )}
+            {dnsSkipped && nonAutoTls && (
+              <Text color={colors.muted}>
+                {" "}
+                • Re-run deploy to verify DNS records
               </Text>
             )}
           </Box>

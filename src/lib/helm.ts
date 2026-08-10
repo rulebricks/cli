@@ -290,7 +290,7 @@ interface HelmHistoryEntry {
  * (a previous uninstall was interrupted) makes `helm uninstall` hang forever,
  * so that state is cleared by deleting the release-record Secrets instead.
  */
-async function latestReleaseStatus(
+export async function latestReleaseStatus(
   releaseName: string,
   namespace: string,
 ): Promise<string | undefined> {
@@ -304,6 +304,68 @@ async function latestReleaseStatus(
     return Array.isArray(entries) && entries.length > 0
       ? entries[entries.length - 1].status
       : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface HelmListEntry {
+  name?: unknown;
+  status?: unknown;
+  chart?: unknown;
+}
+
+/**
+ * Extract the installed chart version for an exact, deployed Helm release.
+ * Helm formats the chart field as "<chart-name>-<semver>".
+ */
+export function parseDeployedChartVersion(
+  payload: unknown,
+  releaseName: string,
+): string | undefined {
+  if (!Array.isArray(payload)) return undefined;
+
+  const release = payload.find((candidate): candidate is HelmListEntry => {
+    if (!candidate || typeof candidate !== "object") return false;
+    const entry = candidate as HelmListEntry;
+    return entry.name === releaseName && entry.status === "deployed";
+  });
+  if (!release || typeof release.chart !== "string") return undefined;
+
+  return release.chart.match(
+    /-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/,
+  )?.[1];
+}
+
+/**
+ * Read the concrete chart version currently serving a deployed release.
+ * Undefined means the release is absent, not deployed, or Helm was unreadable.
+ */
+export async function getDeployedChartVersion(
+  releaseName: string,
+  namespace: string,
+): Promise<string | undefined> {
+  const escapedReleaseName = releaseName.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+
+  try {
+    const { stdout } = await execa(
+      "helm",
+      [
+        "list",
+        "--namespace",
+        namespace,
+        "--all",
+        "--filter",
+        `^${escapedReleaseName}$`,
+        "--output",
+        "json",
+      ],
+      { timeout: 30000 },
+    );
+    return parseDeployedChartVersion(JSON.parse(stdout), releaseName);
   } catch {
     return undefined;
   }

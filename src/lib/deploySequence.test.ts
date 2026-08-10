@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runInstallSequence, InstallSequenceDeps } from "./deploySequence.js";
+import {
+  runInstallSequence,
+  shouldResumeDnsTlsSetup,
+  DnsTlsResumeInput,
+  InstallSequenceDeps,
+} from "./deploySequence.js";
 import {
   buildConfigureValues,
   buildDeployValues,
@@ -30,6 +35,61 @@ function recordingDeps(log: string[]): InstallSequenceDeps {
     },
   };
 }
+
+const resumableDnsTlsInput: DnsTlsResumeInput = {
+  forceFull: false,
+  valuesExist: true,
+  releaseStatus: "deployed",
+  deploymentStatus: "waiting-dns",
+  tlsEnabled: true,
+  configModifiedAtMs: 100,
+  valuesModifiedAtMs: 200,
+};
+
+test("resumes a deployed release waiting for manual DNS", () => {
+  assert.equal(shouldResumeDnsTlsSetup(resumableDnsTlsInput), true);
+});
+
+test("resumes when generated values still have TLS disabled", () => {
+  assert.equal(
+    shouldResumeDnsTlsSetup({
+      ...resumableDnsTlsInput,
+      deploymentStatus: "running",
+      tlsEnabled: false,
+    }),
+    true,
+  );
+});
+
+test("does not resume when config is newer than generated values", () => {
+  assert.equal(
+    shouldResumeDnsTlsSetup({
+      ...resumableDnsTlsInput,
+      configModifiedAtMs: 300,
+    }),
+    false,
+  );
+});
+
+test("does not resume a Helm release that is not deployed", () => {
+  assert.equal(
+    shouldResumeDnsTlsSetup({
+      ...resumableDnsTlsInput,
+      releaseStatus: "failed",
+    }),
+    false,
+  );
+});
+
+test("does not resume when a full deployment was requested", () => {
+  assert.equal(
+    shouldResumeDnsTlsSetup({
+      ...resumableDnsTlsInput,
+      forceFull: true,
+    }),
+    false,
+  );
+});
 
 test("eso mode seeds/syncs external secrets before helm", async () => {
   const log: string[] = [];

@@ -76,6 +76,10 @@ program
   .option("--chart-version <version>", "Specific chart version to deploy")
   .option("--version <version>", "Deprecated alias for --chart-version")
   .option(
+    "--full",
+    "Run the complete deployment pipeline instead of resuming DNS/TLS setup",
+  )
+  .option(
     "--inline-secrets",
     "Write secrets inline into values.yaml instead of using the configured secrets backend (dev clusters only)",
   )
@@ -98,6 +102,7 @@ program
         version={options.chartVersion || options.version}
         inlineSecrets={options.inlineSecrets}
         syncSecrets={options.syncSecrets}
+        forceFull={options.full}
       />,
     );
     await waitUntilExit();

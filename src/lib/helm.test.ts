@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseGitHubReleases } from "./helm.js";
+import { parseDeployedChartVersion, parseGitHubReleases } from "./helm.js";
 import { deriveTlsEnabled } from "./helmValues.js";
 
 test("parses GitHub releases into chart versions, newest first", () => {
@@ -37,6 +37,42 @@ test("filters prereleases and malformed release entries", () => {
 test("returns empty list for non-array payloads", () => {
   assert.deepEqual(parseGitHubReleases(null), []);
   assert.deepEqual(parseGitHubReleases({ message: "rate limited" }), []);
+});
+
+test("parses the deployed chart version from Helm list output", () => {
+  const payload = [
+    {
+      name: "another-release",
+      status: "deployed",
+      chart: "stack-9.9.9",
+    },
+    {
+      name: "rulebricks-azpg3",
+      status: "deployed",
+      chart: "stack-0.3.60",
+    },
+  ];
+
+  assert.equal(
+    parseDeployedChartVersion(payload, "rulebricks-azpg3"),
+    "0.3.60",
+  );
+});
+
+test("does not return a chart version for a non-deployed release", () => {
+  assert.equal(
+    parseDeployedChartVersion(
+      [
+        {
+          name: "rulebricks-azpg3",
+          status: "failed",
+          chart: "stack-0.3.60",
+        },
+      ],
+      "rulebricks-azpg3",
+    ),
+    undefined,
+  );
 });
 
 test("strips the v prefix from tags", () => {

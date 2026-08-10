@@ -27,3 +27,8 @@ coverage/
 
 # Internal configurations
 **/*.prototype.bicepparam
+
+cluster-setup/azure/**/*.json
+cluster-setup/azure/**/*.log
+cluster-setup/azure/**/parameters.prerequisites.*.bicepparam
+cluster-setup/azure/**/parameters.*.bicepparam

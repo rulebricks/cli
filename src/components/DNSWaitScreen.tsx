@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Box, Text, useInput } from "ink";
 import { BorderBox, Spinner, useTheme } from "./common/index.js";
 import { DNSRecord } from "../types/index.js";
@@ -17,8 +17,9 @@ interface DNSWaitScreenProps {
   valkeyAdminIngress?: boolean;
   valkeyAdminHostname?: string;
   namespace: string;
-  onComplete: () => void;
-  onSkip?: () => void;
+  resumeExistingDeployment?: boolean;
+  onComplete: () => void | Promise<void>;
+  onSkip?: () => void | Promise<void>;
 }
 
 type Status = "loading-lb" | "idle" | "checking" | "complete" | "error";
@@ -31,6 +32,7 @@ export function DNSWaitScreen({
   valkeyAdminIngress = false,
   valkeyAdminHostname,
   namespace,
+  resumeExistingDeployment = false,
   onComplete,
   onSkip,
 }: DNSWaitScreenProps) {
@@ -43,36 +45,71 @@ export function DNSWaitScreen({
   const [records, setRecords] = useState<DNSRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [hasChecked, setHasChecked] = useState(false);
+  const [skipConfirmation, setSkipConfirmation] = useState(false);
+  const checkInFlight = useRef(false);
+  const terminalActionStarted = useRef(false);
 
   const checkRecords = useCallback(async () => {
-    if (status !== "idle" || records.length === 0) return;
+    if (
+      status !== "idle" ||
+      records.length === 0 ||
+      checkInFlight.current ||
+      terminalActionStarted.current
+    ) {
+      return;
+    }
 
+    checkInFlight.current = true;
     setStatus("checking");
     setHasChecked(true);
 
-    const updatedRecords = await Promise.all(
-      records.map(async (record) => {
-        if (record.verified) return record;
+    try {
+      const updatedRecords = await Promise.all(
+        records.map(async (record) => {
+          if (record.verified) return record;
 
-        const result = await checkDNSRecord(record.hostname, record.target);
-        return {
-          ...record,
-          verified: result.resolved && result.matchesTarget,
-        };
-      }),
-    );
+          const result = await checkDNSRecord(record.hostname, record.target);
+          return {
+            ...record,
+            verified: result.resolved && result.matchesTarget,
+          };
+        }),
+      );
 
-    setRecords(updatedRecords);
-    setStatus(isDNSComplete(updatedRecords) ? "complete" : "idle");
-  }, [records, status]);
+      const complete = isDNSComplete(updatedRecords);
+      setRecords(updatedRecords);
+      setStatus(complete ? "complete" : "idle");
+
+      if (complete && !terminalActionStarted.current) {
+        terminalActionStarted.current = true;
+        void onComplete();
+      }
+    } catch {
+      setStatus("idle");
+    } finally {
+      checkInFlight.current = false;
+    }
+  }, [onComplete, records, status]);
 
   useInput((input, key) => {
-    if (key.escape || input.toLowerCase() === "s") {
-      onSkip?.();
+    const requestedSkip = key.escape || input.toLowerCase() === "s";
+    if (requestedSkip && onSkip && !terminalActionStarted.current) {
+      if (skipConfirmation) {
+        terminalActionStarted.current = true;
+        setSkipConfirmation(false);
+        void onSkip();
+      } else {
+        setSkipConfirmation(true);
+      }
+      return;
     }
-    if (key.return && status === "complete") {
-      onComplete();
-    } else if (key.return && status === "idle") {
+
+    if (skipConfirmation) {
+      setSkipConfirmation(false);
+      return;
+    }
+
+    if (key.return && status === "idle") {
       void checkRecords();
     }
   });
@@ -118,15 +155,34 @@ export function DNSWaitScreen({
     namespace,
   ]);
 
+  useEffect(() => {
+    if (
+      resumeExistingDeployment &&
+      status === "idle" &&
+      records.length > 0 &&
+      !hasChecked
+    ) {
+      void checkRecords();
+    }
+  }, [
+    checkRecords,
+    hasChecked,
+    records.length,
+    resumeExistingDeployment,
+    status,
+  ]);
+
   const verifiedCount = records.filter((r) => r.verified).length;
   const footerText =
-    status === "complete"
-      ? "Enter to continue"
-      : status === "checking"
-        ? "Checking DNS records..."
-        : hasChecked
-          ? "We couldn't find one or more DNS records. Please verify they exist and press Enter to try again."
-          : "Press Enter once you've created the DNS records • S or Esc to skip DNS validation";
+    skipConfirmation
+      ? "Skip DNS validation? Press S or Esc again to confirm • any other key to cancel"
+      : status === "complete"
+        ? "DNS verified. Continuing deployment..."
+        : status === "checking"
+          ? "Checking DNS records..."
+          : hasChecked
+            ? "We couldn't find one or more DNS records. Please verify they exist and press Enter to try again."
+            : "Press Enter once you've created the DNS records • S or Esc twice to skip DNS validation";
 
   return (
     <BorderBox title="Configure DNS Records">
@@ -143,7 +199,9 @@ export function DNSWaitScreen({
           </Text>
           <Text color={colors.error}>{error}</Text>
           <Box marginTop={1}>
-            <Text color={colors.muted}>Press Esc to skip DNS validation</Text>
+            <Text color={colors.muted}>
+              Press S or Esc twice to skip DNS validation
+            </Text>
           </Box>
         </Box>
       )}
@@ -151,6 +209,13 @@ export function DNSWaitScreen({
       {(status === "idle" || status === "checking" || status === "complete") &&
         loadBalancer && (
           <Box flexDirection="column" marginY={1}>
+            {resumeExistingDeployment && (
+              <Box marginBottom={1}>
+                <Text color={colors.muted}>
+                  Existing deployment detected — resuming DNS/TLS setup.
+                </Text>
+              </Box>
+            )}
             <Text bold>Your load balancer address:</Text>
             <Box marginY={1}>
               <Text color={colors.accent} bold>
@@ -202,7 +267,7 @@ export function DNSWaitScreen({
                   </Text>
                   <Box marginTop={1}>
                     <Text color={colors.muted}>
-                      Press Enter to finish the deployment
+                      Continuing deployment...
                     </Text>
                   </Box>
                 </Box>

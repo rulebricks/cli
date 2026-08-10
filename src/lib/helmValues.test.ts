@@ -929,7 +929,7 @@ test("invariant checker catches partition/worker and prefix drift", () => {
     (t: { name: string }) => t.name === "logs",
   );
   assert.ok(logsTopic, "fixture must provision a logs topic");
-  logsTopic.config["retention.bytes"] = String(4 * 1024 ** 3); // 24 x 4Gi = 96Gi >> 50Gi
+  logsTopic.config["retention.bytes"] = String(4 * 1024 ** 3); // 24 x 4Gi = 96Gi >> 75Gi broker volume
   assert.ok(
     validateValuesInvariants(oversizedRetention).some((e) =>
       e.includes("kafka.storage.size"),
