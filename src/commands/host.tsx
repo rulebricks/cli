@@ -556,6 +556,8 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
       } else if (step === "manual-resource-group" && key.escape) {
         setStep("select-resource-group");
       } else if (step === "select-vm" && key.escape) {
+        setManualVmName("");
+        setSelectedVm(null);
         setStep("select-resource-group");
       } else if (step === "manual-vm-name" && key.escape) {
         setStep("select-vm");
@@ -583,9 +585,13 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
     },
   );
 
+  // Key every step root (same pattern as useFieldFlow.render): consecutive
+  // steps often mount the same child type (DiscoveredSelect → DiscoveredSelect,
+  // TextField → TextField, Spinner → Spinner). Without a key, React reuses
+  // mount-time state and lists/cursors leak across steps.
   if (step === "loading") {
     return (
-      <BorderBox title="Link Deploy Host">
+      <BorderBox key="loading" title="Link Deploy Host">
         <Box marginY={1}>
           <Spinner label="Loading deployment..." />
         </Box>
@@ -596,7 +602,7 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
   if (step === "intro") {
     const linkedHost = deploymentState?.linkedHost;
     return (
-      <BorderBox title={`Link Deploy Host · ${name}`}>
+      <BorderBox key="intro" title={`Link Deploy Host · ${name}`}>
         <Box flexDirection="column" marginY={1}>
           <Text>This sets up an Azure VM to run Rulebricks CLI commands.</Text>
           <Box flexDirection="column" marginTop={1}>
@@ -615,6 +621,7 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
           </Box>
           {linkedHost ? (
             <WizardSelect
+              key="intro-linked-host"
               label="This deployment already has a linked host"
               hint={`${linkedHost.vmName} in ${linkedHost.vmResourceGroup}`}
               initialValue="update"
@@ -651,7 +658,7 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
 
   if (step === "preflight" || step === "resolving") {
     return (
-      <BorderBox title="Link Deploy Host">
+      <BorderBox key={step} title="Link Deploy Host">
         <Box marginY={1}>
           <Spinner
             label={
@@ -667,9 +674,8 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
 
   if (step === "select-resource-group" && config) {
     return (
-      <BorderBox title="Select Deploy Host Resource Group">
+      <BorderBox key="select-resource-group" title="Select Deploy Host Resource Group">
         <DiscoveredSelect
-          key="select-resource-group"
           label="Select the resource group containing the deploy host"
           hint="The deployment resource group is recommended."
           loadingLabel="Loading Azure resource groups..."
@@ -689,6 +695,8 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
           }
           initialValue={vmResourceGroup || undefined}
           onSelect={(value) => {
+            setManualVmName("");
+            setSelectedVm(null);
             setVmResourceGroup(value);
             setStep("select-vm");
           }}
@@ -700,7 +708,7 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
 
   if (step === "manual-resource-group") {
     return (
-      <BorderBox title="Enter Deploy Host Resource Group">
+      <BorderBox key="manual-resource-group" title="Enter Deploy Host Resource Group">
         <TextField
           label="Azure resource group"
           hint="Only VMs in this resource group will be listed."
@@ -709,6 +717,8 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
           placeholder="resource-group"
           onSubmit={() => {
             if (vmResourceGroup.trim()) {
+              setManualVmName("");
+              setSelectedVm(null);
               setVmResourceGroup(vmResourceGroup.trim());
               setStep("select-vm");
             }
@@ -721,9 +731,11 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
 
   if (step === "select-vm" && vmResourceGroup) {
     return (
-      <BorderBox title="Select Deploy Host">
+      <BorderBox
+        key={`select-vm:${vmResourceGroup}`}
+        title="Select Deploy Host"
+      >
         <DiscoveredSelect
-          key={`select-vm:${vmResourceGroup}`}
           label="Select the Azure VM that will run Rulebricks commands"
           hint={`Showing only VMs in ${vmResourceGroup}.`}
           loadingLabel="Loading Azure VMs..."
@@ -770,7 +782,10 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
 
   if (step === "manual-vm-name") {
     return (
-      <BorderBox title="Enter Deploy Host">
+      <BorderBox
+        key={`manual-vm-name:${vmResourceGroup}`}
+        title="Enter Deploy Host"
+      >
         <TextField
           label="Azure VM name"
           value={manualVmName}
@@ -792,7 +807,10 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
 
   if (step === "review" && selectedVm) {
     return (
-      <BorderBox title="Review Deploy Host Access">
+      <BorderBox
+        key={`review:${selectedVm.resourceGroup}/${selectedVm.name}`}
+        title="Review Deploy Host Access"
+      >
         <Box flexDirection="column" marginY={1}>
           <Text bold>
             {selectedVm.name}{" "}
@@ -840,7 +858,10 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
 
   if (step === "executing" && selectedVm) {
     return (
-      <BorderBox title={`Linking ${selectedVm.name}`}>
+      <BorderBox
+        key={`executing:${selectedVm.resourceGroup}/${selectedVm.name}`}
+        title={`Linking ${selectedVm.name}`}
+      >
         <Box flexDirection="column" marginY={1}>
           <StatusLine
             status={identityStatus.status}
@@ -874,7 +895,10 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
 
   if (step === "complete" && selectedVm && config) {
     return (
-      <BorderBox title="Deploy Host Linked">
+      <BorderBox
+        key={`complete:${selectedVm.resourceGroup}/${selectedVm.name}`}
+        title="Deploy Host Linked"
+      >
         <Box flexDirection="column" marginY={1}>
           <Text color={colors.success} bold>
             {selectedVm.name} is linked to {name}
@@ -916,7 +940,7 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
   }
 
   return (
-    <BorderBox title="Deploy Host Link Failed">
+    <BorderBox key="error" title="Deploy Host Link Failed">
       <Box flexDirection="column" marginY={1}>
         <Text color={colors.error} bold>
           Could not link the deploy host
@@ -1063,7 +1087,7 @@ function HostUnlinkCommandInner({ name }: HostCommandProps) {
 
   if (step === "loading") {
     return (
-      <BorderBox title="Unlink Deploy Host">
+      <BorderBox key="unlink-loading" title="Unlink Deploy Host">
         <Box marginY={1}>
           <Spinner label="Loading linked host..." />
         </Box>
@@ -1077,7 +1101,10 @@ function HostUnlinkCommandInner({ name }: HostCommandProps) {
         grant.createdByRulebricks && grant.status === "granted",
     ).length;
     return (
-      <BorderBox title={`Unlink Deploy Host · ${name}`}>
+      <BorderBox
+        key={`unlink-confirm:${host.vmResourceGroup}/${host.vmName}`}
+        title={`Unlink Deploy Host · ${name}`}
+      >
         <Box flexDirection="column" marginY={1}>
           <Text>
             Unlink {host.vmName}{" "}
@@ -1104,7 +1131,10 @@ function HostUnlinkCommandInner({ name }: HostCommandProps) {
         grant.createdByRulebricks && grant.status === "granted",
     );
     return (
-      <BorderBox title={`Unlinking ${host.vmName}`}>
+      <BorderBox
+        key={`unlink-running:${host.vmResourceGroup}/${host.vmName}`}
+        title={`Unlinking ${host.vmName}`}
+      >
         <Box flexDirection="column" marginY={1}>
           {managed.map((grant) => {
             const key = linkedGrantKey(grant, host.principalId);
@@ -1132,7 +1162,7 @@ function HostUnlinkCommandInner({ name }: HostCommandProps) {
 
   if (step === "error") {
     return (
-      <BorderBox title="Unlink Failed">
+      <BorderBox key="unlink-error" title="Unlink Failed">
         <Box flexDirection="column" marginY={1}>
           <Text color={colors.error}>{message}</Text>
           <Text color={colors.muted}>Enter or Esc to close</Text>
@@ -1142,7 +1172,7 @@ function HostUnlinkCommandInner({ name }: HostCommandProps) {
   }
 
   return (
-    <BorderBox title="Deploy Host Unlinked">
+    <BorderBox key="unlink-complete" title="Deploy Host Unlinked">
       <Box flexDirection="column" marginY={1}>
         <Text color={colors.success}>{message}</Text>
         {preserved > 0 && host && (
