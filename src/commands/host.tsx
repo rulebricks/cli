@@ -669,6 +669,7 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
     return (
       <BorderBox title="Select Deploy Host Resource Group">
         <DiscoveredSelect
+          key="select-resource-group"
           label="Select the resource group containing the deploy host"
           hint="The deployment resource group is recommended."
           loadingLabel="Loading Azure resource groups..."
@@ -722,6 +723,7 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
     return (
       <BorderBox title="Select Deploy Host">
         <DiscoveredSelect
+          key={`select-vm:${vmResourceGroup}`}
           label="Select the Azure VM that will run Rulebricks commands"
           hint={`Showing only VMs in ${vmResourceGroup}.`}
           loadingLabel="Loading Azure VMs..."

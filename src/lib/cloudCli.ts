@@ -2394,7 +2394,7 @@ export async function listAzureResourceGroups(): Promise<AzureResourceGroup[]> {
         "json",
       ],
       {
-        intent: "Discover deploy hosts",
+        intent: "Discover resource groups",
         provider: "azure",
         timeout: 45000,
       },
@@ -2439,7 +2439,7 @@ export async function listAzureVms(
         "json",
       ],
       {
-        intent: "Discover deploy hosts",
+        intent: "Discover deploy host VMs",
         provider: "azure",
         timeout: 60000,
       },
