@@ -33,6 +33,7 @@ export const KEY_VAULT_SECRETS_OFFICER_ROLE =
   "Key Vault Secrets Officer";
 export const CONTRIBUTOR_ROLE = "Contributor";
 export const ACR_PULL_ROLE = "AcrPull";
+export const READER_ROLE = "Reader";
 
 function grantKey(grant: Pick<HostRoleGrant, "role" | "scope">): string {
   return `${grant.role.toLowerCase()}\0${grant.scope.toLowerCase()}`;
@@ -48,7 +49,7 @@ export function deriveHostGrantPlan(
   facts: AzureHostGrantFacts,
 ): HostRoleGrant[] {
   if (config.infrastructure.provider !== "azure") {
-    throw new Error("Deploy host grants currently support Azure deployments only.");
+    throw new Error("Deploy host linking currently supports Azure deployments only.");
   }
   if (!config.infrastructure.clusterName) {
     throw new Error("The deployment config is missing an AKS cluster name.");
@@ -113,6 +114,29 @@ export function deriveHostGrantPlan(
         reason: "Authenticate Helm to the mirrored chart registry",
       },
     );
+  }
+
+  const communicationServiceId = config.smtp?.azure?.communicationServiceId;
+  if (
+    config.smtp?.host === "smtp.azurecomm.net" &&
+    communicationServiceId
+  ) {
+    const acsResourceGroupId = azureResourceGroupScope(
+      communicationServiceId,
+    );
+    if (
+      acsResourceGroupId.toLowerCase() !==
+      facts.resourceGroupId.toLowerCase()
+    ) {
+      grants.push({
+        role: READER_ROLE,
+        scope: acsResourceGroupId,
+        scopeLabel: `ACS prerequisites resource group ${
+          acsResourceGroupId.split("/").at(-1) ?? ""
+        }`.trim(),
+        reason: "Verify Azure Communication Services SMTP readiness",
+      });
+    }
   }
 
   grants.push({

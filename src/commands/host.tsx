@@ -601,7 +601,7 @@ function HostLinkCommandInner({ name }: HostCommandProps) {
           <Text>This sets up an Azure VM to run Rulebricks CLI commands.</Text>
           <Box flexDirection="column" marginTop={1}>
             <Text color={colors.muted}>
-              1. Select the jumpbox or bastion VM
+              1. Select the resource group and jumpbox or bastion VM
             </Text>
             <Text color={colors.muted}>
               2. Enable its system-assigned managed identity

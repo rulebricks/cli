@@ -10,6 +10,7 @@ import {
   AZURE_CLUSTER_USER_ROLE,
   CONTRIBUTOR_ROLE,
   KEY_VAULT_SECRETS_OFFICER_ROLE,
+  READER_ROLE,
   azureResourceGroupScope,
   deriveHostGrantPlan,
   diffHostGrants,
@@ -24,11 +25,13 @@ const KEY_VAULT_ID =
   "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/vault";
 const ACR_ID =
   "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerRegistry/registries/acr";
+const ACS_ID =
+  "/subscriptions/sub/resourceGroups/shared-services/providers/Microsoft.Communication/communicationServices/acs";
 
 function config(
   overrides: Partial<Pick<
     DeploymentConfig,
-    "secrets" | "imageRegistry" | "imageRegistryMode"
+    "secrets" | "imageRegistry" | "imageRegistryMode" | "smtp"
   >> = {},
 ): DeploymentConfig {
   return {
@@ -114,12 +117,60 @@ test("deriveHostGrantPlan adds ACR import and pull access for mirror mode", () =
   );
 });
 
+test("deriveHostGrantPlan adds Reader for ACS in an external resource group", () => {
+  const grants = deriveHostGrantPlan(
+    config({
+      smtp: {
+        host: "smtp.azurecomm.net",
+        port: 587,
+        user: "smtp-user",
+        pass: "smtp-password",
+        from: "DoNotReply@example.azurecomm.net",
+        fromName: "Rulebricks",
+        azure: {
+          communicationServiceId: ACS_ID,
+          entraApplicationId: "11111111-1111-4111-8111-111111111111",
+        },
+      },
+    }),
+    facts(),
+  );
+  assert.ok(
+    grants.some(
+      (grant) =>
+        grant.role === READER_ROLE &&
+        grant.scope === "/subscriptions/sub/resourceGroups/shared-services",
+    ),
+  );
+});
+
+test("deriveHostGrantPlan reuses deployment-group Contributor for ACS reads", () => {
+  const grants = deriveHostGrantPlan(
+    config({
+      smtp: {
+        host: "smtp.azurecomm.net",
+        port: 587,
+        user: "smtp-user",
+        pass: "smtp-password",
+        from: "DoNotReply@example.azurecomm.net",
+        fromName: "Rulebricks",
+        azure: {
+          communicationServiceId: `${RESOURCE_GROUP_ID}/providers/Microsoft.Communication/communicationServices/acs`,
+          entraApplicationId: "11111111-1111-4111-8111-111111111111",
+        },
+      },
+    }),
+    facts(),
+  );
+  assert.equal(grants.filter((grant) => grant.role === READER_ROLE).length, 0);
+});
+
 test("deriveHostGrantPlan rejects non-Azure deployments", () => {
   const nonAzure = config();
   nonAzure.infrastructure.provider = "aws";
   assert.throws(
     () => deriveHostGrantPlan(nonAzure, facts()),
-    /support Azure deployments only/,
+    /supports Azure deployments only/,
   );
 });
 
