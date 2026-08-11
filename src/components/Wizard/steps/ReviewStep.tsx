@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Box, Text } from 'ink';
-import TextInput from 'ink-text-input';
 import { useWizard } from '../WizardContext.js';
+import { DeploymentNameStep } from './DeploymentNameStep.js';
 import {
   BorderBox,
   ScrollArea,
@@ -9,7 +9,7 @@ import {
   useStepLayout,
   useTheme,
 } from '../../common/index.js';
-import { DNS_PROVIDER_NAMES, CLOUD_PROVIDER_NAMES, LOGGING_SINK_INFO, isSupportedDnsProvider, KafkaPreset, MAX_DEPLOYMENT_NAME_LENGTH, validateDeploymentName } from '../../../types/index.js';
+import { DNS_PROVIDER_NAMES, CLOUD_PROVIDER_NAMES, LOGGING_SINK_INFO, isSupportedDnsProvider, KafkaPreset } from '../../../types/index.js';
 
 interface ReviewStepProps {
   onComplete: () => void;
@@ -44,12 +44,10 @@ export function ReviewStep({
   onBack,
   originalName,
 }: ReviewStepProps) {
-  const { state, dispatch, configIssues } = useWizard();
+  const { state, configIssues } = useWizard();
   const { colors } = useTheme();
   const layout = useStepLayout();
   const [editingName, setEditingName] = useState(!state.name);
-  const [name, setName] = useState(state.name || '');
-  const [error, setError] = useState<string | null>(null);
 
   const issues = configIssues();
 
@@ -70,21 +68,6 @@ export function ReviewStep({
       setEditingName(true);
     }
   });
-  
-  const handleNameSubmit = () => {
-    // Keeping the saved name is always allowed, even if it predates the
-    // length cap; validation only applies when picking a new name.
-    if (!originalName || name !== originalName) {
-      const validationError = validateDeploymentName(name);
-      if (validationError) {
-        setError(validationError);
-        return;
-      }
-    }
-    setError(null);
-    dispatch({ type: 'SET_NAME', name });
-    setEditingName(false);
-  };
   
   const externalDnsEnabled = state.dnsAutoManage && isSupportedDnsProvider(state.dnsProvider);
   const clusterCpuCores = state.eligibleCpuCores || Math.ceil(state.totalCpuCores);
@@ -125,42 +108,11 @@ export function ReviewStep({
   
   if (editingName) {
     return (
-      <BorderBox title="Deployment Name">
-        <Box flexDirection="column" marginY={1}>
-          <Text>Enter a name for this deployment:</Text>
-          <Text color="gray" dimColor>
-            Lowercase letters, numbers, and hyphens; at most{' '}
-            {MAX_DEPLOYMENT_NAME_LENGTH} characters
-          </Text>
-          <Box marginTop={1}>
-            <TextInput
-              value={name}
-              onChange={setName}
-              onSubmit={handleNameSubmit}
-              placeholder="my-deployment"
-            />
-          </Box>
-          {originalName && (
-            <Box marginTop={1} flexDirection="column">
-              <Text color={colors.warning}>
-                Renaming only updates the local config: the next deploy
-                installs a fresh release in namespace rulebricks-{'<'}new name
-                {'>'}, and nothing moves or carries over.
-              </Text>
-              <Text color={colors.warning}>
-                If "{originalName}" is already deployed, run rulebricks destroy{' '}
-                {originalName} before saving the rename, or clean up its
-                namespace manually afterwards.
-              </Text>
-            </Box>
-          )}
-          {error && (
-            <Box marginTop={1}>
-              <Text color={colors.error}>✗ {error}</Text>
-            </Box>
-          )}
-        </Box>
-      </BorderBox>
+      <DeploymentNameStep
+        onComplete={() => setEditingName(false)}
+        onBack={() => setEditingName(false)}
+        originalName={originalName}
+      />
     );
   }
   

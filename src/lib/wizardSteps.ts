@@ -1,4 +1,6 @@
 export const WIZARD_STEP_ORDER = [
+  // Configure-menu only: create mode collects the name on the review step.
+  "name",
   "cloud",
   "domain",
   "smtp",
@@ -75,12 +77,16 @@ export function getActiveWizardSteps(
 }
 
 /**
- * Sections offered on the configure command's entry menu: every active
- * wizard step except "review", which the menu exposes as its own
- * "Review & save changes" action.
+ * Sections offered on the configure command's entry menu: the deployment
+ * name first (a rename is the one thing the linear steps never ask about),
+ * then every active wizard step except "review", which the menu exposes as
+ * its own "Review & save changes" action.
  */
 export function getConfigureSections(state: WizardStepState): WizardStepId[] {
-  return getActiveWizardSteps(state, "configure").filter(
-    (step) => step !== "review",
-  );
+  return [
+    "name",
+    ...getActiveWizardSteps(state, "configure").filter(
+      (step) => step !== "review",
+    ),
+  ];
 }

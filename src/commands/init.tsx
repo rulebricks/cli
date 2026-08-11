@@ -8,6 +8,7 @@ import {
 } from "../components/Wizard/WizardContext.js";
 import {
   CloudProviderStep,
+  DeploymentNameStep,
   DomainStep,
   SMTPStep,
   DatabaseStep,
@@ -161,6 +162,11 @@ const CONFIGURE_STEP_CHAIN: Partial<Record<StepId, StepId>> = {
 };
 
 const STEP_INFO: Record<StepId, { title: string; description: string }> = {
+  name: {
+    title: "Deployment Name",
+    description:
+      "Rename this deployment (the next deploy installs under the new name)",
+  },
   cloud: { title: "Cloud Provider", description: "Select your cloud provider" },
   domain: { title: "Domain & DNS", description: "Configure your domain and DNS" },
   smtp: { title: "Email", description: "Configure email delivery" },
@@ -498,6 +504,13 @@ function WizardStepController({
 
     const nav = { onComplete: goNext, onBack: goBack };
     switch (currentStep) {
+      case "name":
+        return (
+          <DeploymentNameStep
+            {...nav}
+            originalName={originalNameRef.current ?? undefined}
+          />
+        );
       case "cloud":
         return <CloudProviderStep {...nav} entryDirection={navDirection} />;
       case "domain":

@@ -59,8 +59,9 @@ test("supabase-cloud drops database-creds; configure drops cloud", () => {
   assert.equal(steps.includes("database-creds"), false);
 });
 
-test("configure sections are the active steps minus cloud and review", () => {
+test("configure sections are name plus the active steps minus cloud and review", () => {
   assert.deepEqual(getConfigureSections(stepState()), [
+    "name",
     "domain",
     "smtp",
     "database",

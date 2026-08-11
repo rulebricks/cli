@@ -1,4 +1,5 @@
 export { CloudProviderStep } from './CloudProviderStep.js';
+export { DeploymentNameStep } from './DeploymentNameStep.js';
 export { DomainStep } from './DomainStep.js';
 export { SMTPStep } from './SMTPStep.js';
 export { DatabaseStep } from './DatabaseStep.js';
