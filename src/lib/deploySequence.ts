@@ -25,6 +25,13 @@ export interface DnsTlsResumeInput {
   tlsEnabled: boolean;
   configModifiedAtMs?: number;
   valuesModifiedAtMs?: number;
+  /**
+   * The configured product version differs from the last deployed one
+   * (deployment state's application.version). A pending version change must
+   * run the full pipeline: resuming would skip the Helm upgrade and, in
+   * full-mirror mode, the image mirroring for the new version.
+   */
+  versionChanged?: boolean;
 }
 
 /**
@@ -35,6 +42,7 @@ export interface DnsTlsResumeInput {
 export function shouldResumeDnsTlsSetup(input: DnsTlsResumeInput): boolean {
   if (input.forceFull || !input.valuesExist) return false;
   if (input.releaseStatus !== "deployed") return false;
+  if (input.versionChanged) return false;
   if (
     input.configModifiedAtMs === undefined ||
     input.valuesModifiedAtMs === undefined ||

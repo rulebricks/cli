@@ -91,6 +91,28 @@ test("does not resume when a full deployment was requested", () => {
   );
 });
 
+test("does not resume when the configured version changed", () => {
+  assert.equal(
+    shouldResumeDnsTlsSetup({
+      ...resumableDnsTlsInput,
+      versionChanged: true,
+    }),
+    false,
+  );
+});
+
+test("an unchanged or unknown version does not block resume", () => {
+  assert.equal(
+    shouldResumeDnsTlsSetup({
+      ...resumableDnsTlsInput,
+      versionChanged: false,
+    }),
+    true,
+  );
+  // Older deployments without a recorded version leave the input undefined.
+  assert.equal(shouldResumeDnsTlsSetup(resumableDnsTlsInput), true);
+});
+
 test("eso mode seeds/syncs external secrets before helm", async () => {
   const log: string[] = [];
   await runInstallSequence(

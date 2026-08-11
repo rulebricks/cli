@@ -84,6 +84,7 @@ import {
   TlsSecretPlan,
 } from "../lib/tlsCerts.js";
 import { setupExternalSecrets } from "../lib/eso.js";
+import { normalizeVersion } from "../lib/dockerHub.js";
 import {
   runInstallSequence,
   secretModeForConfig,
@@ -379,6 +380,11 @@ function DeployCommandInner({
             loadHelmValues(name),
           ]);
         deployedChartVersion = chartVersion;
+        // A version changed in config since the last deploy (e.g. via the
+        // configure menu) must not resume: that would skip the Helm upgrade
+        // and, in full-mirror mode, the mirroring of the new version's images.
+        const deployedProductVersion =
+          existingState?.application?.version ?? "";
         resumeDnsTls =
           Boolean(deployedChartVersion) &&
           shouldResumeDnsTlsSetup({
@@ -387,6 +393,11 @@ function DeployCommandInner({
             releaseStatus,
             deploymentStatus: existingState?.status,
             tlsEnabled: deriveTlsEnabled(existingValues),
+            versionChanged:
+              deployedProductVersion !== "" &&
+              cfg.version !== "" &&
+              normalizeVersion(deployedProductVersion) !==
+                normalizeVersion(cfg.version),
             ...fileTimes,
           });
       }

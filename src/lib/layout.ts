@@ -119,3 +119,113 @@ export function computeLayout(rows: number, columns: number): WizardLayout {
 
   return { ...layout(false, false, MIN_STEP_BOX_ROWS), tooSmall: true };
 }
+
+// ---------------------------------------------------------------------------
+// Configure menu (SectionMenu) layout
+// ---------------------------------------------------------------------------
+
+/**
+ * Rows of the configure menu that never collapse: BorderBox borders (2), the
+ * hints line + its margin (2), the outer top margin (1), the
+ * "What would you like to update?" title (1), the list's top margin (1), and
+ * the "Review & save changes" row pinned in the footer (1).
+ */
+const MENU_FIXED_ROWS = 8;
+
+/** Rows reserved for the "N more" overflow markers while windowed. */
+const MENU_MARKER_ROWS = 2;
+
+/** Stop shedding optional chrome once this many sections are visible. */
+const MENU_COMFORT_WINDOW = 6;
+
+export interface SectionMenuLayout {
+  /** Section rows visible at once; less than the section count = windowed. */
+  windowSize: number;
+  /** "Nothing is saved until..." subtitle line. */
+  showSubtitle: boolean;
+  /** Colored "S Save & exit • A Save & deploy • R Review" row + its margin. */
+  showActions: boolean;
+  /** Blank row between the section list and the pinned review row. */
+  showReviewMargin: boolean;
+  /** Highlighted section's description line + its margin. */
+  showDescription: boolean;
+}
+
+/**
+ * Fit the configure menu into the fixed step box. The section list is the
+ * point of the screen, so optional chrome is shed (subtitle, then the review
+ * row's spacer, then the description) until a comfortable window fits; the
+ * save-actions row is load-bearing and is only shed when the list would
+ * otherwise be unusably small - the hints line swaps to the S/A keys in that
+ * case, so no affordance is ever lost entirely.
+ */
+export function computeSectionMenuLayout(
+  stepBoxHeight: number,
+  sectionCount: number,
+): SectionMenuLayout {
+  const available = stepBoxHeight - MENU_FIXED_ROWS;
+  const state = {
+    showSubtitle: true,
+    showActions: true,
+    showReviewMargin: true,
+    showDescription: true,
+  };
+  const chromeRows = () =>
+    (state.showSubtitle ? 1 : 0) +
+    (state.showActions ? 2 : 0) +
+    (state.showReviewMargin ? 1 : 0) +
+    (state.showDescription ? 2 : 0);
+  const fitsUnwindowed = () => sectionCount <= available - chromeRows();
+  const windowRows = () => available - chromeRows() - MENU_MARKER_ROWS;
+
+  if (fitsUnwindowed()) {
+    return { windowSize: sectionCount, ...state };
+  }
+
+  if (windowRows() < MENU_COMFORT_WINDOW) state.showSubtitle = false;
+  if (windowRows() < MENU_COMFORT_WINDOW) state.showReviewMargin = false;
+  if (windowRows() < MENU_COMFORT_WINDOW) state.showDescription = false;
+  if (windowRows() < MIN_LIST_ROWS) state.showActions = false;
+
+  // Shedding chrome may have made room for the whole list.
+  if (fitsUnwindowed()) {
+    return { windowSize: sectionCount, ...state };
+  }
+
+  return {
+    windowSize: Math.max(1, Math.min(windowRows(), sectionCount)),
+    ...state,
+  };
+}
+
+export interface ListWindow {
+  /** Index of the first visible item. */
+  start: number;
+  hiddenAbove: number;
+  hiddenBelow: number;
+}
+
+/**
+ * Slice a cursor-driven list to a window of `windowSize` items centered on
+ * the cursor (clamped at the ends), so scrolling shows context on both sides
+ * without needing any scroll-position state.
+ */
+export function computeListWindow(
+  cursor: number,
+  count: number,
+  windowSize: number,
+): ListWindow {
+  if (count <= windowSize) {
+    return { start: 0, hiddenAbove: 0, hiddenBelow: 0 };
+  }
+  const start = clamp(
+    cursor - Math.floor((windowSize - 1) / 2),
+    0,
+    count - windowSize,
+  );
+  return {
+    start,
+    hiddenAbove: start,
+    hiddenBelow: count - start - windowSize,
+  };
+}

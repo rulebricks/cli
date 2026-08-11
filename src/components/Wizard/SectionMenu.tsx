@@ -4,8 +4,14 @@ import {
   BorderBox,
   StepFooter,
   useGatedInput,
+  useStepLayout,
   useTheme,
 } from "../common/index.js";
+import {
+  computeListWindow,
+  computeSectionMenuLayout,
+  type SectionMenuLayout,
+} from "../../lib/layout.js";
 import type { WizardStepId } from "../../lib/wizardSteps.js";
 
 export interface SectionMenuItem {
@@ -26,11 +32,22 @@ interface SectionMenuProps {
   onExit: () => void;
 }
 
+/** Everything visible: used outside the wizard shell's fixed frame. */
+const UNCONSTRAINED_LAYOUT: SectionMenuLayout = {
+  windowSize: Number.MAX_SAFE_INTEGER,
+  showSubtitle: true,
+  showActions: true,
+  showReviewMargin: true,
+  showDescription: true,
+};
+
 /**
  * Entry screen for the configure command: pick a config section to update,
  * return here after each edit, then save, apply, or review. Modeled on
  * CheckboxList's cursor-driven list so edited markers and per-item descriptions
- * render with full styling control.
+ * render with full styling control. The section list is windowed to the fixed
+ * step-box height (computeSectionMenuLayout) so no entry can clip off-screen;
+ * "N more" markers flag hidden rows and the review action stays pinned.
  */
 export function SectionMenu({
   sections,
@@ -41,8 +58,23 @@ export function SectionMenu({
   onExit,
 }: SectionMenuProps) {
   const { colors } = useTheme();
+  const stepLayout = useStepLayout();
   const [cursor, setCursor] = useState(0);
   const reviewIndex = sections.length;
+
+  const menu = stepLayout
+    ? computeSectionMenuLayout(stepLayout.stepBoxHeight, sections.length)
+    : UNCONSTRAINED_LAYOUT;
+  const windowed = menu.windowSize < sections.length;
+  // When the cursor sits on the pinned review row, keep the window anchored
+  // to the end of the list.
+  const anchor = Math.min(cursor, reviewIndex - 1);
+  const { start, hiddenAbove, hiddenBelow } = computeListWindow(
+    anchor,
+    sections.length,
+    menu.windowSize,
+  );
+  const visibleSections = sections.slice(start, start + menu.windowSize);
 
   useGatedInput((input, key) => {
     const command = input.toLowerCase();
@@ -69,39 +101,68 @@ export function SectionMenu({
       ? "Review the full configuration and save your changes"
       : sections[cursor]?.description;
 
+  // Keep the hints to a single line: navigation keys while the colored
+  // actions row advertises S/A, the save keys once that row is shed.
+  const hints = menu.showActions
+    ? ["↑/↓ to navigate", "Enter to select", "Esc discard"]
+    : ["S save & exit", "A save & deploy", "Esc discard"];
+
   return (
     <BorderBox
       title="Update Configuration"
       footer={
-        <StepFooter
-          hints={[
-            "↑/↓ to navigate",
-            "Enter to select",
-            "S save & exit",
-            "A save & deploy",
-            "Esc discard",
-          ]}
-        />
+        // The review action, description, and hints live in the pinned footer
+        // so an unexpected text wrap can only ever clip list rows, never the
+        // actions.
+        <Box flexDirection="column">
+          <Box marginTop={menu.showReviewMargin ? 1 : 0}>
+            <Text
+              color={cursor === reviewIndex ? colors.success : colors.muted}
+              bold={cursor === reviewIndex}
+            >
+              {cursor === reviewIndex ? "❯ " : "  "}
+              {"Review & save changes"}
+            </Text>
+          </Box>
+          {menu.showDescription && highlightedDescription && (
+            <Box marginTop={1}>
+              <Text color="gray" dimColor>
+                {highlightedDescription}
+              </Text>
+            </Box>
+          )}
+          <StepFooter hints={hints} />
+        </Box>
       }
     >
-      <Box flexDirection="column" marginY={1}>
+      <Box flexDirection="column" marginTop={1}>
         <Text bold>What would you like to update?</Text>
-        <Text color="gray" dimColor>
-          Nothing is saved until you choose a save action.
-        </Text>
-        <Box marginTop={1}>
-          <Text color={colors.success} bold>
-            S Save & exit
+        {menu.showSubtitle && (
+          <Text color="gray" dimColor>
+            Nothing is saved until you choose a save action.
           </Text>
-          <Text color={colors.muted}> • </Text>
-          <Text color={colors.accent} bold>
-            A Save & deploy
-          </Text>
-          <Text color={colors.muted}> • R Review</Text>
-        </Box>
+        )}
+        {menu.showActions && (
+          <Box marginTop={1}>
+            <Text color={colors.success} bold>
+              S Save & exit
+            </Text>
+            <Text color={colors.muted}> • </Text>
+            <Text color={colors.accent} bold>
+              A Save & deploy
+            </Text>
+            <Text color={colors.muted}> • R Review</Text>
+          </Box>
+        )}
 
         <Box marginTop={1} flexDirection="column">
-          {sections.map((section, index) => {
+          {windowed && (
+            <Text color="gray" dimColor>
+              {hiddenAbove > 0 ? `  ↑ ${hiddenAbove} more` : " "}
+            </Text>
+          )}
+          {visibleSections.map((section, offset) => {
+            const index = start + offset;
             const selected = index === cursor;
             return (
               <Box key={section.id}>
@@ -115,25 +176,12 @@ export function SectionMenu({
               </Box>
             );
           })}
-
-          <Box marginTop={1}>
-            <Text
-              color={cursor === reviewIndex ? colors.success : colors.muted}
-              bold={cursor === reviewIndex}
-            >
-              {cursor === reviewIndex ? "❯ " : "  "}
-              {"Review & save changes"}
-            </Text>
-          </Box>
-        </Box>
-
-        {highlightedDescription && (
-          <Box marginTop={1}>
+          {windowed && (
             <Text color="gray" dimColor>
-              {highlightedDescription}
+              {hiddenBelow > 0 ? `  ↓ ${hiddenBelow} more` : " "}
             </Text>
-          </Box>
-        )}
+          )}
+        </Box>
       </Box>
     </BorderBox>
   );
