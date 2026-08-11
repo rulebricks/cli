@@ -1771,12 +1771,6 @@ export function buildHelmValues(
       "Self-hosted Supabase is missing a JWT secret. Run `rulebricks configure <name>` to regenerate deployment credentials, or set database.supabaseJwtSecret in config.yaml.",
     );
   }
-  if (config.features.ai.enabled && !config.features.ai.openaiApiKey) {
-    throw new Error(
-      "AI features are enabled but the OpenAI API key is missing. Run `rulebricks configure <name>` and enter your OpenAI API key, or disable AI features in config.yaml.",
-    );
-  }
-
   const { tlsEnabled = true, secretMode = "inline" } = options;
   // Bring-your-own certificates: TLS stays on, but every in-chart issuance
   // path (cert-manager subchart, ClusterIssuer, ingress-shim annotations via
@@ -2010,18 +2004,7 @@ export function buildHelmValues(
       // Supabase configuration
       supabase: supabaseGlobalConfig,
 
-      // AI configuration
-      ai: {
-        enabled: config.features.ai.enabled,
-        openaiApiKey: config.features.ai.enabled
-          ? config.features.ai.openaiApiKey
-          : undefined,
-        // Non-secret: survives secret redaction and lands in the app
-        // ConfigMap as OPENAI_BASE_URL. Empty means OpenAI's public API.
-        openaiBaseUrl: config.features.ai.enabled
-          ? config.features.ai.openaiBaseUrl || undefined
-          : undefined,
-      },
+      // AI is configured in-app (Settings -> AI features), not via the chart.
 
       // SSO configuration
       sso: config.features.sso.enabled
@@ -3160,7 +3143,6 @@ export function redactSecretsToRefs(
       global.supabase.secretRefKey = { anonKey: "SUPABASE_ANON_KEY" };
     }
   }
-  if (global.ai) delete global.ai.openaiApiKey;
   if (global.sso) {
     delete global.sso.clientId;
     delete global.sso.clientSecret;

@@ -103,16 +103,8 @@ export function applyHelmValuesToConfig(
       }
     }
 
-    if (isRecord(global.ai)) {
-      next.features.ai.enabled =
-        booleanValue(global.ai.enabled) ?? next.features.ai.enabled;
-      next.features.ai.openaiApiKey =
-        stringValue(global.ai.openaiApiKey) ??
-        next.features.ai.openaiApiKey;
-      next.features.ai.openaiBaseUrl =
-        stringValue(global.ai.openaiBaseUrl) ??
-        next.features.ai.openaiBaseUrl;
-    }
+    // global.ai is intentionally ignored: AI is configured in-app
+    // (Settings -> AI features), not via Helm values.
 
     if (isRecord(global.sso)) {
       next.features.sso.enabled =

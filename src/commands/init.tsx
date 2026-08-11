@@ -224,7 +224,6 @@ function WizardStepController({
   }, [
     mode,
     state.databaseType,
-    state.aiEnabled,
     state.ssoEnabled,
     state.clickStackEnabled,
     state.metricsExportEnabled,

@@ -190,7 +190,6 @@ test("buildConfigureValues scrubs inline secrets carried over from old values", 
   const global = merged.global as Record<string, any>;
   assert.equal(global.smtp.pass, undefined);
   assert.equal(global.smtp.user, undefined);
-  assert.equal(global.ai?.openaiApiKey, undefined);
   assert.equal(global.sso?.clientSecret, undefined);
   assert.equal(typeof global.secrets?.secretRef, "string");
 

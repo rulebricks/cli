@@ -75,7 +75,6 @@ export function externalServicesFieldOrder(
 
 export interface FeatureConfigFlowState {
   needs: {
-    ai: boolean;
     sso: boolean;
     monitoring: boolean;
     logging: boolean;
@@ -103,9 +102,6 @@ export interface FeatureConfigFlowState {
 
 export function featureConfigFieldOrder(s: FeatureConfigFlowState): string[] {
   const fields: string[] = [];
-
-  // The key and optional base URL share one consolidated screen.
-  if (s.needs.ai) fields.push("openai-config");
 
   if (s.needs.sso) {
     fields.push("sso-provider");

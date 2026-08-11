@@ -106,74 +106,6 @@ function isValidUrl(value: string): boolean {
   }
 }
 
-interface OpenAIConfigFieldProps {
-  openaiKey: string;
-  setOpenaiKey: (value: string) => void;
-  openaiBaseUrl: string;
-  setOpenaiBaseUrl: (value: string) => void;
-  setError: (error: string | null) => void;
-  onDone: () => void;
-}
-
-/**
- * Consolidated AI prompt: the API key and the optional base URL share one
- * screen. Enter on the key validates it and moves focus to the URL; Enter on
- * the URL validates it (when present) and completes the field. Mounted fresh
- * on each visit (the flow keys renders by field id), so focus always starts
- * on the key.
- */
-function OpenAIConfigField({
-  openaiKey,
-  setOpenaiKey,
-  openaiBaseUrl,
-  setOpenaiBaseUrl,
-  setError,
-  onDone,
-}: OpenAIConfigFieldProps) {
-  const [focused, setFocused] = useState<"key" | "url">("key");
-  return (
-    <Box flexDirection="column">
-      <TextField
-        label="OpenAI API Key"
-        hint="Required for AI-powered rule generation. Get a key at https://platform.openai.com/api-keys"
-        value={openaiKey}
-        onChange={setOpenaiKey}
-        placeholder="sk-..."
-        mask
-        focus={focused === "key"}
-        onSubmit={() => {
-          if (!openaiKey) {
-            setError("OpenAI API key is required for AI features");
-            return;
-          }
-          if (!openaiKey.startsWith("sk-")) {
-            setError('OpenAI API key should start with "sk-"');
-            return;
-          }
-          setError(null);
-          setFocused("url");
-        }}
-      />
-      <TextField
-        label="OpenAI API Base URL (optional)"
-        hint="Custom OpenAI-compatible endpoint, e.g. https://gateway.example.com/v1. Leave blank to use OpenAI's public API."
-        value={openaiBaseUrl}
-        onChange={setOpenaiBaseUrl}
-        placeholder="https://api.openai.com/v1"
-        focus={focused === "url"}
-        onSubmit={() => {
-          if (openaiBaseUrl && !isValidUrl(openaiBaseUrl)) {
-            setError("Invalid URL format");
-            return;
-          }
-          setError(null);
-          onDone();
-        }}
-      />
-    </Box>
-  );
-}
-
 export function FeatureConfigStep({
   onComplete,
   onBack,
@@ -185,7 +117,6 @@ export function FeatureConfigStep({
   // Metrics export (Prometheus remote_write) is opt-in via the Observability
   // step and independent of built-in ClickStack; in-cluster Prometheus is
   // always installed and needs no configuration.
-  const needsAI = state.aiEnabled;
   const needsSSO = state.ssoEnabled;
   const needsMonitoring = state.metricsExportEnabled;
   const needsLogging = state.loggingSink !== "console";
@@ -194,7 +125,6 @@ export function FeatureConfigStep({
   const needsValkeyAdmin = state.valkeyAdminEnabled;
   const needsCustomEmails = state.customEmailsEnabled;
   const needsAnything =
-    needsAI ||
     needsSSO ||
     needsMonitoring ||
     needsLogging ||
@@ -203,11 +133,7 @@ export function FeatureConfigStep({
     needsValkeyAdmin ||
     needsCustomEmails;
 
-  // AI / SSO
-  const [openaiKey, setOpenaiKey] = useState(state.openaiApiKey || "");
-  const [openaiBaseUrl, setOpenaiBaseUrl] = useState(
-    state.openaiBaseUrl || "",
-  );
+  // SSO
   const [ssoProvider, setSsoProvider] = useState<SSOProvider | null>(
     state.ssoProvider,
   );
@@ -433,9 +359,6 @@ export function FeatureConfigStep({
 
   const monitoringChecks = () => {
     const rows = [];
-    if (state.openaiApiKey) rows.push({ label: "OpenAI API key configured" });
-    if (state.openaiBaseUrl)
-      rows.push({ label: `OpenAI endpoint: ${state.openaiBaseUrl}` });
     if (state.ssoProvider) {
       rows.push({ label: "SSO", value: state.ssoProvider });
     }
@@ -450,7 +373,6 @@ export function FeatureConfigStep({
   const fieldOrder = new Set(
     featureConfigFieldOrder({
       needs: {
-        ai: needsAI,
         sso: needsSSO,
         monitoring: needsMonitoring,
         logging: needsLogging,
@@ -475,25 +397,6 @@ export function FeatureConfigStep({
   );
 
   const fieldDefs: FlowField[] = [
-    // ----- AI -----
-    {
-      id: "openai-config",
-      render: (flow) => (
-        <OpenAIConfigField
-          openaiKey={openaiKey}
-          setOpenaiKey={setOpenaiKey}
-          openaiBaseUrl={openaiBaseUrl}
-          setOpenaiBaseUrl={setOpenaiBaseUrl}
-          setError={setError}
-          onDone={() => {
-            dispatch({ type: "SET_OPENAI_KEY", key: openaiKey });
-            dispatch({ type: "SET_OPENAI_BASE_URL", url: openaiBaseUrl });
-            flow.next();
-          }}
-        />
-      ),
-    },
-
     // ----- SSO -----
     {
       id: "sso-provider",

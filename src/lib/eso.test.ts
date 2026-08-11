@@ -208,7 +208,7 @@ test("byo-secret-store references the existing store and creates none", () => {
 
 test("mergeMissingSecretKeys adds only absent keys, existing values win", () => {
   // The feature-enabled-after-first-seed seam: the entry was seeded without
-  // OPENAI_API_KEY (AI off), then AI is enabled. Only the new key is added.
+  // SSO_CLIENT_SECRET (SSO off), then SSO is enabled. Only the new key is added.
   const existing = JSON.stringify({
     LICENSE_KEY: "rotated-by-client",
     EMAIL: "ops@example.com",
@@ -216,7 +216,7 @@ test("mergeMissingSecretKeys adds only absent keys, existing values win", () => 
   const desired = JSON.stringify({
     LICENSE_KEY: "from-config",
     EMAIL: "ops@example.com",
-    OPENAI_API_KEY: "sk-new",
+    SSO_CLIENT_SECRET: "sso-new",
   });
 
   const merged = mergeMissingSecretKeys(existing, desired);
@@ -224,7 +224,7 @@ test("mergeMissingSecretKeys adds only absent keys, existing values win", () => 
   assert.deepEqual(JSON.parse(merged!), {
     LICENSE_KEY: "rotated-by-client", // never clobbered
     EMAIL: "ops@example.com",
-    OPENAI_API_KEY: "sk-new",
+    SSO_CLIENT_SECRET: "sso-new",
   });
 });
 

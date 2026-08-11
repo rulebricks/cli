@@ -379,16 +379,6 @@ test("buildHelmValues rejects self-hosted Supabase without a JWT secret early", 
   );
 });
 
-test("buildHelmValues rejects enabled AI without an OpenAI key early", () => {
-  const config = cloneFixture("aws-self-hosted-minimal");
-  config.features.ai = { enabled: true };
-
-  assert.throws(
-    () => buildHelmValues(config),
-    /AI features are enabled but the OpenAI API key is missing/,
-  );
-});
-
 test("configure wizard backfills missing self-hosted Supabase JWT secret", () => {
   const config = cloneFixture("aws-self-hosted-minimal");
   delete config.database.supabaseJwtSecret;
@@ -475,7 +465,6 @@ test("self-hosted Supabase keys derive from the configured JWT secret", () => {
 test("wizard orders storage before observability and skips feature config for built-in observability alone", () => {
   const state = {
     databaseType: "self-hosted",
-    aiEnabled: false,
     ssoEnabled: false,
     clickStackEnabled: true,
     metricsExportEnabled: false,
@@ -507,31 +496,10 @@ test("wizard orders storage before observability and skips feature config for bu
   assert.equal(steps.includes("feature-config"), false);
 });
 
-test("wizard routes enabled AI without key through feature config", () => {
-  const steps = getActiveWizardSteps(
-    {
-      databaseType: "self-hosted",
-      aiEnabled: true,
-      ssoEnabled: false,
-      clickStackEnabled: true,
-      metricsExportEnabled: false,
-      tracingEnabled: false,
-      appLogsEnabled: false,
-      valkeyAdminEnabled: false,
-      loggingSink: "console",
-      customEmailsEnabled: false,
-    },
-    "create",
-  );
-
-  assert.ok(steps.includes("feature-config"));
-});
-
 test("wizard includes feature config for BYO observability signals", () => {
   const steps = getActiveWizardSteps(
     {
       databaseType: "self-hosted",
-      aiEnabled: false,
       ssoEnabled: false,
       clickStackEnabled: false,
       metricsExportEnabled: true,
@@ -553,7 +521,6 @@ test("wizard includes feature config for Valkey Admin options", () => {
   const steps = getActiveWizardSteps(
     {
       databaseType: "self-hosted",
-      aiEnabled: false,
       ssoEnabled: false,
       clickStackEnabled: true,
       metricsExportEnabled: false,
@@ -1662,15 +1629,10 @@ import { deriveRealtimeSecrets } from "./helmValues.js";
 
 test("k8s secret mode: secretRefs set, app secrets kept out of values (license stays inline for the pull secret)", () => {
   const config = cloneFixture("aws-self-hosted-minimal");
-  config.features.ai = {
-    enabled: true,
-    openaiApiKey: "sk-test-openai-key-for-secret-mode",
-  };
   const dbPw = config.database.supabaseDbPassword!;
   const jwt = config.database.supabaseJwtSecret!;
   const dashPw = config.database.supabaseDashboardPass!;
   const license = config.licenseKey;
-  const openai = config.features.ai.openaiApiKey!;
   const values = buildHelmValues(config, { secretMode: "k8s" }) as Record<
     string,
     any
@@ -1700,7 +1662,6 @@ test("k8s secret mode: secretRefs set, app secrets kept out of values (license s
   );
   // Genuinely-sensitive app secrets are stripped (delivered via secretRef).
   assert.equal(values.global.supabase.jwtSecret, undefined);
-  assert.equal(values.global.ai.openaiApiKey, undefined);
   // These two MUST stay inline: the standard (unmodified) chart consumes them at
   // Helm TEMPLATE time with no secretRef seam.
   //  - licenseKey -> registry-secret.yaml builds the <release>-regcred pull
@@ -1724,16 +1685,15 @@ test("k8s secret mode: secretRefs set, app secrets kept out of values (license s
     ["db password", dbPw],
     ["jwt secret", jwt],
     ["dashboard password", dashPw],
-    ["openai key", openai],
   ] as const) {
     assert.ok(!dump.includes(secret), `${label} leaked into k8s-mode values`);
   }
 });
 
-test("k8s secret mode: SSO + AI configs validate against the chart schema", () => {
-  // SSO clientId/clientSecret and the OpenAI key are redacted into the app
-  // Secret in k8s mode; the chart schema must accept global.secrets.secretRef
-  // in place of the inline values (delivered via envFrom).
+test("k8s secret mode: SSO config validates against the chart schema", () => {
+  // SSO clientId/clientSecret are redacted into the app Secret in k8s mode;
+  // the chart schema must accept global.secrets.secretRef in place of the
+  // inline values (delivered via envFrom).
   const config = cloneFixture("aws-all-features");
   const values = buildHelmValues(config, { secretMode: "k8s" }) as Record<
     string,
@@ -1742,32 +1702,11 @@ test("k8s secret mode: SSO + AI configs validate against the chart schema", () =
   const result = validateHelmValues(values);
   assert.ok(
     result.valid,
-    `k8s-mode SSO/AI values should satisfy the chart schema:\n${result.errors.join("\n")}`,
+    `k8s-mode SSO values should satisfy the chart schema:\n${result.errors.join("\n")}`,
   );
   assert.equal(values.global.sso.clientId, undefined);
   assert.equal(values.global.sso.clientSecret, undefined);
-  assert.equal(values.global.ai.openaiApiKey, undefined);
-  // The base URL is non-secret config and must survive redaction (it lands in
-  // the app ConfigMap as OPENAI_BASE_URL, not in the app Secret).
-  assert.equal(
-    values.global.ai.openaiBaseUrl,
-    "https://openai-gw.example.com/v1",
-  );
   assert.equal(values.global.secrets.secretRef, `${getReleaseName(config.name)}-app-secrets`);
-});
-
-test("inline mode emits the optional OpenAI base URL only when set", () => {
-  const withUrl = cloneFixture("aws-all-features");
-  const values = buildHelmValues(withUrl) as Record<string, any>;
-  assert.equal(
-    values.global.ai.openaiBaseUrl,
-    "https://openai-gw.example.com/v1",
-  );
-
-  const withoutUrl = cloneFixture("aws-all-features");
-  delete withoutUrl.features.ai.openaiBaseUrl;
-  const bare = buildHelmValues(withoutUrl) as Record<string, any>;
-  assert.equal(bare.global.ai.openaiBaseUrl, undefined);
 });
 
 test("k8s secret mode: managed Supabase config validates against the chart schema", () => {

@@ -56,9 +56,6 @@ export function buildDeploymentSecrets(
     put("SUPABASE_SECRET_KEY", signSupabaseJwt("service_role", jwt));
     put("JWT_SECRET", jwt);
   }
-  if (config.features.ai.enabled) {
-    put("OPENAI_API_KEY", config.features.ai.openaiApiKey);
-  }
   if (config.features.sso.enabled) {
     put("SSO_CLIENT_ID", config.features.sso.clientId);
     put("SSO_CLIENT_SECRET", config.features.sso.clientSecret);

@@ -20,7 +20,6 @@ import { CloudProvider, KafkaPreset } from "../types/index.js";
 function stepState(overrides: Partial<WizardStepState> = {}): WizardStepState {
   return {
     databaseType: "self-hosted",
-    aiEnabled: false,
     ssoEnabled: false,
     clickStackEnabled: true,
     metricsExportEnabled: false,
@@ -77,7 +76,7 @@ test("configure sections are the active steps minus cloud and review", () => {
 
   // Conditional sections track the same visibility rules as the wizard.
   const withFeatureConfig = getConfigureSections(
-    stepState({ databaseType: "supabase-cloud", aiEnabled: true }),
+    stepState({ databaseType: "supabase-cloud", ssoEnabled: true }),
   );
   assert.equal(withFeatureConfig.includes("database-creds"), false);
   assert.equal(withFeatureConfig.includes("feature-config"), true);
@@ -86,7 +85,6 @@ test("configure sections are the active steps minus cloud and review", () => {
 
 test("feature-config appears for each enabling flag", () => {
   const flags: Partial<WizardStepState>[] = [
-    { aiEnabled: true },
     { ssoEnabled: true },
     { clickStackEnabled: false, metricsExportEnabled: true },
     { clickStackEnabled: false, tracingEnabled: true },
@@ -304,7 +302,6 @@ function featureState(
 ): FeatureConfigFlowState {
   return {
     needs: {
-      ai: false,
       sso: false,
       monitoring: false,
       logging: false,
@@ -330,13 +327,6 @@ function featureState(
 }
 
 const needsNone = featureState().needs;
-
-test("AI collects the API key and optional base URL in one consolidated field", () => {
-  const order = featureConfigFieldOrder(
-    featureState({ needs: { ...needsNone, ai: true } }),
-  );
-  assert.deepEqual(order, ["openai-config"]);
-});
 
 test("google SSO skips the provider URL prompt", () => {
   const order = featureConfigFieldOrder(
@@ -510,11 +500,10 @@ test("tracing destinations expose their own credential prompts", () => {
   );
 });
 
-test("sections run in AI, SSO, monitoring, logging, tracing, app-logs, valkey, emails order", () => {
+test("sections run in SSO, monitoring, logging, tracing, app-logs, valkey, emails order", () => {
   const order = featureConfigFieldOrder(
     featureState({
       needs: {
-        ai: true,
         sso: true,
         monitoring: true,
         logging: true,
@@ -530,7 +519,6 @@ test("sections run in AI, SSO, monitoring, logging, tracing, app-logs, valkey, e
     }),
   );
   const anchors = [
-    "openai-config",
     "sso-provider",
     "monitoring-destination",
     "logging-sink",

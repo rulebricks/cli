@@ -23,7 +23,6 @@ export type WizardStepId = (typeof WIZARD_STEP_ORDER)[number];
 
 export interface WizardStepState {
   databaseType: string | null;
-  aiEnabled: boolean;
   ssoEnabled: boolean;
   clickStackEnabled: boolean;
   metricsExportEnabled: boolean;
@@ -55,7 +54,6 @@ export function getActiveWizardSteps(
   steps.push("features");
 
   if (
-    state.aiEnabled ||
     state.ssoEnabled ||
     // Metrics export needs its destination configured regardless of
     // ClickStack (remote_write coexists with built-in observability);

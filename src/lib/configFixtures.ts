@@ -82,7 +82,6 @@ interface MatrixOptions {
   storage?: StorageConfig;
   externalServices?: DeploymentConfig["externalServices"];
   backupEnabled?: boolean;
-  ai?: boolean;
   sso?: boolean;
   customEmails?: boolean;
   clickStackEnabled?: boolean;
@@ -175,13 +174,6 @@ function build(options: MatrixOptions): DeploymentConfig {
           }
         : undefined,
     features: {
-      ai: options.ai
-        ? {
-            enabled: true,
-            openaiApiKey: "sk-test-openai-key",
-            openaiBaseUrl: "https://openai-gw.example.com/v1",
-          }
-        : { enabled: false },
       sso: options.sso
         ? {
             enabled: true,
@@ -235,7 +227,6 @@ export function buildConfigMatrix(): { name: string; config: DeploymentConfig }[
       name: "aws-all-features",
       provider: "aws",
       backupEnabled: true,
-      ai: true,
       sso: true,
       customEmails: true,
     },
@@ -611,7 +602,6 @@ export function buildConfigMatrix(): { name: string; config: DeploymentConfig }[
       name: "everything-external",
       provider: "aws",
       backupEnabled: true,
-      ai: true,
       sso: true,
       externalServices: {
         redis: {

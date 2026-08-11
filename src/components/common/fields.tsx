@@ -126,9 +126,8 @@ export interface TextFieldProps {
   placeholder?: string;
   mask?: boolean;
   /**
-   * When false, the input renders but ignores keystrokes. Lets a field show
-   * multiple inputs on one screen with only one active (e.g. the consolidated
-   * OpenAI key + base URL prompt).
+   * When false, the input renders but ignores keystrokes. Lets a screen show
+   * an input alongside other focusable elements with only one active.
    */
   focus?: boolean;
 }

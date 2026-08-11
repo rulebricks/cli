@@ -25,9 +25,6 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
 
   const toggle = (id: string) => {
     switch (id) {
-      case "ai":
-        dispatch({ type: "SET_AI_ENABLED", enabled: !state.aiEnabled });
-        break;
       case "sso":
         dispatch({ type: "SET_SSO_ENABLED", enabled: !state.ssoEnabled });
         break;
@@ -58,10 +55,7 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
   };
 
   const anyEnabled =
-    state.aiEnabled ||
-    state.ssoEnabled ||
-    state.valkeyAdminEnabled ||
-    state.customEmailsEnabled;
+    state.ssoEnabled || state.valkeyAdminEnabled || state.customEmailsEnabled;
 
   return (
     <BorderBox
@@ -71,12 +65,6 @@ export function FeaturesStep({ onComplete, onBack }: FeaturesStepProps) {
       <CheckboxList
         label="Select features to enable"
         items={[
-          {
-            key: "ai",
-            label: "AI Features",
-            hint: "Enable AI-powered rule generation (requires OpenAI API key)",
-            checked: state.aiEnabled,
-          },
           {
             key: "sso",
             label: "Single Sign-On",

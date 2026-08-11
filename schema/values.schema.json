@@ -207,18 +207,6 @@
             }
           }
         },
-        "ai": {
-          "type": "object",
-          "description": "AI Features Configuration",
-          "properties": {
-            "enabled": { "type": "boolean" },
-            "openaiApiKey": { "type": "string" },
-            "openaiBaseUrl": {
-              "type": "string",
-              "description": "Optional OpenAI-compatible API base URL (defaults to OpenAI's public API when empty)"
-            }
-          }
-        },
         "secrets": {
           "type": "object",
           "description": "Secrets Configuration",
@@ -604,6 +592,27 @@
               }
             },
             "replicas": { "type": "integer", "minimum": 0 },
+            "limits": {
+              "type": "object",
+              "description": "Payload & deadline envelope rendered into HPS/worker env vars. Sized in lockstep with the Kafka message caps (kafka.config / kafka.topics), the Traefik entrypoint timeouts, and the HPS memory limit + heap.",
+              "properties": {
+                "bodyLimitBytes": { "type": "integer", "minimum": 1024, "description": "Max HTTP request body on HPS execution endpoints (HTTP_BODY_LIMIT_BYTES)." },
+                "rpcTimeoutMs": { "type": "integer", "minimum": 1000, "description": "Whole-request Kafka execution deadline in ms (RPC_TIMEOUT_MS). Traefik graceTimeOut and terminationGracePeriodSeconds must stay above it." },
+                "requestTimeoutMs": { "type": "integer", "minimum": 1000, "description": "Deadline for receiving one request's entire body in ms (HTTP_REQUEST_TIMEOUT_MS)." },
+                "itemMaxBytes": { "type": "integer", "minimum": 1024, "description": "Serialized cap per single payload inside a bulk array (ITEM_MAX_BYTES); must fit the Kafka topic max.message.bytes with envelope headroom." },
+                "contextBatchBodyLimitBytes": { "type": "integer", "minimum": 1024, "description": "Context batch NDJSON body cap (CONTEXT_BATCH_BODY_LIMIT_BYTES)." },
+                "contextBatchMaxItems": { "type": "integer", "minimum": 1, "description": "Max records per context batch request (CONTEXT_BATCH_MAX_ITEMS)." },
+                "largeBodyThresholdBytes": { "type": "integer", "description": "Admission-gate threshold (LARGE_BODY_THRESHOLD_BYTES); <= 0 disables the gate." },
+                "largeBodyMaxConcurrent": { "type": "integer", "minimum": 1, "description": "Concurrent above-threshold requests per HPS replica before shedding with 429 (LARGE_BODY_MAX_CONCURRENT)." },
+                "chunkMaxChunks": { "type": "integer", "minimum": 1, "description": "Max chunk fan-out per bulk request (CHUNK_MAX_CHUNKS); align with workers.solutionPartitions for full-fleet spread." },
+                "chunkHardMaxBytes": { "type": "integer", "minimum": 1024, "description": "Broker-safe per-chunk input cap (CHUNK_HARD_MAX_BYTES); keep well under the Kafka max.message.bytes to preserve response-amplification headroom." },
+                "responseFetchMaxBytes": { "type": "integer", "minimum": 1024, "description": "HPS response-consumer per-partition fetch ceiling (RESPONSE_MAX_BYTES_PER_PARTITION); >= 2x max.message.bytes recommended." },
+                "workerFetchMaxBytes": { "type": "integer", "minimum": 1024, "description": "Worker request-consumer per-partition fetch ceiling (WORKER_MAX_BYTES_PER_PARTITION); >= 2x max.message.bytes recommended." },
+                "shutdownDrainMs": { "type": "integer", "minimum": 0, "description": "How long a stopping HPS pod keeps consuming so in-flight RPCs resolve (KAFKA_SHUTDOWN_DRAIN_MS); should cover rpcTimeoutMs." },
+                "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1, "description": "HPS pod terminationGracePeriodSeconds; must exceed shutdownDrainMs plus shutdown overhead." },
+                "nodeHeapMb": { "type": "integer", "minimum": 128, "description": "Node.js --max-old-space-size for the HPS server in MB (rendered as NODE_OPTIONS); size to ~85% of the container memory limit. Unset = image default." }
+              }
+            },
             "keda": {
               "type": "object",
               "description": "Gather-plane autoscaler: scales HPS on response-topic lag. Conservative one-pod-at-a-time behavior because HPS scale events rebalance the response consumer group and can time out in-flight requests.",
@@ -1201,6 +1210,25 @@
           "type": "object",
           "properties": {
             "memoryLimitMiB": { "type": "integer", "minimum": 64 },
+            "filters": {
+              "type": "object",
+              "description": "Gateway-side telemetry noise controls. Unanchored Go regexes; must not contain double quotes; empty string disables a rule.",
+              "properties": {
+                "traces": {
+                  "type": "object",
+                  "properties": {
+                    "httpPathAllowRegex": { "type": "string", "pattern": "^[^\"]*$" },
+                    "httpPathDenyRegex": { "type": "string", "pattern": "^[^\"]*$" }
+                  }
+                },
+                "logs": {
+                  "type": "object",
+                  "properties": {
+                    "bodyDenyRegex": { "type": "string", "pattern": "^[^\"]*$" }
+                  }
+                }
+              }
+            },
             "gateway": {
               "type": "object",
               "properties": {
@@ -1953,65 +1981,6 @@
                 }
               }
             ]
-          }
-        ]
-      }
-    },
-    {
-      "title": "AI Feature Validation",
-      "description": "If AI is enabled, OpenAI API Key is required and must not be empty.",
-      "if": {
-        "properties": {
-          "global": {
-            "type": "object",
-            "properties": {
-              "ai": {
-                "type": "object",
-                "properties": {
-                  "enabled": { "const": true }
-                },
-                "required": ["enabled"]
-              }
-            },
-            "required": ["ai"]
-          }
-        },
-        "required": ["global"]
-      },
-      "then": {
-        "anyOf": [
-          {
-            "properties": {
-              "global": {
-                "type": "object",
-                "properties": {
-                  "secrets": {
-                    "type": "object",
-                    "required": ["secretRef"],
-                    "properties": {
-                      "secretRef": { "type": "string", "minLength": 1 }
-                    }
-                  }
-                },
-                "required": ["secrets"]
-              }
-            }
-          },
-          {
-            "properties": {
-              "global": {
-                "type": "object",
-                "properties": {
-                  "ai": {
-                    "type": "object",
-                    "required": ["openaiApiKey"],
-                    "properties": {
-                      "openaiApiKey": { "type": "string", "minLength": 1 }
-                    }
-                  }
-                }
-              }
-            }
           }
         ]
       }

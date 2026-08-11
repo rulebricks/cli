@@ -374,10 +374,6 @@ export function ReviewStep({
         
         <SectionHeader title="Features" />
         <Box>
-          <Text color={state.aiEnabled ? colors.success : colors.muted}>
-            {state.aiEnabled ? '✓' : '○'} AI
-          </Text>
-          <Text>  </Text>
           <Text color={state.ssoEnabled ? colors.success : colors.muted}>
             {state.ssoEnabled ? '✓' : '○'} SSO
           </Text>

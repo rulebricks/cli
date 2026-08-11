@@ -136,11 +136,6 @@ export interface WizardState {
   secretsByoStoreName: string;
   secretsByoStoreKind: "SecretStore" | "ClusterSecretStore";
 
-  // Features - AI
-  aiEnabled: boolean;
-  openaiApiKey: string;
-  openaiBaseUrl: string;
-
   // Features - SSO
   ssoEnabled: boolean;
   ssoProvider: SSOProvider | null;
@@ -353,9 +348,6 @@ type WizardAction =
       eligibleMemoryGi?: number;
       totalPersistentStorageGi?: number;
     }
-  | { type: "SET_AI_ENABLED"; enabled: boolean }
-  | { type: "SET_OPENAI_KEY"; key: string }
-  | { type: "SET_OPENAI_BASE_URL"; url: string }
   | { type: "SET_SSO_ENABLED"; enabled: boolean }
   | {
       type: "SET_SSO_CONFIG";
@@ -642,11 +634,6 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     secretsGcpServiceAccountEmail: "",
     secretsByoStoreName: "",
     secretsByoStoreKind: "ClusterSecretStore",
-
-    // Features - AI - pre-populate from profile
-    aiEnabled: !!profile?.openaiApiKey,
-    openaiApiKey: profile?.openaiApiKey ?? "",
-    openaiBaseUrl: profile?.openaiBaseUrl ?? "",
 
     // Features - SSO - pre-populate from profile
     ssoEnabled: !!profile?.ssoProvider,
@@ -1002,9 +989,6 @@ export function collectConfigIssues(state: WizardState): string[] {
     }
   }
 
-  if (state.aiEnabled && !state.openaiApiKey) {
-    issues.push("AI is enabled but the OpenAI API key is missing.");
-  }
   if (
     !Number.isInteger(state.decisionLogRetentionDays) ||
     state.decisionLogRetentionDays < 1
@@ -1396,9 +1380,6 @@ export function configToWizardState(
     secretsByoStoreName: config.secrets?.byo?.storeName ?? "",
     secretsByoStoreKind:
       config.secrets?.byo?.storeKind ?? base.secretsByoStoreKind,
-    aiEnabled: config.features.ai.enabled,
-    openaiApiKey: config.features.ai.openaiApiKey ?? "",
-    openaiBaseUrl: config.features.ai.openaiBaseUrl ?? "",
     ssoEnabled: config.features.sso.enabled,
     ssoProvider: config.features.sso.provider ?? null,
     ssoUrl: config.features.sso.url ?? "",
@@ -1735,12 +1716,6 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
         totalPersistentStorageGi:
           action.totalPersistentStorageGi ?? state.totalPersistentStorageGi,
       };
-    case "SET_AI_ENABLED":
-      return { ...state, aiEnabled: action.enabled };
-    case "SET_OPENAI_KEY":
-      return { ...state, openaiApiKey: action.key };
-    case "SET_OPENAI_BASE_URL":
-      return { ...state, openaiBaseUrl: action.url };
     case "SET_SSO_ENABLED":
       return { ...state, ssoEnabled: action.enabled };
     case "SET_SSO_CONFIG":
@@ -2106,11 +2081,6 @@ export function WizardProvider({
         : undefined,
       externalServices,
       features: {
-        ai: {
-          enabled: state.aiEnabled,
-          openaiApiKey: state.openaiApiKey || undefined,
-          openaiBaseUrl: state.openaiBaseUrl || undefined,
-        },
         sso: {
           enabled: state.ssoEnabled,
           provider: state.ssoProvider || undefined,

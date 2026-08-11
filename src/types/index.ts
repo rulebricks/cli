@@ -1076,14 +1076,9 @@ export const DeploymentConfigSchema = z.object({
     .optional(),
 
   // Optional features
+  // Note: AI is configured in-app (Settings -> AI features), not here. Old
+  // config.yaml files with a features.ai block still parse; the key is ignored.
   features: z.object({
-    ai: z.object({
-      enabled: z.boolean(),
-      openaiApiKey: z.string().optional(),
-      // Optional OpenAI-compatible endpoint (e.g. an enterprise gateway).
-      // Empty means OpenAI's public API.
-      openaiBaseUrl: z.string().url().optional(),
-    }),
     sso: z.object({
       enabled: z.boolean(),
       provider: z
@@ -1316,8 +1311,6 @@ export const ProfileConfigSchema = z.object({
   smtpFromName: z.string().optional(),
 
   // API Keys
-  openaiApiKey: z.string().optional(),
-  openaiBaseUrl: z.string().optional(),
   licenseKey: z.string().optional(),
 
   // Preferences

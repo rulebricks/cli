@@ -396,8 +396,6 @@ export function extractProfileFromConfig(
     smtpFromName: config.smtp.fromName,
 
     // API Keys
-    openaiApiKey: config.features.ai.openaiApiKey,
-    openaiBaseUrl: config.features.ai.openaiBaseUrl,
     licenseKey: config.licenseKey,
 
     // Preferences
