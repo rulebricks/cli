@@ -201,6 +201,38 @@ export async function loadDeploymentConfig(
 }
 
 /**
+ * Renames a deployment: moves its directory (config.yaml, values.yaml, and any
+ * other files) and rewrites config.yaml with the new name. state.yaml is
+ * dropped because it describes the release deployed under the old name; the
+ * next deploy records fresh state.
+ *
+ * This only changes local files. Anything already installed in the cluster
+ * under the old release/namespace ("rulebricks-<oldName>") is not touched and
+ * keeps running until removed.
+ */
+export async function renameDeployment(
+  oldName: string,
+  newName: string,
+): Promise<void> {
+  if (oldName === newName) return;
+  if (await deploymentExists(newName)) {
+    throw new Error(
+      `A deployment named "${newName}" already exists. Choose a different name.`,
+    );
+  }
+  const newDir = getDeploymentDir(newName);
+  await fs.rename(getDeploymentDir(oldName), newDir);
+  await fs.rm(path.join(newDir, "state.yaml"), { force: true });
+
+  const configPath = path.join(newDir, "config.yaml");
+  const parsed = yaml.parse(await fs.readFile(configPath, "utf-8"));
+  if (parsed && typeof parsed === "object") {
+    parsed.name = newName;
+    await fs.writeFile(configPath, yaml.stringify(parsed), "utf-8");
+  }
+}
+
+/**
  * Clones a deployment configuration to a new name.
  * Only copies config.yaml with the new name - state is not copied.
  */

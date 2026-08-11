@@ -29,6 +29,7 @@ import {
 } from "./commands/host.js";
 import { listDeployments, deploymentExists } from "./lib/config.js";
 import { importValuesFile } from "./lib/valuesImport.js";
+import { validateDeploymentName } from "./types/index.js";
 import { DeploymentPicker } from "./components/common/DeploymentPicker.js";
 
 const require = createRequire(import.meta.url);
@@ -54,6 +55,15 @@ program
   )
   .action(async (name, options) => {
     const deploymentName = name || options.name;
+    if (deploymentName) {
+      const nameError = validateDeploymentName(deploymentName);
+      if (nameError) {
+        console.error(
+          chalk.red(`Invalid deployment name "${deploymentName}": ${nameError}`),
+        );
+        process.exit(1);
+      }
+    }
     let completion: WizardCompletion | null = null;
     // The wizard runs on the alternate screen buffer; the summary is printed
     // to the regular terminal after it restores.
@@ -291,6 +301,13 @@ program
   .argument("<source>", "Source deployment name")
   .argument("<target>", "New deployment name")
   .action(async (source, target) => {
+    const nameError = validateDeploymentName(target);
+    if (nameError) {
+      console.error(
+        chalk.red(`Invalid deployment name "${target}": ${nameError}`),
+      );
+      process.exit(1);
+    }
     const { waitUntilExit } = render(
       <CloneCommand source={source} target={target} />,
     );

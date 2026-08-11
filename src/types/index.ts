@@ -704,6 +704,8 @@ const CacheObservabilityConfigSchema = z.object({
 
 // Deployment configuration schema
 export const DeploymentConfigSchema = z.object({
+  // Deliberately laxer than validateDeploymentName (which caps new names at
+  // MAX_DEPLOYMENT_NAME_LENGTH) so configs created before the cap still load.
   name: z
     .string()
     .min(1)
@@ -1365,6 +1367,36 @@ export const MIRRORED_CHART_REPOSITORY = "rulebricks/helm/stack";
 // Legacy namespace/release name - kept for backwards compatibility with existing deployments
 export const DEFAULT_NAMESPACE = "rulebricks";
 export const LEGACY_RELEASE_NAME = "rulebricks";
+
+/**
+ * Longest deployment name that keeps every chart-derived resource name within
+ * Kubernetes limits.
+ *
+ * The Helm release and namespace are "rulebricks-<name>" (11 chars of prefix),
+ * and the chart derives child resource names from the release name. The
+ * tightest budget is the "<release>-clickhouse-retention" CronJob: Kubernetes
+ * caps CronJob names at 52 characters so the 11-character job timestamp suffix
+ * still fits, and "-clickhouse-retention" is 21 characters.
+ * 52 - 21 - 11 = 20.
+ */
+export const MAX_DEPLOYMENT_NAME_LENGTH = 20;
+
+/**
+ * Validates a deployment name for new deployments (init, rename, clone).
+ * Returns an error message, or null when the name is valid.
+ */
+export function validateDeploymentName(name: string): string | null {
+  if (!name) {
+    return "Name is required";
+  }
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(name)) {
+    return "Name must be lowercase letters, numbers, and hyphens";
+  }
+  if (name.length > MAX_DEPLOYMENT_NAME_LENGTH) {
+    return `Name must be ${MAX_DEPLOYMENT_NAME_LENGTH} characters or less (resources are named "rulebricks-<name>-…" and must fit Kubernetes name limits)`;
+  }
+  return null;
+}
 
 /**
  * Generates a deployment-specific Kubernetes namespace.

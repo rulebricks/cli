@@ -9,13 +9,18 @@ import {
   useStepLayout,
   useTheme,
 } from '../../common/index.js';
-import { DNS_PROVIDER_NAMES, CLOUD_PROVIDER_NAMES, LOGGING_SINK_INFO, isSupportedDnsProvider, KafkaPreset } from '../../../types/index.js';
+import { DNS_PROVIDER_NAMES, CLOUD_PROVIDER_NAMES, LOGGING_SINK_INFO, isSupportedDnsProvider, KafkaPreset, MAX_DEPLOYMENT_NAME_LENGTH, validateDeploymentName } from '../../../types/index.js';
 
 interface ReviewStepProps {
   onComplete: () => void;
   onApply?: () => void;
   onBack: () => void;
-  allowEditName?: boolean;
+  /**
+   * Configure mode: the deployment's saved name. Editing to a different name
+   * renames the local config, which points future deploys at a new Helm
+   * release/namespace, so a warning is shown before saving.
+   */
+  originalName?: string;
 }
 
 function kafkaPresetLabel(preset: KafkaPreset | null): string {
@@ -37,12 +42,12 @@ export function ReviewStep({
   onComplete,
   onApply,
   onBack,
-  allowEditName = true,
+  originalName,
 }: ReviewStepProps) {
   const { state, dispatch, configIssues } = useWizard();
   const { colors } = useTheme();
   const layout = useStepLayout();
-  const [editingName, setEditingName] = useState(allowEditName && !state.name);
+  const [editingName, setEditingName] = useState(!state.name);
   const [name, setName] = useState(state.name || '');
   const [error, setError] = useState<string | null>(null);
 
@@ -61,23 +66,20 @@ export function ReviewStep({
       if (state.name && issues.length === 0) {
         onApply();
       }
-    } else if (allowEditName && input === 'e') {
+    } else if (input === 'e') {
       setEditingName(true);
     }
   });
   
   const handleNameSubmit = () => {
-    if (!name) {
-      setError('Name is required');
-      return;
-    }
-    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(name)) {
-      setError('Name must be lowercase letters, numbers, and hyphens');
-      return;
-    }
-    if (name.length > 63) {
-      setError('Name must be 63 characters or less');
-      return;
+    // Keeping the saved name is always allowed, even if it predates the
+    // length cap; validation only applies when picking a new name.
+    if (!originalName || name !== originalName) {
+      const validationError = validateDeploymentName(name);
+      if (validationError) {
+        setError(validationError);
+        return;
+      }
     }
     setError(null);
     dispatch({ type: 'SET_NAME', name });
@@ -127,7 +129,8 @@ export function ReviewStep({
         <Box flexDirection="column" marginY={1}>
           <Text>Enter a name for this deployment:</Text>
           <Text color="gray" dimColor>
-            Lowercase letters, numbers, and hyphens only
+            Lowercase letters, numbers, and hyphens; at most{' '}
+            {MAX_DEPLOYMENT_NAME_LENGTH} characters
           </Text>
           <Box marginTop={1}>
             <TextInput
@@ -137,6 +140,20 @@ export function ReviewStep({
               placeholder="my-deployment"
             />
           </Box>
+          {originalName && (
+            <Box marginTop={1} flexDirection="column">
+              <Text color={colors.warning}>
+                Renaming only updates the local config: the next deploy
+                installs a fresh release in namespace rulebricks-{'<'}new name
+                {'>'}, and nothing moves or carries over.
+              </Text>
+              <Text color={colors.warning}>
+                If "{originalName}" is already deployed, run rulebricks destroy{' '}
+                {originalName} before saving the rename, or clean up its
+                namespace manually afterwards.
+              </Text>
+            </Box>
+          )}
           {error && (
             <Box marginTop={1}>
               <Text color={colors.error}>✗ {error}</Text>
@@ -190,7 +207,7 @@ export function ReviewStep({
         </Text>
       )}
       <Text color={colors.muted} dimColor>
-        {allowEditName ? 'e to edit name • ' : ''}Esc to go back
+        e to edit name • Esc to go back
       </Text>
     </Box>
   );
@@ -201,6 +218,13 @@ export function ReviewStep({
       <Box flexDirection="column">
         <SectionHeader title="Deployment" />
         <ConfigRow label="Name" value={state.name} />
+        {originalName && state.name !== originalName && (
+          <ConfigRow
+            label=""
+            value={`renamed from "${originalName}" — deploys as a new release`}
+            valueColor={colors.warning}
+          />
+        )}
         {state.version && (
           <ConfigRow label="Version" value={state.version} />
         )}

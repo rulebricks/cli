@@ -37,6 +37,7 @@ import {
   deploymentExists,
   loadHelmValues,
   loadProfile,
+  renameDeployment,
   saveHelmValues,
   updateProfile,
   extractProfileFromConfig,
@@ -48,7 +49,11 @@ import {
 import { resolveImageCatalog } from "../lib/imageCatalog.js";
 import { assertValidHelmValues } from "../lib/validateValues.js";
 import { secretModeForConfig } from "../lib/deploySequence.js";
-import { ProfileConfig } from "../types/index.js";
+import {
+  getNamespace,
+  getReleaseName,
+  ProfileConfig,
+} from "../types/index.js";
 import {
   getActiveWizardSteps,
   getConfigureSections,
@@ -65,6 +70,8 @@ export interface WizardCompletion {
   domain: string;
   /** Configure mode only: immediately deploy the saved configuration. */
   applyAfterSave?: boolean;
+  /** Configure mode only: previous name when the deployment was renamed. */
+  renamedFrom?: string;
 }
 
 /**
@@ -77,6 +84,7 @@ export function printWizardCompletion(completion: WizardCompletion): void {
   const accent = chalk.hex(colors.accent);
   const muted = chalk.hex(colors.muted);
   const success = chalk.hex(colors.success);
+  const warning = chalk.hex(colors.warning);
   const deployCmd = accent(`rulebricks deploy ${completion.name}`);
 
   const lines = [
@@ -93,6 +101,25 @@ export function printWizardCompletion(completion: WizardCompletion): void {
     muted(
       `  Configuration stored in ~/.rulebricks/deployments/${completion.name}/`,
     ),
+    ...(completion.renamedFrom
+      ? [
+          "",
+          warning(`  ⚠ Renamed from "${completion.renamedFrom}".`),
+          warning(
+            `    The next deploy installs a fresh release in namespace ${getNamespace(completion.name)};`,
+          ),
+          warning(
+            `    nothing carries over from the old deployment. If "${completion.renamedFrom}" was`,
+          ),
+          warning("    already deployed, remove it from the cluster manually:"),
+          warning(
+            `      helm uninstall ${getReleaseName(completion.renamedFrom)} -n ${getNamespace(completion.renamedFrom)}`,
+          ),
+          warning(
+            `      kubectl delete namespace ${getNamespace(completion.renamedFrom)}`,
+          ),
+        ]
+      : []),
     "",
     "  Next steps:",
     ...(completion.mode === "configure"
@@ -189,6 +216,11 @@ function WizardStepController({
   const { state, toConfig, configIssues } = useWizard();
   const { exit } = useApp();
   const { colors } = useTheme();
+  // Saved deployment name at mount (configure mode) so a rename via the
+  // review step can be detected and applied on save.
+  const originalNameRef = useRef<string | null>(
+    mode === "configure" ? state.name || null : null,
+  );
   const [currentStep, setCurrentStep] = useState<ControllerStep>(
     mode === "configure" ? "menu" : "cloud",
   );
@@ -326,24 +358,34 @@ function WizardStepController({
     savingRef.current = true;
     setSaving(true);
     try {
-      if (await deploymentExists(config.name)) {
-        if (mode === "configure") {
-          await saveConfigureValues(config);
-          await saveDeploymentConfig(config);
-          const profileData = extractProfileFromConfig(config);
-          await updateProfile(profileData);
-          // The summary is printed to the regular buffer by the command
-          // action once the full-screen UI has been restored.
-          onSaveComplete?.({
-            mode: "configure",
-            name: config.name,
-            domain: config.domain,
-            applyAfterSave,
-          });
-          exit();
-          return;
+      if (mode === "configure") {
+        const originalName = originalNameRef.current ?? config.name;
+        const renamedFrom =
+          originalName !== config.name ? originalName : undefined;
+        if (renamedFrom) {
+          // Moves the local config directory (values.yaml included) and
+          // throws if the target name is taken. Cluster resources under the
+          // old release name are intentionally left alone.
+          await renameDeployment(renamedFrom, config.name);
         }
+        await saveConfigureValues(config);
+        await saveDeploymentConfig(config);
+        const profileData = extractProfileFromConfig(config);
+        await updateProfile(profileData);
+        // The summary is printed to the regular buffer by the command
+        // action once the full-screen UI has been restored.
+        onSaveComplete?.({
+          mode: "configure",
+          name: config.name,
+          domain: config.domain,
+          applyAfterSave,
+          renamedFrom,
+        });
+        exit();
+        return;
+      }
 
+      if (await deploymentExists(config.name)) {
         setError(
           `Deployment "${config.name}" already exists. Choose a different name.`,
         );
@@ -494,7 +536,11 @@ function WizardStepController({
                 : undefined
             }
             onBack={goBack}
-            allowEditName={mode === "create"}
+            originalName={
+              mode === "configure"
+                ? (originalNameRef.current ?? undefined)
+                : undefined
+            }
           />
         );
       default:
