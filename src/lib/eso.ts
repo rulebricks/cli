@@ -5,8 +5,10 @@
 // ESO syncs them into the cluster:
 //
 //   1. seedCloudSecrets       - write one JSON object per Secret into the
-//                               cloud secrets manager (create-if-absent, so
-//                               client-rotated values are never clobbered).
+//                               cloud secrets manager (create-if-absent plus
+//                               add-missing-keys, so client-rotated values
+//                               are never clobbered but newly-enabled
+//                               features still get their keys).
 //   2. ensureEsoOperator      - install a namespace-scoped ESO when none is
 //                               serving (or when a prior destroy stranded
 //                               failurePolicy:Fail webhooks); respect a
@@ -39,6 +41,9 @@ import {
 import { buildDeploymentSecrets } from "./secrets.js";
 import { deploymentSecretNames } from "./helmValues.js";
 import {
+  readAwsSecretsManagerSecret,
+  readAzureKeyVaultSecret,
+  readGcpSecretManagerSecret,
   writeAwsSecretsManagerSecret,
   writeAzureKeyVaultSecret,
   writeGcpSecretManagerSecret,
@@ -139,10 +144,74 @@ export interface SeedSummary {
 }
 
 /**
+ * Merge desired keys into an existing seeded JSON entry: existing values
+ * always win (client-rotated values are never clobbered); only keys absent
+ * from the existing object are added. Returns the merged JSON when there is
+ * something to add, and null when the entry is already complete or its value
+ * is not a JSON object (hand-managed data is left untouched).
+ */
+export function mergeMissingSecretKeys(
+  existingJson: string,
+  desiredJson: string,
+): string | null {
+  let existing: unknown;
+  try {
+    existing = JSON.parse(existingJson);
+  } catch {
+    return null;
+  }
+  if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+    return null;
+  }
+  const target = existing as Record<string, unknown>;
+  const desired = JSON.parse(desiredJson) as Record<string, string>;
+  let added = false;
+  for (const [key, value] of Object.entries(desired)) {
+    if (!(key in target)) {
+      target[key] = value;
+      added = true;
+    }
+  }
+  return added ? JSON.stringify(target) : null;
+}
+
+/**
+ * Read one seeded provider entry's current value; null means missing or
+ * unreadable (fall back to plain create-if-absent seeding).
+ */
+async function readSeededSecret(
+  backend: "aws-secrets-manager" | "azure-key-vault" | "gcp-secret-manager",
+  config: DeploymentConfig,
+  remoteKey: string,
+): Promise<string | null> {
+  switch (backend) {
+    case "aws-secrets-manager": {
+      const region = config.infrastructure.region;
+      if (!region) return null;
+      return readAwsSecretsManagerSecret({ name: remoteKey, region });
+    }
+    case "azure-key-vault": {
+      const vaultName = config.secrets?.azure?.vaultName;
+      if (!vaultName) return null;
+      return readAzureKeyVaultSecret({ vaultName, name: remoteKey });
+    }
+    case "gcp-secret-manager": {
+      const projectId = config.infrastructure.gcpProjectId;
+      if (!projectId) return null;
+      return readGcpSecretManagerSecret({ projectId, name: remoteKey });
+    }
+  }
+}
+
+/**
  * Seed the cloud secrets manager with the deployment's secrets.
- * create-if-absent unless overwrite; byo-secret-store seeds nothing.
- * Write denials do not throw: the entries may already be pre-seeded by a
- * platform team, and waitForExternalSecrets is the arbiter of missing ones.
+ * Default mode creates missing entries and adds missing keys to existing
+ * entries (existing values always win, so client-rotated values are never
+ * clobbered - enabling a feature like AI after the first deploy adds only the
+ * new key); overwrite replaces entries wholesale. byo-secret-store seeds
+ * nothing. Write denials do not throw: the entries may already be pre-seeded
+ * by a platform team, and waitForExternalSecrets is the arbiter of missing
+ * ones.
  */
 export async function seedCloudSecrets(
   config: DeploymentConfig,
@@ -160,6 +229,30 @@ export async function seedCloudSecrets(
   }
 
   for (const entry of esoSecretEntries(config)) {
+    let value = entry.json;
+    let overwrite = options.overwrite;
+
+    // A feature enabled after the first deploy (e.g. AI) needs keys the
+    // already-seeded entry lacks; the chart then references a Secret key that
+    // ESO can never materialize (CreateContainerConfigError). Heal that seam
+    // by writing only the missing keys into the existing entry.
+    if (!overwrite) {
+      const existingValue = await readSeededSecret(
+        backend,
+        config,
+        entry.remoteKey,
+      );
+      if (existingValue !== null) {
+        const merged = mergeMissingSecretKeys(existingValue, entry.json);
+        if (merged === null) {
+          summary.skipped.push(entry.remoteKey);
+          continue;
+        }
+        value = merged;
+        overwrite = true;
+      }
+    }
+
     let result;
     switch (backend) {
       case "aws-secrets-manager": {
@@ -171,9 +264,9 @@ export async function seedCloudSecrets(
         }
         result = await writeAwsSecretsManagerSecret({
           name: entry.remoteKey,
-          value: entry.json,
+          value,
           region,
-          overwrite: options.overwrite,
+          overwrite,
         });
         break;
       }
@@ -187,8 +280,8 @@ export async function seedCloudSecrets(
         result = await writeAzureKeyVaultSecret({
           vaultName,
           name: entry.remoteKey,
-          value: entry.json,
-          overwrite: options.overwrite,
+          value,
+          overwrite,
         });
         break;
       }
@@ -202,8 +295,8 @@ export async function seedCloudSecrets(
         result = await writeGcpSecretManagerSecret({
           projectId,
           name: entry.remoteKey,
-          value: entry.json,
-          overwrite: options.overwrite,
+          value,
+          overwrite,
         });
         break;
       }

@@ -6,6 +6,7 @@ import {
   defaultSecretsPrefix,
   formatSeedDeniedHint,
   isEsoBackend,
+  mergeMissingSecretKeys,
 } from "./eso.js";
 import { buildDeploymentSecrets } from "./secrets.js";
 import { deploymentSecretNames } from "./helmValues.js";
@@ -203,4 +204,44 @@ test("byo-secret-store references the existing store and creates none", () => {
     assert.equal(es.spec.secretStoreRef.name, "corp-vault");
     assert.equal(es.spec.secretStoreRef.kind, "ClusterSecretStore");
   }
+});
+
+test("mergeMissingSecretKeys adds only absent keys, existing values win", () => {
+  // The feature-enabled-after-first-seed seam: the entry was seeded without
+  // OPENAI_API_KEY (AI off), then AI is enabled. Only the new key is added.
+  const existing = JSON.stringify({
+    LICENSE_KEY: "rotated-by-client",
+    EMAIL: "ops@example.com",
+  });
+  const desired = JSON.stringify({
+    LICENSE_KEY: "from-config",
+    EMAIL: "ops@example.com",
+    OPENAI_API_KEY: "sk-new",
+  });
+
+  const merged = mergeMissingSecretKeys(existing, desired);
+  assert.ok(merged);
+  assert.deepEqual(JSON.parse(merged!), {
+    LICENSE_KEY: "rotated-by-client", // never clobbered
+    EMAIL: "ops@example.com",
+    OPENAI_API_KEY: "sk-new",
+  });
+});
+
+test("mergeMissingSecretKeys is a no-op when the entry is complete", () => {
+  const existing = JSON.stringify({ A: "rotated", B: "2" });
+  const desired = JSON.stringify({ A: "1", B: "2" });
+  assert.equal(mergeMissingSecretKeys(existing, desired), null);
+
+  // A superset entry (keys beyond the desired set) is also left alone.
+  const superset = JSON.stringify({ A: "1", B: "2", EXTRA: "keep" });
+  assert.equal(mergeMissingSecretKeys(superset, desired), null);
+});
+
+test("mergeMissingSecretKeys never touches hand-managed non-JSON entries", () => {
+  const desired = JSON.stringify({ A: "1" });
+  assert.equal(mergeMissingSecretKeys("not-json", desired), null);
+  assert.equal(mergeMissingSecretKeys('"a plain string"', desired), null);
+  assert.equal(mergeMissingSecretKeys('["array"]', desired), null);
+  assert.equal(mergeMissingSecretKeys("null", desired), null);
 });

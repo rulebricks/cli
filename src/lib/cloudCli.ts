@@ -4864,7 +4864,8 @@ export async function getGcpRedisAuthString(
 // Secret VALUES never appear in a shell string or process argv: writes run
 // through execa (no shell) and stream the value over stdin. The approval
 // prompt shows a redacted command. create-if-absent by default so values a
-// client rotated in their platform are never clobbered; overwrite=true forces
+// client rotated in their platform are never clobbered (seedCloudSecrets
+// merges newly-required keys into existing entries); overwrite=true forces
 // an update (deploy --sync-secrets).
 // ============================================================================
 
@@ -4907,6 +4908,72 @@ async function approvedExeca(
       return { denied: true };
     }
     throw error;
+  }
+}
+
+/**
+ * Read one seeded AWS Secrets Manager entry's current value. Returns null when
+ * the entry does not exist or cannot be read; callers fall back to plain
+ * create-if-absent seeding.
+ */
+export async function readAwsSecretsManagerSecret(options: {
+  name: string;
+  region: string;
+}): Promise<string | null> {
+  try {
+    const result = await execCommand(
+      `aws secretsmanager get-secret-value --secret-id "${options.name}" --region ${options.region} --query SecretString --output text`,
+      { intent: "Check secrets manager entry", provider: "aws" },
+    );
+    const raw = result.stdout.trim();
+    if (!raw || raw === "None" || result.stderr) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read one seeded Azure Key Vault entry's current value (see
+ * readAwsSecretsManagerSecret for the null contract).
+ */
+export async function readAzureKeyVaultSecret(options: {
+  vaultName: string;
+  name: string;
+}): Promise<string | null> {
+  try {
+    // JSON output round-trips values with tabs/newlines that tsv would mangle.
+    const result = await execCommand(
+      `az keyvault secret show --vault-name ${options.vaultName} --name ${options.name} --query value --output json`,
+      { intent: "Check Key Vault entry", provider: "azure" },
+    );
+    const raw = result.stdout.trim();
+    if (!raw || result.stderr) return null;
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read one seeded GCP Secret Manager entry's current value (see
+ * readAwsSecretsManagerSecret for the null contract).
+ */
+export async function readGcpSecretManagerSecret(options: {
+  projectId: string;
+  name: string;
+}): Promise<string | null> {
+  try {
+    const result = await execCommand(
+      `gcloud secrets versions access latest --secret ${options.name} --project ${options.projectId}`,
+      { intent: "Check Secret Manager entry", provider: "gcp" },
+    );
+    const raw = result.stdout.trim();
+    if (!raw || result.stderr) return null;
+    return raw;
+  } catch {
+    return null;
   }
 }
 

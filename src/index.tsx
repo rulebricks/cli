@@ -89,7 +89,7 @@ program
   )
   .option(
     "--sync-secrets",
-    "Overwrite the secrets manager entries with this config's values (default: create missing entries only, preserving rotated values)",
+    "Overwrite the secrets manager entries with this config's values (default: create missing entries and add missing keys, preserving existing values)",
   )
   .action(async (name, options) => {
     const deploymentName = name || (await selectDeployment("deploy"));
