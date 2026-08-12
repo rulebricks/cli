@@ -39,13 +39,13 @@ interface SMTPStepProps {
 
 const PROVIDER_ITEMS = [
   { label: "AWS SES", value: "aws-ses" },
-  { label: "Azure Communication Services", value: "azure-acs" },
+  { label: "Azure Communication Services (SMTP)", value: "azure-acs" },
   // API-key alternative for ACS tenants without Entra SMTP credentials:
   // the chart runs an in-cluster SMTP relay that forwards to the ACS REST
   // API using the resource's connection string. Never auto-recommended -
   // the Entra SMTP flow above stays the Azure default.
   {
-    label: "Azure Communication Services - API key",
+    label: "Azure Communication Services (API key)",
     value: "azure-acs-api",
   },
   { label: "SendGrid", value: "sendgrid" },
@@ -112,14 +112,27 @@ export function SMTPStep({
       ? detectedProvider
       : (nativeEmailProvider ?? detectedProvider)) ?? "",
   );
+  // Both ACS options sort as one family so the API-key variant stays next to
+  // its recommended sibling instead of stranded below the other providers.
+  const providerFamily = (value: string) =>
+    value.startsWith("azure-acs") ? "azure-acs" : value;
+  const nativeFamily = nativeEmailProvider
+    ? providerFamily(nativeEmailProvider)
+    : null;
   const providerItems = PROVIDER_ITEMS.map((item) =>
     item.value === nativeEmailProvider
-      ? { ...item, label: `${item.label} (recommended)` }
+      ? {
+          ...item,
+          // Fold into an existing parenthetical: "... (SMTP, recommended)".
+          label: item.label.endsWith(")")
+            ? `${item.label.slice(0, -1)}, recommended)`
+            : `${item.label} (recommended)`,
+        }
       : item,
   ).sort(
     (a, b) =>
-      Number(b.value === nativeEmailProvider) -
-      Number(a.value === nativeEmailProvider),
+      Number(providerFamily(b.value) === nativeFamily) -
+      Number(providerFamily(a.value) === nativeFamily),
   );
   const [host, setHost] = useState(state.smtpHost || "");
   const [port, setPort] = useState(state.smtpPort?.toString() || "587");
