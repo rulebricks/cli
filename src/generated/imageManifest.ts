@@ -221,6 +221,10 @@ export const BUNDLED_IMAGE_MANIFEST: {
       "tag": "0.0.10-r1"
     },
     {
+      "name": "smtp-acs-bridge",
+      "tag": "1.4.0-r2"
+    },
+    {
       "name": "hyperdx",
       "tag": "2.31.0"
     },

@@ -44,6 +44,13 @@ export function buildDeploymentSecrets(
   put("EMAIL", config.adminEmail);
   put("SMTP_USER", config.smtp?.user);
   put("SMTP_PASS", config.smtp?.pass);
+  // ACS API-key relay mode runs SMTP credential-less, but the app deployment
+  // mounts SMTP_USER/SMTP_PASS from this secret unconditionally - the keys
+  // must exist (empty) or the pod fails with CreateContainerConfigError.
+  if (config.smtp?.acsApi) {
+    app.SMTP_USER = config.smtp.user ?? "";
+    app.SMTP_PASS = config.smtp.pass ?? "";
+  }
   if (config.database.type === "supabase-cloud") {
     put("SUPABASE_ANON_KEY", config.database.supabaseAnonKey);
     put("SUPABASE_SERVICE_KEY", config.database.supabaseServiceKey);
@@ -119,8 +126,14 @@ export function buildDeploymentSecrets(
       name: names.realtime,
       stringData: { SECRET_KEY_BASE: rt.secretKeyBase, DB_ENC_KEY: rt.dbEncKey },
     });
-    // Supabase auth (GoTrue) SMTP, when configured.
-    if (config.smtp?.user || config.smtp?.pass) {
+    // Supabase auth (GoTrue) SMTP. Also created in the ACS API-key relay
+    // mode with EMPTY username/password: existing deployments already have
+    // this Secret owned by the CLI/ESO, and dropping the secretRef would
+    // make the subchart render its own Secret under the SAME name - a helm
+    // ownership conflict on upgrade (plus a stale ExternalSecret re-syncing
+    // the old credentials over it). Keeping the seam preserves ownership;
+    // GoTrue skips SMTP AUTH when the mounted username is empty.
+    if (config.smtp?.user || config.smtp?.pass || config.smtp?.acsApi) {
       out.push({
         name: names.smtp,
         stringData: {
@@ -129,6 +142,17 @@ export function buildDeploymentSecrets(
         },
       });
     }
+  }
+
+  // ACS API-key mode: the in-cluster SMTP relay's connection string
+  // (referenced by the generated values as smtpRelay.existingSecret).
+  if (config.smtp?.acsApi?.connectionString) {
+    out.push({
+      name: names.smtpRelay,
+      stringData: {
+        "connection-string": config.smtp.acsApi.connectionString,
+      },
+    });
   }
 
   return out;

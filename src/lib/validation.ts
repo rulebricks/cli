@@ -14,6 +14,24 @@ export function isValidEmail(email: string): boolean {
 }
 
 /**
+ * Validates an Azure Communication Services connection string
+ * ("endpoint=https://<resource>.communication.azure.com/;accesskey=<base64>").
+ * Mirrors the smtp-acs-bridge relay's parser: key=value pairs split on ";",
+ * order-independent, requiring an https endpoint and a non-empty accesskey.
+ */
+export function isValidAcsConnectionString(connectionString: string): boolean {
+  const pairs = new Map<string, string>();
+  for (const part of connectionString.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq <= 0) continue;
+    pairs.set(part.slice(0, eq).trim().toLowerCase(), part.slice(eq + 1).trim());
+  }
+  const endpoint = pairs.get('endpoint') ?? '';
+  const accessKey = pairs.get('accesskey') ?? '';
+  return /^https:\/\/[^\s;]+$/i.test(endpoint) && accessKey.length > 0;
+}
+
+/**
  * Extracts the base domain from a full domain name
  * e.g., "rulebricks.example.com" -> "example.com"
  */

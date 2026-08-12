@@ -84,6 +84,9 @@ export interface WizardState {
   smtpAzureCommunicationServiceId: string;
   smtpAzureEntraApplicationId: string;
   smtpAzureTenantId: string;
+  // ACS API-key mode (in-cluster SMTP relay); non-empty selects the
+  // azure-acs-api provider and allows empty smtpUser/smtpPass.
+  smtpAzureAcsConnectionString: string;
 
   // Database
   databaseType: DatabaseType | null;
@@ -318,6 +321,7 @@ type WizardAction =
           | "smtpAzureCommunicationServiceId"
           | "smtpAzureEntraApplicationId"
           | "smtpAzureTenantId"
+          | "smtpAzureAcsConnectionString"
         >
       >;
     }
@@ -580,6 +584,7 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     smtpAzureCommunicationServiceId: "",
     smtpAzureEntraApplicationId: "",
     smtpAzureTenantId: "",
+    smtpAzureAcsConnectionString: "",
 
     // Database - pre-populate from profile
     databaseType: profile?.databaseType ?? null,
@@ -965,7 +970,18 @@ export function collectConfigIssues(state: WizardState): string[] {
   if (!state.adminEmail) issues.push("Admin email is required.");
   if (!state.licenseKey) issues.push("License key is required.");
 
-  if (!state.smtpHost || !state.smtpUser || !state.smtpPass || !state.smtpFrom) {
+  if (state.smtpAzureAcsConnectionString) {
+    // ACS API-key relay mode: mail rides the in-cluster relay with no SMTP
+    // credentials; only the destination and sender identity are needed.
+    if (!state.smtpHost || !state.smtpFrom) {
+      issues.push("SMTP host and from address are required.");
+    }
+  } else if (
+    !state.smtpHost ||
+    !state.smtpUser ||
+    !state.smtpPass ||
+    !state.smtpFrom
+  ) {
     issues.push("SMTP host, user, password, and from address are required.");
   }
 
@@ -1328,6 +1344,7 @@ export function configToWizardState(
     smtpAzureEntraApplicationId:
       config.smtp.azure?.entraApplicationId ?? "",
     smtpAzureTenantId: config.smtp.azure?.tenantId ?? "",
+    smtpAzureAcsConnectionString: config.smtp.acsApi?.connectionString ?? "",
     databaseType: config.database.type,
     supabaseUrl: config.database.supabaseUrl ?? "",
     supabaseAnonKey: config.database.supabaseAnonKey ?? "",
@@ -1973,6 +1990,13 @@ export function WizardProvider({
                 ...(state.smtpAzureTenantId
                   ? { tenantId: state.smtpAzureTenantId }
                   : {}),
+              },
+            }
+          : {}),
+        ...(state.smtpAzureAcsConnectionString
+          ? {
+              acsApi: {
+                connectionString: state.smtpAzureAcsConnectionString,
               },
             }
           : {}),

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidAcsConnectionString } from "../lib/validation.js";
 
 // Cloud provider types
 export type CloudProvider = "aws" | "gcp" | "azure";
@@ -233,6 +234,10 @@ export interface SMTPConfig {
   pass: string;
   from: string;
   fromName: string;
+  /** ACS API-key mode: connection string for the in-cluster SMTP relay. */
+  acsApi?: {
+    connectionString: string;
+  };
 }
 
 // Default SMTP providers
@@ -254,6 +259,14 @@ export const SMTP_PROVIDERS = {
   // prerequisites.bicep, or point at an ACS resource the organization already
   // runs (the emailSmtp* deployment outputs carry these values).
   "azure-acs": { host: "smtp.azurecomm.net", port: 587, user: "" },
+  // Azure Communication Services via the ACS REST API: for organizations
+  // that hold the ACS resource's connection string (API key) and cannot get
+  // Entra SMTP credentials. The chart deploys an in-cluster SMTP relay
+  // (<release>-smtp-relay:1025, host computed at config time) that forwards
+  // to the ACS Email API; GoTrue and the app submit to it with NO
+  // credentials, because Go's SMTP client refuses AUTH over plaintext and
+  // the ClusterIP-only relay ignores AUTH anyway.
+  "azure-acs-api": { host: "", port: 1025, user: "" },
   custom: { host: "", port: 587, user: "" },
 };
 
@@ -809,21 +822,56 @@ export const DeploymentConfigSchema = z.object({
   }),
 
   // SMTP Configuration
-  smtp: z.object({
-    host: z.string().min(1),
-    port: z.number().min(1).max(65535),
-    user: z.string().min(1),
-    pass: z.string().min(1),
-    from: z.string().email(),
-    fromName: z.string().min(1),
-    azure: z
-      .object({
-        communicationServiceId: z.string().min(1),
-        entraApplicationId: z.string().uuid(),
-        tenantId: z.string().uuid().optional(),
-      })
-      .optional(),
-  }),
+  smtp: z
+    .object({
+      host: z.string().min(1),
+      port: z.number().min(1).max(65535),
+      // Empty user/pass are valid only in the ACS API-key relay mode
+      // (enforced by the superRefine below): the in-cluster relay ignores
+      // SMTP AUTH, and GoTrue refuses AUTH over plaintext anyway.
+      user: z.string(),
+      pass: z.string(),
+      from: z.string().email(),
+      fromName: z.string().min(1),
+      azure: z
+        .object({
+          communicationServiceId: z.string().min(1),
+          entraApplicationId: z.string().uuid(),
+          tenantId: z.string().uuid().optional(),
+        })
+        .optional(),
+      // ACS API-key mode: the connection string feeds the in-cluster
+      // SMTP-to-ACS-REST relay (chart smtpRelay block) instead of SMTP
+      // credentials. Mutually exclusive with `azure` (Entra SMTP) in
+      // practice; the wizard clears one when the other is chosen.
+      acsApi: z
+        .object({
+          connectionString: z
+            .string()
+            .refine(isValidAcsConnectionString, {
+              message:
+                "must look like endpoint=https://<resource>.communication.azure.com/;accesskey=<key>",
+            }),
+        })
+        .optional(),
+    })
+    .superRefine((smtp, ctx) => {
+      if (smtp.acsApi) return;
+      if (!smtp.user) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["user"],
+          message: "SMTP username is required",
+        });
+      }
+      if (!smtp.pass) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["pass"],
+          message: "SMTP password is required",
+        });
+      }
+    }),
 
   // Database
   database: z.object({

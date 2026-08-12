@@ -120,6 +120,7 @@ export function esoSecretEntries(config: DeploymentConfig): EsoSecretEntry[] {
     [names.dashboard]: "supabase-dashboard",
     [names.realtime]: "supabase-realtime",
     [names.smtp]: "supabase-smtp",
+    [names.smtpRelay]: "smtp-relay",
   };
   const prefix = providerPrefix(config);
   const separator = config.secrets?.backend === "aws-secrets-manager" ? "/" : "-";
@@ -683,6 +684,30 @@ export async function applyEsoManifests(
   });
 }
 
+/** Trigger an immediate reconcile of every deployment ExternalSecret. */
+async function forceExternalSecretsRefresh(
+  config: DeploymentConfig,
+): Promise<void> {
+  const namespace = getNamespace(config.name);
+  const stamp = Date.now().toString();
+  for (const entry of esoSecretEntries(config)) {
+    try {
+      await execa("kubectl", [
+        "annotate",
+        "externalsecret",
+        entry.k8sName,
+        "--namespace",
+        namespace,
+        `force-sync=${stamp}`,
+        "--overwrite",
+      ]);
+    } catch {
+      // Best-effort: an ExternalSecret the apply just created syncs
+      // immediately anyway, and waitForExternalSecrets gates readiness.
+    }
+  }
+}
+
 interface ExternalSecretStatus {
   metadata?: { name?: string };
   status?: {
@@ -771,6 +796,15 @@ export async function setupExternalSecrets(
   });
   const { installed } = await ensureEsoOperator(namespace);
   await applyEsoManifests(config);
+  if (options.overwriteSecrets) {
+    // The provider entries just changed, but ExternalSecrets refresh hourly:
+    // without an immediate reconcile the helm upgrade below would roll pods
+    // against the STALE in-cluster Secrets (e.g. switching SMTP providers
+    // leaves the old credentials mounted for up to an hour). The force-sync
+    // annotation is ESO's documented refresh trigger; reconcile completes in
+    // seconds, well before the upgrade starts restarting pods.
+    await forceExternalSecretsRefresh(config);
+  }
   try {
     await waitForExternalSecrets(config);
   } catch (error) {

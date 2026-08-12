@@ -51,6 +51,8 @@ export const IMAGE_REPOSITORIES = {
   opentelemetryCollector: "rulebricks/opentelemetry-collector",
   // Bridge sidecar
   kafkaProxy: "rulebricks/kafka-proxy",
+  // In-cluster SMTP-to-ACS-REST relay (Azure ACS API-key email mode)
+  smtpAcsBridge: "rulebricks/smtp-acs-bridge",
   // CA-bundle seeder for the hardened vector image (ships no system CA store);
   // also a general-purpose curl.
   curl: "rulebricks/curl",

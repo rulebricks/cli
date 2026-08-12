@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   buildDeployValues,
   buildHelmValues,
+  deploymentSecretNames,
   resolveExternalDbSslRootCert,
   resolveProductVersion,
   signSupabaseJwt,
@@ -2136,4 +2137,127 @@ test("external DB CA bundle: Azure gets embedded roots, GCP/embedded get none", 
     any
   >;
   assert.equal(values.supabase.externalDatabase.sslRootCert, azureCa);
+});
+
+test("ACS API-key email: relay values, host override, empty creds (inline mode)", () => {
+  const config = cloneFixture("azure-acs-api-email");
+  // The stored host embeds a release name that may be stale (deployment
+  // renamed since the wizard ran); generation must recompute it.
+  config.smtp.host = "rulebricks-old-name-smtp-relay";
+  const values = buildHelmValues(config, { secretMode: "inline" }) as Record<
+    string,
+    any
+  >;
+
+  const relayHost = `${getReleaseName(config.name)}-smtp-relay`;
+  assert.equal(values.global.smtp.host, relayHost);
+  assert.equal(values.global.smtp.port, 1025);
+  // Credential-less by design: the relay ignores SMTP AUTH and GoTrue
+  // refuses AUTH over plaintext to non-localhost hosts.
+  assert.equal(values.global.smtp.user, "");
+  assert.equal(values.global.smtp.pass, "");
+  assert.equal(values.global.smtp.from, config.smtp.from);
+
+  assert.equal(values.smtpRelay.enabled, true);
+  assert.equal(values.smtpRelay.senderAddress, config.smtp.from);
+  assert.equal(
+    values.smtpRelay.connectionString,
+    config.smtp.acsApi!.connectionString,
+  );
+  assert.equal(
+    values.smtpRelay.image.repository,
+    "rulebricks/smtp-acs-bridge",
+  );
+  assert.ok(values.smtpRelay.image.tag, "relay image tag resolves");
+
+  // Inline relay values pass the chart schema: smtpRelay.enabled exempts the
+  // empty global.smtp.user/pass from the inline SMTP-credentials rule while
+  // licenseKey stays required.
+  const result = validateHelmValues(values);
+  assert.ok(
+    result.valid,
+    `inline relay values should satisfy the chart schema:\n${result.errors.join("\n")}`,
+  );
+});
+
+test("ACS API-key email: k8s mode moves the connection string to the Secret seam", () => {
+  const config = cloneFixture("azure-acs-api-email");
+  const values = buildHelmValues(config, { secretMode: "k8s" }) as Record<
+    string,
+    any
+  >;
+  const names = deploymentSecretNames(config);
+
+  assert.equal(values.smtpRelay.enabled, true);
+  assert.equal(values.smtpRelay.connectionString, undefined);
+  assert.deepEqual(values.smtpRelay.existingSecret, {
+    name: names.smtpRelay,
+    connectionStringKey: "connection-string",
+  });
+  // The supabase smtp secretRef stays on its usual seam (with EMPTY
+  // username/password inside): dropping it would make the subchart render
+  // its own Secret under the same name - an ownership conflict when
+  // upgrading a deployment that already has the CLI/ESO-owned Secret.
+  assert.deepEqual(values.supabase.secret.smtp, { secretRef: names.smtp });
+  // The connection string never leaks into the redacted values.
+  assert.ok(!JSON.stringify(values).includes("accesskey"));
+
+  const result = validateHelmValues(values);
+  assert.ok(
+    result.valid,
+    `k8s-mode relay values should satisfy the chart schema:\n${result.errors.join("\n")}`,
+  );
+});
+
+test("ACS API-key email: config survives values import and wizard validation", () => {
+  const config = cloneFixture("azure-acs-api-email");
+  const values = buildHelmValues(config, { secretMode: "k8s" }) as Record<
+    string,
+    any
+  >;
+
+  // configure's values->config import keeps acsApi: the redacted values carry
+  // only the existingSecret reference, the config remains the connection
+  // string's source of truth.
+  const imported = applyHelmValuesToConfig(config, values);
+  assert.equal(
+    imported.smtp.acsApi?.connectionString,
+    config.smtp.acsApi!.connectionString,
+  );
+  assert.equal(imported.smtp.user, "");
+  const parsed = DeploymentConfigSchema.safeParse(imported);
+  assert.ok(
+    parsed.success,
+    `imported relay config should parse: ${
+      parsed.success ? "" : JSON.stringify(parsed.error.issues, null, 2)
+    }`,
+  );
+
+  // The wizard accepts empty SMTP creds in relay mode - and still requires
+  // them for every other provider.
+  const state = configToWizardState(imported);
+  assert.equal(
+    collectConfigIssues(state).some((issue) => issue.includes("SMTP")),
+    false,
+  );
+  const nonRelay = configToWizardState(cloneFixture("aws-self-hosted-minimal"));
+  assert.equal(
+    collectConfigIssues({
+      ...nonRelay,
+      smtpUser: "",
+      smtpPass: "",
+    }).some((issue) => issue.includes("SMTP")),
+    true,
+  );
+
+  // Rejects a config with empty creds but NO acsApi (zod superRefine).
+  const broken = cloneFixture("azure-acs-api-email");
+  delete broken.smtp.acsApi;
+  const brokenResult = DeploymentConfigSchema.safeParse(broken);
+  assert.equal(brokenResult.success, false);
+  assert.ok(
+    brokenResult.error!.issues.some(
+      (issue) => issue.path.join(".") === "smtp.user",
+    ),
+  );
 });

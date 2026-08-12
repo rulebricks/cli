@@ -80,6 +80,20 @@ export function applyHelmValuesToConfig(
       };
     }
 
+    // ACS API-key relay (top-level smtpRelay block): keep config.smtp.acsApi
+    // in sync with the live release so the wizard re-detects the provider and
+    // empty SMTP creds keep validating. In k8s/eso modes the values carry only
+    // an existingSecret reference, so the config's own connection string (the
+    // secret's source) is preserved.
+    if (isRecord(values.smtpRelay) && values.smtpRelay.enabled === true) {
+      next.smtp.acsApi = {
+        connectionString:
+          stringValue(values.smtpRelay.connectionString) ??
+          next.smtp.acsApi?.connectionString ??
+          "",
+      };
+    }
+
     if (isRecord(global.supabase)) {
       if (next.database.type === "supabase-cloud") {
         next.database.supabaseUrl =

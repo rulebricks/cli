@@ -3481,15 +3481,20 @@ export async function mirrorImagesToAcr(
       // would wrongly skip a tag whose upstream content changed.
       if (!spec.force) {
         try {
+          // `az acr repository show --image` (the metadata endpoint) is the
+          // only listing that reliably carries the digest: `az acr manifest
+          // show --query digest` returns the raw manifest JSON, which has no
+          // top-level digest field for images OR helm charts - the query
+          // came back empty and every deploy re-imported everything.
           const existing = await execCommandArgs(
             "az",
             [
               "acr",
-              "manifest",
+              "repository",
               "show",
-              "--registry",
-              registryName,
               "--name",
+              registryName,
+              "--image",
               ref,
               "--query",
               "digest",
@@ -3561,15 +3566,19 @@ export async function mirrorChartToAcr(
     );
     const subscriptionArgs = acrSubscriptionArgs(resolvedRegistryId);
     try {
+      // Metadata endpoint, not `az acr manifest show`: the raw manifest JSON
+      // has no top-level digest field, so its --query digest is always empty
+      // (which both re-imported released charts on every deploy and broke
+      // installs of charts that exist only in the registry).
       const existing = await execCommandArgs(
         "az",
         [
           "acr",
-          "manifest",
+          "repository",
           "show",
-          "--registry",
-          registryName,
           "--name",
+          registryName,
+          "--image",
           ref,
           "--query",
           "digest",

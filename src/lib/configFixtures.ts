@@ -92,6 +92,8 @@ interface MatrixOptions {
   cache?: NonNullable<DeploymentConfig["features"]["cache"]>;
   tls?: DeploymentConfig["tls"];
   version?: string;
+  /** Azure ACS API-key email mode: in-cluster SMTP relay, empty SMTP creds. */
+  acsApiEmail?: boolean;
 }
 
 function build(options: MatrixOptions): DeploymentConfig {
@@ -149,14 +151,30 @@ function build(options: MatrixOptions): DeploymentConfig {
     tlsEmail: "tls@example.com",
     dns: { provider: "route53", autoManage: false },
     tls: options.tls,
-    smtp: {
-      host: "smtp.example.com",
-      port: 587,
-      user: "smtp-user",
-      pass: "smtp-pass",
-      from: "no-reply@example.com",
-      fromName: "Rulebricks",
-    },
+    smtp: options.acsApiEmail
+      ? {
+          // ACS API-key relay mode: host points at the chart's in-cluster
+          // relay Service (recomputed by buildHelmValues either way) and
+          // credentials stay empty by design.
+          host: `rulebricks-${options.name}-smtp-relay`,
+          port: 1025,
+          user: "",
+          pass: "",
+          from: "DoNotReply@example.azurecomm.net",
+          fromName: "Rulebricks",
+          acsApi: {
+            connectionString:
+              "endpoint=https://example.unitedstates.communication.azure.com/;accesskey=dGVzdC1hY2Nlc3Mta2V5",
+          },
+        }
+      : {
+          host: "smtp.example.com",
+          port: 587,
+          user: "smtp-user",
+          pass: "smtp-pass",
+          from: "no-reply@example.com",
+          fromName: "Rulebricks",
+        },
     database: databaseConfig,
     storage,
     clickhouse: {
@@ -381,6 +399,7 @@ export function buildConfigMatrix(): { name: string; config: DeploymentConfig }[
       },
     },
     { name: "azure-workload-identity", provider: "azure" },
+    { name: "azure-acs-api-email", provider: "azure", acsApiEmail: true },
     {
       name: "azure-storage-secret",
       provider: "azure",

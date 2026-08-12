@@ -473,6 +473,69 @@
         }
       }
     },
+    "smtpRelay": {
+      "type": "object",
+      "description": "Opt-in in-cluster SMTP-to-ACS-REST relay for Azure Communication Services API-key email mode. When enabled, global.smtp.host/port point at <release>-smtp-relay:1025 and global.smtp.user/pass stay empty (the relay ignores SMTP credentials; GoTrue refuses AUTH over plaintext anyway).",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "image": {
+          "type": "object",
+          "properties": {
+            "registry": { "type": "string" },
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "digest": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "replicas": { "type": "integer", "minimum": 1, "default": 1 },
+        "senderAddress": {
+          "type": "string",
+          "description": "REQUIRED when enabled: the address mail is sent from - a MailFrom address on a domain linked to the ACS resource (e.g. DoNotReply@xxxx.azurecomm.net); normally equals global.smtp.from"
+        },
+        "allowedSenderDomains": {
+          "type": "string",
+          "description": "Optional comma-separated domain allow-list; client MAIL FROM addresses on these domains are forwarded as-is, others fall back to senderAddress"
+        },
+        "connectionString": {
+          "type": "string",
+          "description": "ACS connection string (endpoint=...;accesskey=...), inline (evaluation only - prefer existingSecret)"
+        },
+        "existingSecret": {
+          "type": "object",
+          "description": "Runtime alternative to the inline connectionString: an existing Secret (CLI-created or ESO-synced) carrying the connection string",
+          "properties": {
+            "name": { "type": "string" },
+            "connectionStringKey": { "type": "string", "default": "connection-string" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "port": { "type": "integer", "default": 1025 }
+          }
+        },
+        "resources": { "$ref": "#/definitions/resources" },
+        "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["senderAddress"],
+            "properties": {
+              "senderAddress": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    },
     "externalSecrets": {
       "type": "object",
       "description": "External Secrets Operator convenience toggle. The chart consumes pre-existing Secrets via *.secretRef seams and renders no ExternalSecret/SecretStore resources; see examples/external-secrets/. Unknown keys are tolerated for older overlay-era values files.",
@@ -2012,7 +2075,56 @@
             "type": "object",
             "required": ["licenseKey"],
             "properties": {
-              "licenseKey": { "type": "string", "minLength": 1 },
+              "licenseKey": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "Inline SMTP Credentials Validation",
+      "description": "With inline secrets (no secretRef), SMTP credentials must also be inline - unless the ACS smtpRelay is enabled: it authenticates to ACS with a connection string and deliberately runs with empty SMTP credentials (GoTrue's Go SMTP client refuses AUTH over plaintext to non-localhost hosts).",
+      "if": {
+        "allOf": [
+          {
+            "properties": {
+              "global": {
+                "type": "object",
+                "properties": {
+                  "secrets": {
+                    "type": "object",
+                    "properties": {
+                      "secretRef": { "const": "" }
+                    },
+                    "required": ["secretRef"]
+                  }
+                },
+                "required": ["secrets"]
+              }
+            },
+            "required": ["global"]
+          },
+          {
+            "not": {
+              "properties": {
+                "smtpRelay": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "const": true }
+                  },
+                  "required": ["enabled"]
+                }
+              },
+              "required": ["smtpRelay"]
+            }
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
               "smtp": {
                 "type": "object",
                 "required": ["user", "pass"],

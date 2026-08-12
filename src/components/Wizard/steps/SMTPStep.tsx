@@ -12,8 +12,11 @@ import {
   WizardSelect,
 } from "../../common/index.js";
 import { Spinner } from "../../common/Spinner.js";
-import { SMTP_PROVIDERS } from "../../../types/index.js";
-import { isValidEmail } from "../../../lib/validation.js";
+import { SMTP_PROVIDERS, getReleaseName } from "../../../types/index.js";
+import {
+  isValidEmail,
+  isValidAcsConnectionString,
+} from "../../../lib/validation.js";
 import {
   listAzureAcsResources,
   parseAcsSmtpAppClientId,
@@ -37,6 +40,14 @@ interface SMTPStepProps {
 const PROVIDER_ITEMS = [
   { label: "AWS SES", value: "aws-ses" },
   { label: "Azure Communication Services", value: "azure-acs" },
+  // API-key alternative for ACS tenants without Entra SMTP credentials:
+  // the chart runs an in-cluster SMTP relay that forwards to the ACS REST
+  // API using the resource's connection string. Never auto-recommended -
+  // the Entra SMTP flow above stays the Azure default.
+  {
+    label: "Azure Communication Services - API key",
+    value: "azure-acs-api",
+  },
   { label: "SendGrid", value: "sendgrid" },
   { label: "Resend", value: "resend" },
   { label: "Mailgun", value: "mailgun" },
@@ -71,6 +82,10 @@ function detectProviderFromHost(host: string): string | null {
   if (hostLower.includes("postmark")) return "postmark";
   if (hostLower.includes("mailtrap")) return "mailtrap";
   if (hostLower.includes("azurecomm")) return "azure-acs";
+  // The ACS API-key mode points SMTP at the chart's in-cluster relay
+  // Service; the saved acsApi connection string is the authoritative signal
+  // (checked before this heuristic), this catches a host-only rewrite.
+  if (hostLower.endsWith("-smtp-relay")) return "azure-acs-api";
 
   return "custom";
 }
@@ -83,7 +98,11 @@ export function SMTPStep({
   const { state, dispatch } = useWizard();
   const [error, setError] = useState<string | null>(null);
 
-  const detectedProvider = detectProviderFromHost(state.smtpHost);
+  // A saved ACS connection string marks the API-key relay mode regardless
+  // of what the (relay) host looks like.
+  const detectedProvider = state.smtpAzureAcsConnectionString
+    ? "azure-acs-api"
+    : detectProviderFromHost(state.smtpHost);
   const nativeEmailProvider = nativeEmailProviderFor(state.provider);
   // Preselection: the deployment's own saved provider (configure) wins;
   // on a fresh init the cloud-native recommendation outranks a provider
@@ -135,6 +154,13 @@ export function SMTPStep({
   // Set when the operator opts out of the discovered sender list.
   const [fromManual, setFromManual] = useState(false);
 
+  // ACS API-key mode: the connection string the in-cluster relay uses to
+  // call the ACS Email REST API. SMTP host/port become the relay Service.
+  const [acsConnectionString, setAcsConnectionString] = useState(
+    state.smtpAzureAcsConnectionString || "",
+  );
+  const acsRelayHost = `${getReleaseName(state.name)}-smtp-relay`;
+
   // Runs before the ACS branch of the flow so it knows whether any
   // communication service exists to offer; the operator chooses which one on
   // the acs-resource screen.
@@ -174,6 +200,8 @@ export function SMTPStep({
     const rows: { label: string; value: string }[] = [];
     if (host) rows.push({ label: "Host", value: `${host}:${port}` });
     if (user) rows.push({ label: "User", value: user });
+    if (provider === "azure-acs-api" && acsConnectionString)
+      rows.push({ label: "Auth", value: "ACS connection string (via in-cluster relay)" });
     return rows;
   };
 
@@ -200,8 +228,13 @@ export function SMTPStep({
               // `provider` is not enough: the recommendation can preselect one
               // provider while a profile-remembered host still points at
               // another, and confirming must not keep the stale host.
+              // The relay host embeds the release name, so for the API-key
+              // mode "matching" means exactly the current deployment's relay
+              // (a host from a renamed deployment must be rewritten).
               const hostMatches =
-                !!host && detectProviderFromHost(host) === value;
+                value === "azure-acs-api"
+                  ? host === acsRelayHost
+                  : !!host && detectProviderFromHost(host) === value;
               setProvider(value);
               if (value !== "azure-acs") {
                 setAcsResource(null);
@@ -209,8 +242,15 @@ export function SMTPStep({
                 setAcsResourceIdInput("");
                 setAcsResourceGroup("");
               }
+              if (value !== "azure-acs-api") {
+                setAcsConnectionString("");
+              }
+              // API-key mode has no fixed preset host: mail goes to the
+              // chart's in-cluster relay Service, named after the release.
               const providerConfig =
-                SMTP_PROVIDERS[value as keyof typeof SMTP_PROVIDERS];
+                value === "azure-acs-api"
+                  ? { host: acsRelayHost, port: 1025, user: "" }
+                  : SMTP_PROVIDERS[value as keyof typeof SMTP_PROVIDERS];
               if (providerConfig && !hostMatches) {
                 setHost(providerConfig.host);
                 setPort(providerConfig.port.toString());
@@ -238,6 +278,9 @@ export function SMTPStep({
                           smtpAzureTenantId: "",
                         }
                       : {}),
+                    ...(value !== "azure-acs-api"
+                      ? { smtpAzureAcsConnectionString: "" }
+                      : {}),
                   },
                 });
               } else if (providerConfig?.user && !user) {
@@ -263,6 +306,40 @@ export function SMTPStep({
             }}
           />
         ),
+    },
+    {
+      // ACS API-key mode: the only credential collected. It never leaves the
+      // cluster - the relay Deployment reads it from a Secret and signs ACS
+      // Email REST calls with it; GoTrue and the app keep speaking SMTP (to
+      // the relay, credential-less).
+      id: "acs-connection-string",
+      when: () => provider === "azure-acs-api",
+      render: (flow) => (
+        <TextField
+          label="ACS connection string"
+          hint='From the ACS resource: Settings > Keys > Connection string. Requires key access ("disableLocalAuth" off on the resource).'
+          value={acsConnectionString}
+          onChange={setAcsConnectionString}
+          mask
+          placeholder="endpoint=https://<resource>.communication.azure.com/;accesskey=..."
+          onSubmit={() => {
+            const trimmed = acsConnectionString.trim();
+            if (!isValidAcsConnectionString(trimmed)) {
+              setError(
+                "Enter the full connection string: endpoint=https://...;accesskey=...",
+              );
+              return;
+            }
+            setAcsConnectionString(trimmed);
+            setError(null);
+            dispatch({
+              type: "SET_SMTP",
+              config: { smtpAzureAcsConnectionString: trimmed },
+            });
+            flow.next();
+          }}
+        />
+      ),
     },
     {
       id: "host",
@@ -493,7 +570,10 @@ export function SMTPStep({
     },
     {
       id: "user",
+      // The API-key relay mode runs credential-less (the relay ignores SMTP
+      // AUTH; GoTrue refuses AUTH over plaintext), so no username is asked.
       when: () =>
+        provider !== "azure-acs-api" &&
         !(
           provider === "azure-acs" &&
           Boolean(acsResourceId) &&
@@ -544,6 +624,7 @@ export function SMTPStep({
     },
     {
       id: "pass",
+      when: () => provider !== "azure-acs-api",
       render: (flow) => (
         <TextField
           label={
@@ -639,12 +720,14 @@ export function SMTPStep({
           hint={
             provider === "azure-acs"
               ? "Must be a DoNotReply address on a domain attached to your ACS email service"
-              : "This must be verified with your email provider"
+              : provider === "azure-acs-api"
+                ? "A MailFrom address on a domain linked to the ACS resource (Email Services > your domain > MailFrom addresses)"
+                : "This must be verified with your email provider"
           }
           value={from}
           onChange={setFrom}
           placeholder={
-            provider === "azure-acs"
+            provider === "azure-acs" || provider === "azure-acs-api"
               ? "DoNotReply@xxxx.azurecomm.net"
               : "no-reply@yourdomain.com"
           }
@@ -683,8 +766,10 @@ export function SMTPStep({
               config: {
                 smtpHost: host,
                 smtpPort: parseInt(port, 10),
-                smtpUser: user,
-                smtpPass: pass,
+                // The relay mode is credential-less by design; never let a
+                // stale username/password from a previous provider linger.
+                smtpUser: provider === "azure-acs-api" ? "" : user,
+                smtpPass: provider === "azure-acs-api" ? "" : pass,
                 smtpFrom: from,
                 smtpFromName: fromName,
               },

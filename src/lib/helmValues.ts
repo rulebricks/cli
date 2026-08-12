@@ -97,6 +97,7 @@ export function deploymentSecretNames(config: DeploymentConfig): {
   dashboard: string;
   realtime: string;
   smtp: string;
+  smtpRelay: string;
 } {
   const base = getReleaseName(config.name);
   return {
@@ -107,6 +108,10 @@ export function deploymentSecretNames(config: DeploymentConfig): {
     dashboard: `${base}-supabase-dashboard`,
     realtime: `${base}-supabase-realtime`,
     smtp: `${base}-supabase-smtp`,
+    // ACS API-key mode only: the connection string the in-cluster SMTP relay
+    // signs ACS Email REST calls with (templates/smtp-relay-secret.yaml's
+    // chart-canonical name, key "connection-string").
+    smtpRelay: `${base}-smtp-relay`,
   };
 }
 
@@ -1864,6 +1869,12 @@ export function buildHelmValues(
   const releaseName = getReleaseName(config.name);
   const criticalPriorityClass = `${releaseName}-critical`;
   const burstPriorityClass = `${releaseName}-burst`;
+  // ACS API-key email mode: mail rides the chart's in-cluster SMTP-to-ACS-REST
+  // relay instead of an external SMTP endpoint. The Service name embeds the
+  // release, so it is recomputed here rather than trusted from the stored
+  // config (a rename between wizard runs must not strand the SMTP host).
+  const acsRelay = config.smtp.acsApi;
+  const smtpRelayHost = `${releaseName}-smtp-relay`;
   // Subcharts that don't honor global.imagePullSecrets (keda, strimzi, traefik,
   // vector, cluster-autoscaler) need the pull secret on their own key so their
   // pods can pull the private docker.io/rulebricks/* images from index.docker.io.
@@ -1991,15 +2002,27 @@ export function buildHelmValues(
         enabled: clickStackEnabled,
       },
 
-      // SMTP Configuration
-      smtp: {
-        host: config.smtp.host,
-        port: config.smtp.port,
-        user: config.smtp.user,
-        pass: config.smtp.pass,
-        from: config.smtp.from,
-        fromName: config.smtp.fromName,
-      },
+      // SMTP Configuration. In ACS API-key mode the relay Service is the
+      // authoritative destination, and credentials stay empty: the relay
+      // ignores SMTP AUTH (ClusterIP-only), and GoTrue's Go SMTP client
+      // refuses AUTH over plaintext to non-localhost hosts anyway.
+      smtp: acsRelay
+        ? {
+            host: smtpRelayHost,
+            port: 1025,
+            user: "",
+            pass: "",
+            from: config.smtp.from,
+            fromName: config.smtp.fromName,
+          }
+        : {
+            host: config.smtp.host,
+            port: config.smtp.port,
+            user: config.smtp.user,
+            pass: config.smtp.pass,
+            from: config.smtp.from,
+            fromName: config.smtp.fromName,
+          },
 
       // Supabase configuration
       supabase: supabaseGlobalConfig,
@@ -3074,6 +3097,26 @@ export function buildHelmValues(
     };
   }
 
+  // ACS API-key email mode: deploy the chart's SMTP-to-ACS-REST relay.
+  // GoTrue and the app keep speaking plain SMTP to <release>-smtp-relay:1025
+  // (global.smtp above); the relay signs ACS Email REST calls with the
+  // connection string. Inline mode carries the connection string in the
+  // values; k8s/eso modes reference the <release>-smtp-relay Secret instead
+  // (redactSecretsToRefs swaps it for existingSecret below).
+  if (acsRelay) {
+    values.smtpRelay = {
+      enabled: true,
+      image: {
+        registry: reg,
+        repository: IMAGE_REPOSITORIES.smtpAcsBridge,
+        tag: images.image("smtp-acs-bridge").tag,
+      },
+      senderAddress: config.smtp.from,
+      connectionString: acsRelay.connectionString,
+      podLabels: infrastructurePodLabels,
+    };
+  }
+
   // In k8s and eso secret modes the chart reads pre-existing Kubernetes
   // Secrets by reference (CLI-created via kubectl, or ESO-synced from the
   // cloud secrets manager - same names either way). Point the chart's
@@ -3110,6 +3153,17 @@ export function redactSecretsToRefs(
   if (global.smtp) {
     delete global.smtp.user;
     delete global.smtp.pass;
+  }
+  // ACS API-key relay: the connection string moves to the <release>-smtp-relay
+  // Secret (CLI-created in k8s mode, ESO-synced in eso mode) referenced via
+  // the chart's existingSecret seam.
+  const smtpRelay = values.smtpRelay as Record<string, any> | undefined;
+  if (smtpRelay && "connectionString" in smtpRelay) {
+    delete smtpRelay.connectionString;
+    smtpRelay.existingSecret = {
+      name: names.smtpRelay,
+      connectionStringKey: "connection-string",
+    };
   }
   if (global.supabase) {
     delete global.supabase.jwtSecret;
@@ -3175,9 +3229,12 @@ export function redactSecretsToRefs(
       jwt: { secretRef: names.jwt },
       dashboard: { secretRef: names.dashboard },
       realtime: { secretRef: names.realtime },
-      // Supabase auth (GoTrue) SMTP; only when SMTP creds are configured;
-      // otherwise the global.smtp we just stripped would leave it empty.
-      ...(config.smtp?.user || config.smtp?.pass
+      // Supabase auth (GoTrue) SMTP; when creds are configured OR in the ACS
+      // API-key relay mode (empty creds by design). The relay mode keeps the
+      // secretRef so the CLI/ESO-owned Secret stays the mount source - the
+      // subchart would otherwise render its own Secret under the same name,
+      // a helm ownership conflict when upgrading existing deployments.
+      ...(config.smtp?.user || config.smtp?.pass || config.smtp?.acsApi
         ? { smtp: { secretRef: names.smtp } }
         : {}),
     };

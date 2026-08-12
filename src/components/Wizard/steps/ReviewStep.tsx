@@ -214,6 +214,9 @@ export function ReviewStep({
         
         <SectionHeader title="SMTP" />
         <ConfigRow label="Host" value={`${state.smtpHost}:${state.smtpPort}`} />
+        {state.smtpAzureAcsConnectionString ? (
+          <ConfigRow label="Mode" value="Azure ACS API key (in-cluster relay)" />
+        ) : null}
         <ConfigRow label="From" value={`${state.smtpFromName} <${state.smtpFrom}>`} />
         
         <SectionHeader title="Database" />

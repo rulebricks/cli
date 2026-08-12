@@ -91,6 +91,42 @@ test("provider entry names: AWS uses / paths; Azure/GCP never contain /", () => 
   assert.equal(defaultSecretsPrefix(withBackend(base, { backend: "aws-secrets-manager" })), `rulebricks/${base.name}`);
 });
 
+test("ACS API-key relay: connection-string secret created and ESO-mapped, no empty smtp secret", () => {
+  const base = fixture("azure-acs-api-email");
+  const names = deploymentSecretNames(base);
+  const direct = buildDeploymentSecrets(base);
+
+  const relay = direct.find((s) => s.name === names.smtpRelay);
+  assert.ok(relay, "smtp-relay connection-string secret exists");
+  assert.deepEqual(Object.keys(relay!.stringData), ["connection-string"]);
+  assert.equal(
+    relay!.stringData["connection-string"],
+    base.smtp.acsApi!.connectionString,
+  );
+
+  // Credential-less mode still creates the supabase-smtp secret, with EMPTY
+  // username/password: existing deployments already own this Secret via the
+  // CLI/ESO, and GoTrue mounts both keys unconditionally. Same for the app
+  // secret's SMTP_USER/SMTP_PASS.
+  const smtp = direct.find((s) => s.name === names.smtp);
+  assert.ok(smtp, "supabase-smtp secret still exists in relay mode");
+  assert.deepEqual(smtp!.stringData, { username: "", password: "" });
+  const app = direct.find((s) => s.name === names.app)!;
+  assert.equal(app.stringData.SMTP_USER, "");
+  assert.equal(app.stringData.SMTP_PASS, "");
+
+  // ESO mode maps the relay secret with its own short name.
+  const entries = esoSecretEntries(
+    withBackend(base, { backend: "azure-key-vault" }),
+  );
+  const relayEntry = entries.find((e) => e.k8sName === names.smtpRelay);
+  assert.ok(relayEntry, "relay secret has an ESO entry");
+  assert.equal(
+    relayEntry!.remoteKey,
+    `rulebricks-${base.name}-smtp-relay`,
+  );
+});
+
 test("ExternalSecret targets are exactly the chart's secretRef names", () => {
   const config = withBackend(fixture("aws-all-features"), {
     backend: "aws-secrets-manager",
