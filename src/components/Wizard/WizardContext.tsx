@@ -23,6 +23,8 @@ import {
   RemoteWriteConfig,
   TracingDestination,
   validateRemoteWriteConfig,
+  getReleaseName,
+  normalizeDeploymentConfig,
 } from "../../types/index.js";
 import { generateSecureSecret } from "../../lib/validation.js";
 import {
@@ -539,7 +541,11 @@ type WizardAction =
  * Creates the initial wizard state, optionally pre-populated from a user profile.
  * Profile values are used as defaults that the user can still modify.
  */
-function getInitialState(profile?: ProfileConfig | null): WizardState {
+export function getInitialState(profile?: ProfileConfig | null): WizardState {
+  // ssoEnabled was added so an explicit opt-out outranks credentials retained
+  // by older profiles. Profiles without the flag keep their legacy behavior.
+  const profileSsoEnabled =
+    profile?.ssoEnabled ?? Boolean(profile?.ssoProvider);
   return {
     name: "",
     configLoaded: false,
@@ -641,11 +647,13 @@ function getInitialState(profile?: ProfileConfig | null): WizardState {
     secretsByoStoreKind: "ClusterSecretStore",
 
     // Features - SSO - pre-populate from profile
-    ssoEnabled: !!profile?.ssoProvider,
-    ssoProvider: profile?.ssoProvider ?? null,
-    ssoUrl: profile?.ssoUrl ?? "",
-    ssoClientId: profile?.ssoClientId ?? "",
-    ssoClientSecret: profile?.ssoClientSecret ?? "",
+    ssoEnabled: profileSsoEnabled,
+    ssoProvider: profileSsoEnabled ? (profile?.ssoProvider ?? null) : null,
+    ssoUrl: profileSsoEnabled ? (profile?.ssoUrl ?? "") : "",
+    ssoClientId: profileSsoEnabled ? (profile?.ssoClientId ?? "") : "",
+    ssoClientSecret: profileSsoEnabled
+      ? (profile?.ssoClientSecret ?? "")
+      : "",
 
     // Features - Monitoring (metrics export is opt-in; in-cluster Prometheus
     // is always installed)
@@ -1301,6 +1309,7 @@ export function configToWizardState(
   config: DeploymentConfig,
   profile?: ProfileConfig | null,
 ): WizardState {
+  config = normalizeDeploymentConfig(config);
   const base = getInitialState(profile);
   const remoteWrite = config.features.monitoring.remoteWrite;
   const storage = config.storage;
@@ -1308,6 +1317,9 @@ export function configToWizardState(
   const externalRedis = config.externalServices?.redis;
   const externalKafka = config.externalServices?.kafka;
   const externalPostgres = config.externalServices?.postgres;
+  const acsApiEmail = config.smtp.acsApi;
+  const acsSmtpEmail = acsApiEmail ? undefined : config.smtp.azure;
+  const sso = config.features.sso;
 
   return {
     ...base,
@@ -1335,16 +1347,16 @@ export function configToWizardState(
     tlsCaBundleFile: config.tls?.caBundleFile ?? "",
     smtpHost: config.smtp.host,
     smtpPort: config.smtp.port,
-    smtpUser: config.smtp.user,
-    smtpPass: config.smtp.pass,
+    smtpUser: acsApiEmail ? "" : config.smtp.user,
+    smtpPass: acsApiEmail ? "" : config.smtp.pass,
     smtpFrom: config.smtp.from,
     smtpFromName: config.smtp.fromName,
     smtpAzureCommunicationServiceId:
-      config.smtp.azure?.communicationServiceId ?? "",
+      acsSmtpEmail?.communicationServiceId ?? "",
     smtpAzureEntraApplicationId:
-      config.smtp.azure?.entraApplicationId ?? "",
-    smtpAzureTenantId: config.smtp.azure?.tenantId ?? "",
-    smtpAzureAcsConnectionString: config.smtp.acsApi?.connectionString ?? "",
+      acsSmtpEmail?.entraApplicationId ?? "",
+    smtpAzureTenantId: acsSmtpEmail?.tenantId ?? "",
+    smtpAzureAcsConnectionString: acsApiEmail?.connectionString ?? "",
     databaseType: config.database.type,
     supabaseUrl: config.database.supabaseUrl ?? "",
     supabaseAnonKey: config.database.supabaseAnonKey ?? "",
@@ -1397,11 +1409,11 @@ export function configToWizardState(
     secretsByoStoreName: config.secrets?.byo?.storeName ?? "",
     secretsByoStoreKind:
       config.secrets?.byo?.storeKind ?? base.secretsByoStoreKind,
-    ssoEnabled: config.features.sso.enabled,
-    ssoProvider: config.features.sso.provider ?? null,
-    ssoUrl: config.features.sso.url ?? "",
-    ssoClientId: config.features.sso.clientId ?? "",
-    ssoClientSecret: config.features.sso.clientSecret ?? "",
+    ssoEnabled: sso.enabled,
+    ssoProvider: sso.enabled ? (sso.provider ?? null) : null,
+    ssoUrl: sso.enabled ? (sso.url ?? "") : "",
+    ssoClientId: sso.enabled ? (sso.clientId ?? "") : "",
+    ssoClientSecret: sso.enabled ? (sso.clientSecret ?? "") : "",
     clickStackEnabled:
       config.features.observability?.clickstack?.enabled ?? true,
     clickStackTelemetryRetentionDays:
@@ -1708,8 +1720,26 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, dnsAutoManage: action.autoManage };
     case "SET_TLS_CONFIG":
       return { ...state, ...action.config };
-    case "SET_SMTP":
-      return { ...state, ...action.config };
+    case "SET_SMTP": {
+      const next = { ...state, ...action.config };
+      if (action.config.smtpAzureAcsConnectionString) {
+        return {
+          ...next,
+          smtpUser: "",
+          smtpPass: "",
+          smtpAzureCommunicationServiceId: "",
+          smtpAzureEntraApplicationId: "",
+          smtpAzureTenantId: "",
+        };
+      }
+      if (
+        action.config.smtpAzureCommunicationServiceId ||
+        action.config.smtpAzureEntraApplicationId
+      ) {
+        return { ...next, smtpAzureAcsConnectionString: "" };
+      }
+      return next;
+    }
     case "SET_DATABASE_TYPE":
       return { ...state, databaseType: action.dbType };
     case "SET_SUPABASE_CONFIG":
@@ -1734,9 +1764,32 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
           action.totalPersistentStorageGi ?? state.totalPersistentStorageGi,
       };
     case "SET_SSO_ENABLED":
-      return { ...state, ssoEnabled: action.enabled };
-    case "SET_SSO_CONFIG":
-      return { ...state, ...action.config };
+      return action.enabled
+        ? { ...state, ssoEnabled: true }
+        : {
+            ...state,
+            ssoEnabled: false,
+            ssoProvider: null,
+            ssoUrl: "",
+            ssoClientId: "",
+            ssoClientSecret: "",
+          };
+    case "SET_SSO_CONFIG": {
+      const providerChanged =
+        action.config.ssoProvider !== undefined &&
+        action.config.ssoProvider !== state.ssoProvider;
+      return {
+        ...state,
+        ...(providerChanged
+          ? {
+              ssoUrl: "",
+              ssoClientId: "",
+              ssoClientSecret: "",
+            }
+          : {}),
+        ...action.config,
+      };
+    }
     case "SET_METRICS_EXPORT":
       return { ...state, metricsExportEnabled: action.enabled };
     case "SET_PROMETHEUS_REMOTE_WRITE":
@@ -1906,8 +1959,14 @@ export function WizardProvider({
     const remoteWrite = state.metricsExportEnabled
       ? buildRemoteWriteFromState(state)
       : undefined;
+    const smtpMode = state.smtpAzureAcsConnectionString
+      ? "acs-api"
+      : state.smtpAzureCommunicationServiceId &&
+          state.smtpAzureEntraApplicationId
+        ? "acs-smtp"
+        : "smtp";
 
-    return {
+    return normalizeDeploymentConfig({
       name: state.name,
       infrastructure: {
         mode: "existing",
@@ -1974,14 +2033,16 @@ export function WizardProvider({
             }
           : undefined,
       smtp: {
-        host: state.smtpHost,
-        port: state.smtpPort,
-        user: state.smtpUser,
-        pass: state.smtpPass,
+        host:
+          smtpMode === "acs-api"
+            ? `${getReleaseName(state.name)}-smtp-relay`
+            : state.smtpHost,
+        port: smtpMode === "acs-api" ? 1025 : state.smtpPort,
+        user: smtpMode === "acs-api" ? "" : state.smtpUser,
+        pass: smtpMode === "acs-api" ? "" : state.smtpPass,
         from: state.smtpFrom,
         fromName: state.smtpFromName,
-        ...(state.smtpAzureCommunicationServiceId &&
-        state.smtpAzureEntraApplicationId
+        ...(smtpMode === "acs-smtp"
           ? {
               azure: {
                 communicationServiceId:
@@ -1993,7 +2054,7 @@ export function WizardProvider({
               },
             }
           : {}),
-        ...(state.smtpAzureAcsConnectionString
+        ...(smtpMode === "acs-api"
           ? {
               acsApi: {
                 connectionString: state.smtpAzureAcsConnectionString,
@@ -2105,13 +2166,15 @@ export function WizardProvider({
         : undefined,
       externalServices,
       features: {
-        sso: {
-          enabled: state.ssoEnabled,
-          provider: state.ssoProvider || undefined,
-          url: state.ssoUrl || undefined,
-          clientId: state.ssoClientId || undefined,
-          clientSecret: state.ssoClientSecret || undefined,
-        },
+        sso: state.ssoEnabled
+          ? {
+              enabled: true,
+              provider: state.ssoProvider || undefined,
+              url: state.ssoUrl || undefined,
+              clientId: state.ssoClientId || undefined,
+              clientSecret: state.ssoClientSecret || undefined,
+            }
+          : { enabled: false },
         monitoring: {
           destination: state.metricsExportEnabled
             ? state.prometheusMonitoringDestination ||
@@ -2276,7 +2339,7 @@ export function WizardProvider({
               : {}),
           }
         : {}),
-    };
+    });
   };
 
   return (

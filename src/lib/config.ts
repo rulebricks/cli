@@ -8,6 +8,7 @@ import {
   DeploymentState,
   ProfileConfig,
   ProfileConfigSchema,
+  normalizeDeploymentConfig,
 } from "../types/index.js";
 
 const RULEBRICKS_DIR = path.join(os.homedir(), ".rulebricks");
@@ -167,11 +168,12 @@ async function migrateConfig(
 export async function saveDeploymentConfig(
   config: DeploymentConfig,
 ): Promise<void> {
-  const dir = getDeploymentDir(config.name);
+  const normalized = normalizeDeploymentConfig(config);
+  const dir = getDeploymentDir(normalized.name);
   await fs.mkdir(dir, { recursive: true });
 
   const configPath = path.join(dir, "config.yaml");
-  await fs.writeFile(configPath, yaml.stringify(config), "utf-8");
+  await fs.writeFile(configPath, yaml.stringify(normalized), "utf-8");
 }
 
 /**
@@ -394,7 +396,9 @@ export async function saveProfile(profile: ProfileConfig): Promise<void> {
 
   // Filter out undefined values to keep the file clean
   const cleanProfile = Object.fromEntries(
-    Object.entries(profile).filter(([_, v]) => v !== undefined),
+    Object.entries(normalizeProfileConfig(profile)).filter(
+      ([_, v]) => v !== undefined,
+    ),
   );
 
   await fs.writeFile(profilePath, yaml.stringify(cleanProfile), "utf-8");
@@ -407,39 +411,61 @@ export async function saveProfile(profile: ProfileConfig): Promise<void> {
 export function extractProfileFromConfig(
   config: DeploymentConfig,
 ): ProfileConfig {
+  const normalized = normalizeDeploymentConfig(config);
+  const sso = normalized.features.sso;
   return {
     // Infrastructure
-    provider: config.infrastructure.provider,
-    region: config.infrastructure.region,
-    clusterName: config.infrastructure.clusterName,
+    provider: normalized.infrastructure.provider,
+    region: normalized.infrastructure.region,
+    clusterName: normalized.infrastructure.clusterName,
 
     // Domain - store suffix for suggesting new domains
-    domainSuffix: extractDomainSuffix(config.domain),
-    adminEmail: config.adminEmail,
-    tlsEmail: config.tlsEmail,
-    dnsProvider: config.dns.provider,
+    domainSuffix: extractDomainSuffix(normalized.domain),
+    adminEmail: normalized.adminEmail,
+    tlsEmail: normalized.tlsEmail,
+    dnsProvider: normalized.dns.provider,
 
     // SMTP
-    smtpHost: config.smtp.host,
-    smtpPort: config.smtp.port,
-    smtpUser: config.smtp.user,
-    smtpPass: config.smtp.pass,
-    smtpFrom: config.smtp.from,
-    smtpFromName: config.smtp.fromName,
+    smtpHost: normalized.smtp.host,
+    smtpPort: normalized.smtp.port,
+    smtpUser: normalized.smtp.user,
+    smtpPass: normalized.smtp.pass,
+    smtpFrom: normalized.smtp.from,
+    smtpFromName: normalized.smtp.fromName,
 
     // API Keys
-    licenseKey: config.licenseKey,
+    licenseKey: normalized.licenseKey,
 
     // Preferences
-    databaseType: config.database.type,
-    storage: config.storage,
+    databaseType: normalized.database.type,
+    storage: normalized.storage,
 
     // SSO
-    ssoProvider: config.features.sso.provider,
-    ssoUrl: config.features.sso.url,
-    ssoClientId: config.features.sso.clientId,
-    ssoClientSecret: config.features.sso.clientSecret,
+    ssoEnabled: sso.enabled,
+    ssoProvider: sso.enabled ? sso.provider : undefined,
+    ssoUrl: sso.enabled ? sso.url : undefined,
+    ssoClientId: sso.enabled ? sso.clientId : undefined,
+    ssoClientSecret: sso.enabled ? sso.clientSecret : undefined,
   };
+}
+
+/**
+ * Applies profile deletion semantics for SSO. updateProfile intentionally
+ * merges reusable defaults, so the explicit disabled flag is what removes
+ * older provider credentials instead of leaving them behind in profile.yaml.
+ */
+export function normalizeProfileConfig(
+  profile: ProfileConfig,
+): ProfileConfig {
+  if (profile.ssoEnabled !== false) return { ...profile };
+  const {
+    ssoProvider: _ssoProvider,
+    ssoUrl: _ssoUrl,
+    ssoClientId: _ssoClientId,
+    ssoClientSecret: _ssoClientSecret,
+    ...rest
+  } = profile;
+  return rest;
 }
 
 /**

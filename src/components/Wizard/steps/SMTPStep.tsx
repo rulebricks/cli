@@ -258,6 +258,34 @@ export function SMTPStep({
               if (value !== "azure-acs-api") {
                 setAcsConnectionString("");
               }
+              if (value === "azure-acs-api") {
+                setUser("");
+                setPass("");
+              }
+              // Persist the mode switch even when the current host already
+              // matches the selected preset. This prevents stale ACS metadata
+              // from surviving a generic selection (or both ACS blocks from
+              // surviving a switch between the two Azure modes).
+              dispatch({
+                type: "SET_SMTP",
+                config:
+                  value === "azure-acs-api"
+                    ? {
+                        smtpUser: "",
+                        smtpPass: "",
+                        smtpAzureCommunicationServiceId: "",
+                        smtpAzureEntraApplicationId: "",
+                        smtpAzureTenantId: "",
+                      }
+                    : value === "azure-acs"
+                      ? { smtpAzureAcsConnectionString: "" }
+                      : {
+                          smtpAzureCommunicationServiceId: "",
+                          smtpAzureEntraApplicationId: "",
+                          smtpAzureTenantId: "",
+                          smtpAzureAcsConnectionString: "",
+                        },
+              });
               // API-key mode has no fixed preset host: mail goes to the
               // chart's in-cluster relay Service, named after the release.
               const providerConfig =

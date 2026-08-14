@@ -5,10 +5,9 @@
 // ESO syncs them into the cluster:
 //
 //   1. seedCloudSecrets       - write one JSON object per Secret into the
-//                               cloud secrets manager (create-if-absent plus
-//                               add-missing-keys, so client-rotated values
-//                               are never clobbered but newly-enabled
-//                               features still get their keys).
+//                               cloud secrets manager, reconciling known
+//                               CLI-owned keys while preserving unknown
+//                               customer-managed keys.
 //   2. ensureEsoOperator      - install a namespace-scoped ESO when none is
 //                               serving (or when a prior destroy stranded
 //                               failurePolicy:Fail webhooks); respect a
@@ -36,9 +35,14 @@ import * as yaml from "yaml";
 import {
   DeploymentConfig,
   getNamespace,
-  getReleaseName,
 } from "../types/index.js";
-import { buildDeploymentSecrets } from "./secrets.js";
+import {
+  buildDeploymentSecrets,
+  deploymentSecretInventory,
+  deploymentSecretLabels,
+  isDeploymentOwnedSecretResource,
+  pruneObsoleteDeploymentSecrets,
+} from "./secrets.js";
 import { deploymentSecretNames } from "./helmValues.js";
 import {
   readAwsSecretsManagerSecret,
@@ -103,16 +107,19 @@ export interface EsoSecretEntry {
   /** JSON object payload with the Secret's keys. */
   json: string;
   keys: string[];
+  /** Every key the CLI may own in this entry, including inactive keys. */
+  knownKeys: string[];
 }
 
-/**
- * The deployment's secrets in ESO coordinates. Reuses buildDeploymentSecrets
- * (single source of truth shared with k8s mode) and maps each Kubernetes
- * Secret to a short provider entry name.
- */
-export function esoSecretEntries(config: DeploymentConfig): EsoSecretEntry[] {
+export interface EsoSecretInventoryEntry {
+  k8sName: string;
+  remoteKey: string;
+  knownKeys: string[];
+}
+
+function esoShortNames(config: DeploymentConfig): Record<string, string> {
   const names = deploymentSecretNames(config);
-  const shortNames: Record<string, string> = {
+  return {
     [names.app]: "app",
     [names.db]: "supabase-db",
     [names.dbBootstrap]: "supabase-db-bootstrap",
@@ -122,18 +129,55 @@ export function esoSecretEntries(config: DeploymentConfig): EsoSecretEntry[] {
     [names.smtp]: "supabase-smtp",
     [names.smtpRelay]: "smtp-relay",
   };
+}
+
+/** Stable coordinates for active and previously-active CLI-owned entries. */
+export function esoSecretInventory(
+  config: DeploymentConfig,
+): EsoSecretInventoryEntry[] {
+  const shortNames = esoShortNames(config);
   const prefix = providerPrefix(config);
-  const separator = config.secrets?.backend === "aws-secrets-manager" ? "/" : "-";
+  const separator =
+    config.secrets?.backend === "aws-secrets-manager" ? "/" : "-";
+  return deploymentSecretInventory(config).map((entry) => ({
+    k8sName: entry.name,
+    remoteKey: `${prefix}${separator}${shortNames[entry.name] ?? entry.name}`,
+    knownKeys: entry.knownKeys,
+  }));
+}
+
+/**
+ * The deployment's secrets in ESO coordinates. Reuses buildDeploymentSecrets
+ * (single source of truth shared with k8s mode) and maps each Kubernetes
+ * Secret to a short provider entry name.
+ */
+export function esoSecretEntries(config: DeploymentConfig): EsoSecretEntry[] {
+  const inventory = new Map(
+    esoSecretInventory(config).map((entry) => [entry.k8sName, entry]),
+  );
 
   return buildDeploymentSecrets(config).map((secret) => {
-    const short = shortNames[secret.name] ?? secret.name;
+    const known = inventory.get(secret.name);
+    if (!known) {
+      throw new Error(`No ESO secret inventory entry exists for ${secret.name}.`);
+    }
     return {
       k8sName: secret.name,
-      remoteKey: `${prefix}${separator}${short}`,
+      remoteKey: known.remoteKey,
       json: JSON.stringify(secret.stringData),
       keys: Object.keys(secret.stringData),
+      knownKeys: known.knownKeys,
     };
   });
+}
+
+export function obsoleteEsoSecretEntries(
+  config: DeploymentConfig,
+): EsoSecretInventoryEntry[] {
+  const active = new Set(esoSecretEntries(config).map((entry) => entry.k8sName));
+  return esoSecretInventory(config).filter(
+    (entry) => !active.has(entry.k8sName),
+  );
 }
 
 export interface SeedSummary {
@@ -142,6 +186,8 @@ export interface SeedSummary {
   skipped: string[];
   /** Entries whose write was refused (IAM/RBAC or approval denied). The sync gate decides whether they actually exist. */
   denied: string[];
+  /** Obsolete provider entry coordinates deliberately left untouched after consumers were detached. */
+  retained: string[];
 }
 
 /**
@@ -177,6 +223,53 @@ export function mergeMissingSecretKeys(
 }
 
 /**
+ * Reconcile the keys owned by the CLI inside a cloud JSON secret. Active known
+ * keys take the config's current value, inactive known keys are removed, and
+ * unknown customer-managed keys are preserved byte-for-value. Non-object JSON
+ * is left untouched because its ownership cannot be established safely.
+ */
+export function reconcileManagedSecretKeys(
+  existingJson: string,
+  desiredJson: string,
+  knownKeys: readonly string[],
+): string | null {
+  let existing: unknown;
+  let desired: unknown;
+  try {
+    existing = JSON.parse(existingJson);
+    desired = JSON.parse(desiredJson);
+  } catch {
+    return null;
+  }
+  if (
+    !existing ||
+    typeof existing !== "object" ||
+    Array.isArray(existing) ||
+    !desired ||
+    typeof desired !== "object" ||
+    Array.isArray(desired)
+  ) {
+    return null;
+  }
+
+  const target = existing as Record<string, unknown>;
+  const desiredObject = desired as Record<string, unknown>;
+  let changed = false;
+  for (const key of knownKeys) {
+    if (Object.prototype.hasOwnProperty.call(desiredObject, key)) {
+      if (target[key] !== desiredObject[key]) {
+        target[key] = desiredObject[key];
+        changed = true;
+      }
+    } else if (Object.prototype.hasOwnProperty.call(target, key)) {
+      delete target[key];
+      changed = true;
+    }
+  }
+  return changed ? JSON.stringify(target) : null;
+}
+
+/**
  * Read one seeded provider entry's current value; null means missing or
  * unreadable (fall back to plain create-if-absent seeding).
  */
@@ -205,24 +298,25 @@ async function readSeededSecret(
 }
 
 /**
- * Seed the cloud secrets manager with the deployment's secrets.
- * Default mode creates missing entries and adds missing keys to existing
- * entries (existing values always win, so client-rotated values are never
- * clobbered - enabling a feature like AI after the first deploy adds only the
- * new key); overwrite replaces entries wholesale. byo-secret-store seeds
- * nothing. Write denials do not throw: the entries may already be pre-seeded
- * by a platform team, and waitForExternalSecrets is the arbiter of missing
- * ones.
+ * Seed/reconcile the cloud secrets manager with the deployment's secrets.
+ * Known CLI-owned keys are made config-authoritative on every deploy, while
+ * unknown keys in each JSON object are preserved. Inactive known keys are
+ * removed so ESO no longer syncs stale SMTP/SSO/provider credentials.
+ * Obsolete provider entries are never deleted; existing ones are reported as
+ * retained. byo-secret-store seeds nothing. Write denials do not throw: the
+ * entries may already be pre-seeded by a platform team, and the sync gate is
+ * the arbiter of missing ones.
  */
 export async function seedCloudSecrets(
   config: DeploymentConfig,
-  options: { overwrite: boolean },
+  _options: { overwrite: boolean },
 ): Promise<SeedSummary> {
   const summary: SeedSummary = {
     created: [],
     updated: [],
     skipped: [],
     denied: [],
+    retained: [],
   };
   const backend = config.secrets?.backend;
   if (!backend || backend === "cluster" || backend === "byo-secret-store") {
@@ -231,27 +325,25 @@ export async function seedCloudSecrets(
 
   for (const entry of esoSecretEntries(config)) {
     let value = entry.json;
-    let overwrite = options.overwrite;
+    let overwrite = false;
 
-    // A feature enabled after the first deploy (e.g. AI) needs keys the
-    // already-seeded entry lacks; the chart then references a Secret key that
-    // ESO can never materialize (CreateContainerConfigError). Heal that seam
-    // by writing only the missing keys into the existing entry.
-    if (!overwrite) {
-      const existingValue = await readSeededSecret(
-        backend,
-        config,
-        entry.remoteKey,
+    const existingValue = await readSeededSecret(
+      backend,
+      config,
+      entry.remoteKey,
+    );
+    if (existingValue !== null) {
+      const reconciled = reconcileManagedSecretKeys(
+        existingValue,
+        entry.json,
+        entry.knownKeys,
       );
-      if (existingValue !== null) {
-        const merged = mergeMissingSecretKeys(existingValue, entry.json);
-        if (merged === null) {
-          summary.skipped.push(entry.remoteKey);
-          continue;
-        }
-        value = merged;
-        overwrite = true;
+      if (reconciled === null) {
+        summary.skipped.push(entry.remoteKey);
+        continue;
       }
+      value = reconciled;
+      overwrite = true;
     }
 
     let result;
@@ -303,9 +395,31 @@ export async function seedCloudSecrets(
       }
     }
     if (result.denied) summary.denied.push(entry.remoteKey);
+    else if (existingValue === null && result.skipped) {
+      throw new Error(
+        `Cannot safely reconcile existing secret ${entry.remoteKey}: its current value could not be read. Grant value-read access and rerun the deployment.`,
+      );
+    }
     else if (result.created) summary.created.push(entry.remoteKey);
     else if (result.updated) summary.updated.push(entry.remoteKey);
     else summary.skipped.push(entry.remoteKey);
+  }
+
+  // Remote vault entries are deliberately a retained system of record. Probe
+  // only deterministic inactive coordinates so the caller can report entries
+  // that were detached from ESO without issuing any delete operation.
+  for (const entry of obsoleteEsoSecretEntries(config)) {
+    try {
+      if (
+        (await readSeededSecret(backend, config, entry.remoteKey)) !== null
+      ) {
+        summary.retained.push(entry.remoteKey);
+      }
+    } catch {
+      // Read access may intentionally cover only active entries. The consumer
+      // is still detached safely and no remote delete is ever attempted.
+      summary.retained.push(entry.remoteKey);
+    }
   }
   return summary;
 }
@@ -550,13 +664,9 @@ function storeRef(config: DeploymentConfig): { name: string; kind: string } {
  */
 export function buildEsoManifests(config: DeploymentConfig): object[] {
   const namespace = getNamespace(config.name);
-  const releaseName = getReleaseName(config.name);
   const backend = config.secrets?.backend;
   const manifests: object[] = [];
-  const labels = {
-    "app.kubernetes.io/managed-by": "rulebricks-cli",
-    "app.kubernetes.io/instance": releaseName,
-  };
+  const labels = deploymentSecretLabels(config);
 
   if (backend === "azure-key-vault" || backend === "gcp-secret-manager") {
     const annotations: Record<string, string> = {};
@@ -657,6 +767,7 @@ export function buildEsoManifests(config: DeploymentConfig): object[] {
           // Owner is safe: with a secretRef configured the chart never
           // creates these Secrets, so ESO is their sole owner.
           creationPolicy: "Owner",
+          template: { metadata: { labels } },
         },
         // Each provider entry is a JSON object whose keys are the Kubernetes
         // Secret's keys; extract maps them 1:1 on every ESO provider.
@@ -668,7 +779,133 @@ export function buildEsoManifests(config: DeploymentConfig): object[] {
   return manifests;
 }
 
-/** Apply the ESO manifests (idempotent kubectl apply). */
+function externalSecretErrorDetail(error: unknown): string {
+  if (error && typeof error === "object" && "stderr" in error) {
+    return String((error as { stderr?: string }).stderr ?? "");
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+interface ExternalSecretResource {
+  kind?: string;
+  metadata?: {
+    name?: string;
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+  };
+  spec?: {
+    dataFrom?: Array<{ extract?: { key?: string } }>;
+  };
+  status?: {
+    refreshTime?: string;
+    syncedResourceVersion?: string;
+  };
+}
+
+async function readExternalSecret(
+  namespace: string,
+  name: string,
+): Promise<ExternalSecretResource | null> {
+  try {
+    const { stdout } = await execa("kubectl", [
+      "get",
+      "externalsecret",
+      name,
+      "--namespace",
+      namespace,
+      "-o",
+      "json",
+    ]);
+    return JSON.parse(stdout);
+  } catch (error) {
+    if (
+      /not found|NotFound|the server doesn't have a resource type|no matches for kind/i.test(
+        externalSecretErrorDetail(error),
+      )
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Capture provider keys that the upcoming manifest reconciliation will detach.
+ * Reading the current owned ExternalSecrets also covers a changed prefix/store
+ * and works when the deploy host cannot read the cloud vault directly.
+ */
+export async function remoteKeysDetachedByEsoReconcile(
+  config: DeploymentConfig,
+): Promise<string[]> {
+  const namespace = getNamespace(config.name);
+  const desiredByName = new Map(
+    esoSecretEntries(config).map((entry) => [entry.k8sName, entry.remoteKey]),
+  );
+  const detached = new Set<string>();
+
+  for (const entry of esoSecretInventory(config)) {
+    const resource = await readExternalSecret(namespace, entry.k8sName);
+    if (
+      !resource ||
+      !isDeploymentOwnedSecretResource(
+        config,
+        resource,
+        "ExternalSecret",
+        entry.k8sName,
+      )
+    ) {
+      continue;
+    }
+    const currentRemoteKey =
+      resource.spec?.dataFrom?.[0]?.extract?.key ?? entry.remoteKey;
+    if (desiredByName.get(entry.k8sName) !== currentRemoteKey) {
+      detached.add(currentRemoteKey);
+    }
+  }
+  return [...detached];
+}
+
+/**
+ * Detach inactive ExternalSecret consumers. Exact deterministic names plus CLI
+ * ownership labels/legacy apply metadata keep this from touching BYO resources.
+ * Owner policy removes only the target Secret owned by that ExternalSecret;
+ * the remote provider entry is intentionally retained.
+ */
+export async function pruneObsoleteExternalSecrets(
+  config: DeploymentConfig,
+): Promise<string[]> {
+  const namespace = getNamespace(config.name);
+  const removed: string[] = [];
+  for (const entry of obsoleteEsoSecretEntries(config)) {
+    const resource = await readExternalSecret(namespace, entry.k8sName);
+    if (
+      !resource ||
+      !isDeploymentOwnedSecretResource(
+        config,
+        resource,
+        "ExternalSecret",
+        entry.k8sName,
+      )
+    ) {
+      continue;
+    }
+    await execa("kubectl", [
+      "delete",
+      "externalsecret",
+      entry.k8sName,
+      "--namespace",
+      namespace,
+      "--ignore-not-found",
+      "--cascade=foreground",
+      "--wait=true",
+      "--timeout=60s",
+    ]);
+    removed.push(entry.k8sName);
+  }
+  return removed;
+}
+
+/** Apply active ESO manifests, then detach obsolete CLI-owned consumers. */
 export async function applyEsoManifests(
   config: DeploymentConfig,
 ): Promise<string[]> {
@@ -678,39 +915,67 @@ export async function applyEsoManifests(
       input: JSON.stringify(manifest),
     });
   }
+  await pruneObsoleteExternalSecrets(config);
+  await pruneObsoleteDeploymentSecrets(config, getNamespace(config.name));
   return manifests.map((m) => {
     const meta = (m as { kind: string; metadata: { name: string } });
     return `${meta.kind}/${meta.metadata.name}`;
   });
 }
 
-/** Trigger an immediate reconcile of every deployment ExternalSecret. */
+/**
+ * Trigger an immediate reconcile of every deployment ExternalSecret and
+ * capture the refreshTime that must advance before Helm may restart pods.
+ */
+interface ExternalSecretRefreshBaseline {
+  refreshTime: string | null;
+  syncedResourceVersion: string | null;
+}
+
 async function forceExternalSecretsRefresh(
   config: DeploymentConfig,
-): Promise<void> {
+): Promise<Map<string, ExternalSecretRefreshBaseline>> {
   const namespace = getNamespace(config.name);
-  const stamp = Date.now().toString();
-  for (const entry of esoSecretEntries(config)) {
-    try {
-      await execa("kubectl", [
-        "annotate",
-        "externalsecret",
-        entry.k8sName,
-        "--namespace",
-        namespace,
-        `force-sync=${stamp}`,
-        "--overwrite",
-      ]);
-    } catch {
-      // Best-effort: an ExternalSecret the apply just created syncs
-      // immediately anyway, and waitForExternalSecrets gates readiness.
-    }
+  const entries = esoSecretEntries(config);
+  const refreshBaselines = new Map<string, ExternalSecretRefreshBaseline>();
+  let hasRefreshBaseline = false;
+
+  for (const entry of entries) {
+    const before = await readExternalSecret(namespace, entry.k8sName);
+    const refreshTime = before?.status?.refreshTime ?? null;
+    refreshBaselines.set(entry.k8sName, {
+      refreshTime,
+      syncedResourceVersion: before?.status?.syncedResourceVersion ?? null,
+    });
+    hasRefreshBaseline ||= !!refreshTime;
   }
+
+  // ESO refreshTime is serialized at second precision. Do not trigger in the
+  // same second as the baseline or a successful no-op refresh can look stale.
+  if (hasRefreshBaseline) {
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+  }
+
+  const stamp = Date.now().toString();
+  for (const entry of entries) {
+    await execa("kubectl", [
+      "annotate",
+      "externalsecret",
+      entry.k8sName,
+      "--namespace",
+      namespace,
+      `force-sync=${stamp}`,
+      "--overwrite",
+    ]);
+  }
+  return refreshBaselines;
 }
 
 interface ExternalSecretStatus {
   metadata?: { name?: string };
   status?: {
+    refreshTime?: string;
+    syncedResourceVersion?: string;
     conditions?: Array<{
       type?: string;
       status?: string;
@@ -727,7 +992,10 @@ interface ExternalSecretStatus {
  */
 export async function waitForExternalSecrets(
   config: DeploymentConfig,
-  options: { timeoutSeconds?: number } = {},
+  options: {
+    timeoutSeconds?: number;
+    refreshBaselines?: ReadonlyMap<string, ExternalSecretRefreshBaseline>;
+  } = {},
 ): Promise<void> {
   const namespace = getNamespace(config.name);
   const expected = esoSecretEntries(config).map((entry) => entry.k8sName);
@@ -756,10 +1024,22 @@ export async function waitForExternalSecrets(
     for (const name of expected) {
       const item = byName.get(name);
       const ready = item?.status?.conditions?.find((c) => c.type === "Ready");
-      if (ready?.status !== "True") {
+      const baseline = options.refreshBaselines?.get(name);
+      const mustObserveRefresh = options.refreshBaselines?.has(name) ?? false;
+      const refreshObserved =
+        !mustObserveRefresh ||
+        (!!item?.status?.refreshTime &&
+          item.status.refreshTime !== baseline?.refreshTime) ||
+        (!!item?.status?.syncedResourceVersion &&
+          item.status.syncedResourceVersion !==
+            baseline?.syncedResourceVersion);
+      if (ready?.status !== "True" || !refreshObserved) {
         pending.set(
           name,
-          ready?.message?.trim() || "no status yet (waiting for first sync)",
+          !refreshObserved && ready?.status === "True"
+            ? "waiting for refreshed provider data"
+            : ready?.message?.trim() ||
+                "no status yet (waiting for first sync)",
         );
       }
     }
@@ -791,22 +1071,23 @@ export async function setupExternalSecrets(
   options: { overwriteSecrets: boolean },
 ): Promise<{ seeded: SeedSummary; operatorInstalled: boolean }> {
   const namespace = getNamespace(config.name);
+  const detachedRemoteKeys =
+    await remoteKeysDetachedByEsoReconcile(config);
   const seeded = await seedCloudSecrets(config, {
     overwrite: options.overwriteSecrets,
   });
+  seeded.retained = [
+    ...new Set([...seeded.retained, ...detachedRemoteKeys]),
+  ];
   const { installed } = await ensureEsoOperator(namespace);
   await applyEsoManifests(config);
-  if (options.overwriteSecrets) {
-    // The provider entries just changed, but ExternalSecrets refresh hourly:
-    // without an immediate reconcile the helm upgrade below would roll pods
-    // against the STALE in-cluster Secrets (e.g. switching SMTP providers
-    // leaves the old credentials mounted for up to an hour). The force-sync
-    // annotation is ESO's documented refresh trigger; reconcile completes in
-    // seconds, well before the upgrade starts restarting pods.
-    await forceExternalSecretsRefresh(config);
-  }
+  // ExternalSecrets refresh hourly and Ready=True may describe their previous
+  // generation. Always trigger and observe a fresh provider read so a provider
+  // switch, SSO disable, or credential update reaches the target Secret before
+  // the Helm upgrade restarts pods.
+  const refreshBaselines = await forceExternalSecretsRefresh(config);
   try {
-    await waitForExternalSecrets(config);
+    await waitForExternalSecrets(config, { refreshBaselines });
   } catch (error) {
     // A denied write plus a failed sync means the entry really is missing:
     // point at the entries and the grant instead of only the sync status.

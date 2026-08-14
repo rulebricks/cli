@@ -20,8 +20,13 @@ import { getActiveWizardSteps } from "./wizardSteps.js";
 import {
   collectConfigIssues,
   configToWizardState,
+  getInitialState,
 } from "../components/Wizard/WizardContext.js";
 import { applyHelmValuesToConfig } from "../commands/configure.js";
+import {
+  extractProfileFromConfig,
+  normalizeProfileConfig,
+} from "./config.js";
 import {
   storageProviderForCloud,
   storageRegionForCloud,
@@ -62,6 +67,21 @@ function cloneFixture(name: string): DeploymentConfig {
   const entry = matrix.find((c) => c.name === name);
   assert.ok(entry, `missing matrix fixture ${name}`);
   return JSON.parse(JSON.stringify(entry.config)) as DeploymentConfig;
+}
+
+function reconcileTransition(
+  previous: DeploymentConfig,
+  next: DeploymentConfig,
+  options: Parameters<typeof buildHelmValues>[1] = {},
+): Record<string, any> {
+  const existing = buildHelmValues(previous, options) as Record<string, any>;
+  existing.customOperatorBlock = { keep: true };
+  const reconciled = buildDeployValues(existing, next, options) as Record<
+    string,
+    any
+  >;
+  assert.deepEqual(reconciled.customOperatorBlock, { keep: true });
+  return reconciled;
 }
 
 function assertNoBareExistsToleration(
@@ -407,6 +427,122 @@ test("configure wizard hydrates decision-log retention and persistence override"
 
   assert.equal(state.clickHousePersistenceEnabled, true);
   assert.equal(state.decisionLogRetentionDays, 60);
+});
+
+test("deployment schema normalizes mutually exclusive SMTP and disabled SSO", () => {
+  const config = cloneFixture("aws-all-features");
+  config.smtp.azure = {
+    communicationServiceId:
+      "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Communication/communicationServices/mail",
+    entraApplicationId: "stale-invalid-app-id",
+  };
+  config.smtp.acsApi = {
+    connectionString:
+      "endpoint=https://example.communication.azure.com/;accesskey=dGVzdA==",
+  };
+  config.features.sso = {
+    enabled: false,
+    provider: "okta",
+    url: "stale-invalid-url",
+    clientId: "stale-client",
+    clientSecret: "stale-secret",
+  };
+
+  const parsed = DeploymentConfigSchema.parse(config);
+  assert.ok(parsed.smtp.acsApi);
+  assert.equal(parsed.smtp.azure, undefined);
+  assert.equal(parsed.smtp.user, "");
+  assert.equal(parsed.smtp.pass, "");
+  assert.deepEqual(parsed.features.sso, { enabled: false });
+});
+
+test("configure import treats relay and disabled SSO switches as authoritative", () => {
+  const relayConfig = cloneFixture("azure-acs-api-email");
+
+  const absentRelay = applyHelmValuesToConfig(relayConfig, {
+    global: {
+      smtp: {
+        host: "smtp.sendgrid.net",
+        port: 587,
+        user: "apikey",
+        pass: "sendgrid-secret",
+        from: "no-reply@example.com",
+        fromName: "Rulebricks",
+      },
+    },
+  });
+  assert.equal(absentRelay.smtp.acsApi, undefined);
+  assert.equal(absentRelay.smtp.user, "apikey");
+
+  const disabledRelay = applyHelmValuesToConfig(relayConfig, {
+    smtpRelay: { enabled: false },
+  });
+  assert.equal(disabledRelay.smtp.acsApi, undefined);
+
+  const ssoConfig = cloneFixture("aws-all-features");
+  const disabledSso = applyHelmValuesToConfig(ssoConfig, {
+    global: {
+      sso: {
+        enabled: false,
+        provider: "okta",
+        url: "https://stale.okta.example",
+        clientId: "stale-client",
+        clientSecret: "stale-secret",
+      },
+    },
+  });
+  assert.deepEqual(disabledSso.features.sso, { enabled: false });
+
+  const changedProvider = applyHelmValuesToConfig(ssoConfig, {
+    global: { sso: { enabled: true, provider: "keycloak" } },
+  });
+  assert.deepEqual(changedProvider.features.sso, {
+    enabled: true,
+    provider: "keycloak",
+    url: undefined,
+    clientId: undefined,
+    clientSecret: undefined,
+  });
+
+  const redactedSameProvider = applyHelmValuesToConfig(ssoConfig, {
+    global: { sso: { enabled: true, provider: "okta" } },
+  });
+  assert.equal(
+    redactedSameProvider.features.sso.clientSecret,
+    ssoConfig.features.sso.clientSecret,
+  );
+});
+
+test("disabled SSO clears profile defaults and cannot re-enable the wizard", () => {
+  const config = cloneFixture("aws-all-features");
+  config.features.sso = { enabled: false };
+
+  const extracted = extractProfileFromConfig(config);
+  assert.equal(extracted.ssoEnabled, false);
+  assert.equal(extracted.ssoProvider, undefined);
+  assert.equal(extracted.ssoClientSecret, undefined);
+
+  const normalized = normalizeProfileConfig({
+    ssoEnabled: false,
+    ssoProvider: "okta",
+    ssoUrl: "https://stale.okta.example",
+    ssoClientId: "stale-client",
+    ssoClientSecret: "stale-secret",
+  });
+  assert.deepEqual(normalized, { ssoEnabled: false });
+
+  const initial = getInitialState({
+    ssoEnabled: false,
+    ssoProvider: "okta",
+    ssoUrl: "https://stale.okta.example",
+    ssoClientId: "stale-client",
+    ssoClientSecret: "stale-secret",
+  });
+  assert.equal(initial.ssoEnabled, false);
+  assert.equal(initial.ssoProvider, null);
+  assert.equal(initial.ssoUrl, "");
+  assert.equal(initial.ssoClientId, "");
+  assert.equal(initial.ssoClientSecret, "");
 });
 
 test("configure reconciles live decision-log retention and BYO persistence", () => {
@@ -1019,6 +1155,152 @@ test("chart values regen with resolved product version does not revert app", () 
     global: { version?: string };
   };
   assert.equal(fixed.global.version, "1.8.0");
+});
+
+test("owned values reconciliation switches ACS API email back to SMTP", () => {
+  const previous = cloneFixture("azure-acs-api-email");
+  const next = cloneFixture("azure-acs-api-email");
+  next.smtp = {
+    host: "smtp.example.com",
+    port: 587,
+    user: "smtp-user",
+    pass: "smtp-pass",
+    from: "no-reply@example.com",
+    fromName: "Rulebricks",
+  };
+
+  const values = reconcileTransition(previous, next);
+  assert.deepEqual(values.global.smtp, next.smtp);
+  assert.equal(values.smtpRelay, undefined);
+});
+
+test("owned values reconciliation removes SSO provider fields when disabled", () => {
+  const previous = cloneFixture("aws-all-features");
+  const next = cloneFixture("aws-all-features");
+  next.features.sso = { enabled: false };
+
+  const values = reconcileTransition(previous, next);
+  assert.deepEqual(values.global.sso, { enabled: false });
+});
+
+test("owned values reconciliation removes tracing, logging sinks, and TLS material", () => {
+  const previous = cloneFixture("aws-tracing-and-app-logs");
+  previous.tls = cloneFixture("azure-tls-provided").tls;
+  previous.features.logging.sink = "datadog";
+  previous.features.logging.bucket = "datadog-api-key";
+  previous.features.logging.region = "datadoghq.com";
+
+  const next = JSON.parse(JSON.stringify(previous)) as DeploymentConfig;
+  delete next.features.tracing;
+  delete next.features.logging.appLogs;
+  next.features.logging.sink = "console";
+  delete next.features.logging.bucket;
+  delete next.features.logging.region;
+  delete next.tls;
+
+  const existing = buildHelmValues(previous) as Record<string, any>;
+  assert.ok(existing.global.tlsPrivateCaBundle);
+  existing.customOperatorBlock = { keep: true };
+  existing.vector.customConfig.sinks.customer_archive = {
+    type: "http",
+    uri: "https://logs.customer.example",
+  };
+
+  const values = buildDeployValues(existing, next) as Record<string, any>;
+  assert.equal(values.global.tracing, undefined);
+  assert.deepEqual(values.traefik.tracing, {});
+  assert.equal(values["vector-agent"].enabled, false);
+  assert.deepEqual(values["vector-agent"].customConfig.sinks, {});
+  assert.equal(values.vector.customConfig.sinks.datadog, undefined);
+  assert.ok(values.vector.customConfig.sinks.console);
+  assert.deepEqual(values.vector.customConfig.sinks.customer_archive, {
+    type: "http",
+    uri: "https://logs.customer.example",
+  });
+  assert.equal(values.global.tlsPrivateCaBundle, undefined);
+  assert.deepEqual(values.customOperatorBlock, { keep: true });
+
+  const previousIssuer = cloneFixture("azure-tls-external-issuer");
+  const nextIssuer = cloneFixture("azure-tls-external-issuer");
+  delete nextIssuer.tls;
+  const issuerValues = reconcileTransition(previousIssuer, nextIssuer);
+  assert.equal(issuerValues.global.tlsIssuerRef, undefined);
+});
+
+test("owned values reconciliation switches external Redis back to embedded", () => {
+  const previous = cloneFixture("aws-external-redis");
+  const next = cloneFixture("aws-external-redis");
+  next.externalServices!.redis = { mode: "embedded" };
+
+  const values = reconcileTransition(previous, next);
+  assert.equal(values.rulebricks.redis.enabled, undefined);
+  assert.equal(values.rulebricks.redis.external, undefined);
+  assert.equal(values.rulebricks.redis.persistence.enabled, true);
+  assert.equal(values.rulebricks.redis.persistence.storageClass, "gp3");
+});
+
+test("owned values reconciliation switches external Postgres back to embedded", () => {
+  const previous = cloneFixture("aws-external-postgres");
+  const next = cloneFixture("aws-external-postgres");
+  next.externalServices!.postgres = { mode: "embedded" };
+
+  const existing = buildHelmValues(previous, {
+    secretMode: "k8s",
+    dbSslRootCert: "old-managed-db-ca",
+  }) as Record<string, any>;
+  existing.supabase.auth.environment.CUSTOM_OPERATOR_ENV = "keep";
+  existing.customOperatorBlock = { keep: true };
+
+  const values = buildDeployValues(existing, next, {
+    secretMode: "k8s",
+  }) as Record<string, any>;
+  assert.equal(values.supabase.externalDatabase, undefined);
+  assert.equal(values.migrations.externalDb, undefined);
+  assert.equal(values.supabase.db.enabled, true);
+  assert.equal(values.supabase.auth.environment.DB_SSL, undefined);
+  assert.equal(values.supabase.rest.environment.DB_SSL, undefined);
+  assert.equal(values.supabase.realtime.environment.DB_SSL, undefined);
+  assert.equal(values.supabase.meta.environment.DB_SSL, undefined);
+  assert.equal(values.supabase.auth.environment.CUSTOM_OPERATOR_ENV, "keep");
+  assert.deepEqual(values.customOperatorBlock, { keep: true });
+});
+
+test("owned values reconciliation switches external Kafka back to embedded", () => {
+  const previousMsk = cloneFixture("aws-external-kafka-msk");
+  const nextMsk = cloneFixture("aws-external-kafka-msk");
+  nextMsk.externalServices!.kafka = { mode: "embedded" };
+
+  const existingMsk = buildHelmValues(previousMsk) as Record<string, any>;
+  existingMsk.vector.extraContainers.push({
+    name: "customer-sidecar",
+    image: "customer/sidecar:1",
+  });
+  const mskValues = buildDeployValues(existingMsk, nextMsk) as Record<
+    string,
+    any
+  >;
+  assert.equal(mskValues.kafka.enabled, true);
+  assert.equal(mskValues.rulebricks.app.logging.kafkaBrokers, "");
+  assert.equal(mskValues.rulebricks.app.logging.kafkaTopic, "logs");
+  assert.equal(mskValues.rulebricks.app.logging.kafkaTopicPrefix, "");
+  assert.equal(mskValues.rulebricks.app.logging.kafkaSsl, undefined);
+  assert.equal(mskValues.rulebricks.app.logging.kafkaSasl, undefined);
+  assert.deepEqual(mskValues.kafkaBridge, { enabled: false });
+  assert.deepEqual(mskValues.vector.extraContainers, [
+    { name: "customer-sidecar", image: "customer/sidecar:1" },
+  ]);
+
+  // Direct SCRAM adds username/password to Vector's generated SASL map. They
+  // must not survive when the source returns to embedded Kafka.
+  const previousScram = cloneFixture("everything-external");
+  const nextScram = cloneFixture("everything-external");
+  nextScram.externalServices!.kafka = { mode: "embedded" };
+  const scramValues = reconcileTransition(previousScram, nextScram);
+  assert.deepEqual(scramValues.vector.customConfig.sources.kafka.sasl, {
+    enabled: "${KAFKA_SASL_ENABLED:-false}",
+    mechanism: "${KAFKA_SASL_MECHANISM:-PLAIN}",
+  });
+  assert.equal(scramValues.rulebricks.app.logging.kafkaSasl, undefined);
 });
 
 test("validateRemoteWriteConfig enforces per-destination requirements", () => {

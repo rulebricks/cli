@@ -18,6 +18,55 @@ function getErrorMessage(error: unknown): string {
   return execaError.shortMessage || execaError.message || "Unknown error";
 }
 
+export class HelmUpgradeError extends Error {
+  constructor(
+    message: string,
+    readonly ssaConflict: boolean,
+  ) {
+    super(message);
+    this.name = "HelmUpgradeError";
+  }
+}
+
+function helmErrorOutput(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (!error || typeof error !== "object") return "";
+
+  const candidate = error as {
+    message?: unknown;
+    shortMessage?: unknown;
+    stderr?: unknown;
+    stdout?: unknown;
+  };
+  return [
+    candidate.stderr,
+    candidate.stdout,
+    candidate.shortMessage,
+    candidate.message,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join("\n");
+}
+
+/**
+ * Helm 4's server-side apply conflict signature. Keep this intentionally
+ * stricter than a generic "conflict" check: --force-conflicts transfers field
+ * ownership, so it must never be offered for release locks, HTTP 409s, or
+ * ordinary chart errors.
+ */
+export function isHelmSsaConflict(error: unknown): boolean {
+  if (error instanceof HelmUpgradeError && error.ssaConflict) {
+    return true;
+  }
+
+  const output = helmErrorOutput(error);
+  return (
+    /conflict occurred while applying object/i.test(output) &&
+    /Apply failed with \d+ conflicts?:/i.test(output) &&
+    /conflicts? with\s+"[^"]+"/i.test(output)
+  );
+}
+
 /**
  * Checks if Helm is installed
  */
@@ -566,20 +615,27 @@ export async function installOrUpgradeChart(
 /**
  * Upgrades the Rulebricks Helm chart
  */
-export async function upgradeChart(
+export interface UpgradeChartOptions {
+  releaseName: string;
+  namespace: string;
+  version?: string;
+  wait?: boolean;
+  timeout?: string;
+  /** Roll the release back automatically when the upgrade fails. */
+  atomic?: boolean;
+  /**
+   * Helm 4 SSA only: transfer ownership of fields that produced an actual
+   * server-side apply conflict on a prior guarded attempt.
+   */
+  forceConflicts?: boolean;
+  /** Chart OCI ref to upgrade from (a fully mirrored registry's copy). */
+  chartRef?: string;
+}
+
+export function buildUpgradeChartArgs(
   deploymentName: string,
-  options: {
-    releaseName: string;
-    namespace: string;
-    version?: string;
-    wait?: boolean;
-    timeout?: string;
-    /** Roll the release back automatically when the upgrade fails. */
-    atomic?: boolean;
-    /** Chart OCI ref to upgrade from (a fully mirrored registry's copy). */
-    chartRef?: string;
-  },
-): Promise<void> {
+  options: UpgradeChartOptions,
+): string[] {
   const {
     releaseName,
     namespace,
@@ -587,11 +643,10 @@ export async function upgradeChart(
     wait = true,
     timeout = "15m",
     atomic = false,
+    forceConflicts = false,
     chartRef = HELM_CHART_OCI,
   } = options;
-
   const valuesPath = getHelmValuesPath(deploymentName);
-
   const args = [
     "upgrade",
     releaseName,
@@ -606,6 +661,10 @@ export async function upgradeChart(
     args.push("--version", version);
   }
 
+  if (forceConflicts) {
+    args.push("--force-conflicts");
+  }
+
   if (atomic) {
     // --atomic implies --wait; a failed upgrade rolls back to the previous
     // release instead of leaving it stranded mid-upgrade.
@@ -616,10 +675,22 @@ export async function upgradeChart(
     args.push("--timeout", timeout);
   }
 
+  return args;
+}
+
+export async function upgradeChart(
+  deploymentName: string,
+  options: UpgradeChartOptions,
+): Promise<void> {
+  const args = buildUpgradeChartArgs(deploymentName, options);
+
   try {
     await execa("helm", args);
   } catch (error) {
-    throw new Error(`Helm upgrade failed:\n${getErrorMessage(error)}`);
+    throw new HelmUpgradeError(
+      `Helm upgrade failed:\n${getErrorMessage(error)}`,
+      isHelmSsaConflict(error),
+    );
   }
 }
 

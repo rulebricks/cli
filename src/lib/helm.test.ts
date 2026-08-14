@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseDeployedChartVersion, parseGitHubReleases } from "./helm.js";
+import {
+  buildUpgradeChartArgs,
+  isHelmSsaConflict,
+  parseDeployedChartVersion,
+  parseGitHubReleases,
+} from "./helm.js";
 import { deriveTlsEnabled } from "./helmValues.js";
 
 test("parses GitHub releases into chart versions, newest first", () => {
@@ -102,4 +107,61 @@ test("derives TLS state from values with sensible fallbacks", () => {
   // Fully deployed systems run TLS; default true when neither key exists.
   assert.equal(deriveTlsEnabled({}), true);
   assert.equal(deriveTlsEnabled(null), true);
+});
+
+test("classifies actual Helm 4 server-side apply conflicts", () => {
+  const stderr =
+    'Error: UPGRADE FAILED: conflict occurred while applying object default/rulebricks apps/v1, Kind=Deployment: Apply failed with 1 conflict: conflict with "kube-controller-manager" with subresource "scale" using apps/v1: .spec.replicas';
+
+  assert.equal(isHelmSsaConflict({ stderr }), true);
+  assert.equal(isHelmSsaConflict(new Error(stderr)), true);
+});
+
+test("does not classify generic Helm or Kubernetes conflicts as SSA conflicts", () => {
+  assert.equal(
+    isHelmSsaConflict(
+      new Error(
+        "UPGRADE FAILED: another operation (install/upgrade/rollback) is in progress",
+      ),
+    ),
+    false,
+  );
+  assert.equal(
+    isHelmSsaConflict(
+      new Error('the object has been modified; conflict with "controller"'),
+    ),
+    false,
+  );
+  assert.equal(
+    isHelmSsaConflict(
+      new Error(
+        'Apply failed with 1 conflict: conflict with "kubectl" using apps/v1: .spec.replicas',
+      ),
+    ),
+    false,
+  );
+});
+
+test("adds force-conflicts only to an explicitly forced upgrade retry", () => {
+  const baseOptions = {
+    releaseName: "rulebricks-prod",
+    namespace: "rulebricks-prod",
+    version: "0.4.0",
+    chartRef: "oci://registry.example.com/rulebricks/stack",
+    atomic: true,
+  };
+
+  const normal = buildUpgradeChartArgs("prod", baseOptions);
+  assert.equal(normal.includes("--force-conflicts"), false);
+  assert.equal(normal.includes("--atomic"), true);
+  assert.equal(normal.includes("--wait"), false);
+
+  const forced = buildUpgradeChartArgs("prod", {
+    ...baseOptions,
+    forceConflicts: true,
+  });
+  assert.equal(
+    forced.filter((arg) => arg === "--force-conflicts").length,
+    1,
+  );
 });

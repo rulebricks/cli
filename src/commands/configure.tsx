@@ -22,6 +22,7 @@ import {
   DeploymentConfig,
   ProfileConfig,
   SecretKeyRef,
+  normalizeDeploymentConfig,
 } from "../types/index.js";
 
 interface ConfigureCommandProps {
@@ -80,20 +81,6 @@ export function applyHelmValuesToConfig(
       };
     }
 
-    // ACS API-key relay (top-level smtpRelay block): keep config.smtp.acsApi
-    // in sync with the live release so the wizard re-detects the provider and
-    // empty SMTP creds keep validating. In k8s/eso modes the values carry only
-    // an existingSecret reference, so the config's own connection string (the
-    // secret's source) is preserved.
-    if (isRecord(values.smtpRelay) && values.smtpRelay.enabled === true) {
-      next.smtp.acsApi = {
-        connectionString:
-          stringValue(values.smtpRelay.connectionString) ??
-          next.smtp.acsApi?.connectionString ??
-          "",
-      };
-    }
-
     if (isRecord(global.supabase)) {
       if (next.database.type === "supabase-cloud") {
         next.database.supabaseUrl =
@@ -121,18 +108,30 @@ export function applyHelmValuesToConfig(
     // (Settings -> AI features), not via Helm values.
 
     if (isRecord(global.sso)) {
-      next.features.sso.enabled =
-        booleanValue(global.sso.enabled) ?? next.features.sso.enabled;
-      next.features.sso.provider =
-        (stringValue(global.sso.provider) as typeof next.features.sso.provider) ??
-        next.features.sso.provider;
-      next.features.sso.url =
-        stringValue(global.sso.url) ?? next.features.sso.url;
-      next.features.sso.clientId =
-        stringValue(global.sso.clientId) ?? next.features.sso.clientId;
-      next.features.sso.clientSecret =
-        stringValue(global.sso.clientSecret) ??
-        next.features.sso.clientSecret;
+      const savedSso = next.features.sso;
+      const enabled = booleanValue(global.sso.enabled) ?? savedSso.enabled;
+      if (!enabled) {
+        next.features.sso = { enabled: false };
+      } else {
+        const liveProvider = stringValue(global.sso.provider) as
+          | typeof savedSso.provider
+          | undefined;
+        const providerChanged =
+          !!liveProvider && liveProvider !== savedSso.provider;
+        next.features.sso = {
+          enabled: true,
+          provider: liveProvider ?? savedSso.provider,
+          url:
+            stringValue(global.sso.url) ??
+            (providerChanged ? undefined : savedSso.url),
+          clientId:
+            stringValue(global.sso.clientId) ??
+            (providerChanged ? undefined : savedSso.clientId),
+          clientSecret:
+            stringValue(global.sso.clientSecret) ??
+            (providerChanged ? undefined : savedSso.clientSecret),
+        };
+      }
     }
 
     if (isRecord(global.clickstack)) {
@@ -194,6 +193,30 @@ export function applyHelmValuesToConfig(
         };
       }
     }
+  }
+
+  // The top-level relay switch is authoritative for the ACS API-key mode.
+  // Redacted k8s/ESO values carry only existingSecret, so preserve the saved
+  // connection string while the relay is active. A disabled or absent block
+  // must remove acsApi; otherwise configure would resurrect a relay removed
+  // from values.yaml.
+  const smtpRelay = isRecord(values.smtpRelay) ? values.smtpRelay : null;
+  if (smtpRelay?.enabled === true) {
+    const connectionString =
+      stringValue(smtpRelay.connectionString) ??
+      next.smtp.acsApi?.connectionString;
+    next.smtp = {
+      ...next.smtp,
+      user: "",
+      pass: "",
+      azure: undefined,
+      acsApi: connectionString ? { connectionString } : undefined,
+    };
+  } else {
+    next.smtp = {
+      ...next.smtp,
+      acsApi: undefined,
+    };
   }
 
   const clickStackValues = isRecord(values.clickstack)
@@ -395,7 +418,7 @@ export function applyHelmValuesToConfig(
     };
   }
 
-  return next;
+  return normalizeDeploymentConfig(next);
 }
 
 function ConfigureCommandInner({

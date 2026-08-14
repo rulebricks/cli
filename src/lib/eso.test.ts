@@ -7,8 +7,16 @@ import {
   formatSeedDeniedHint,
   isEsoBackend,
   mergeMissingSecretKeys,
+  obsoleteEsoSecretEntries,
+  reconcileManagedSecretKeys,
 } from "./eso.js";
-import { buildDeploymentSecrets } from "./secrets.js";
+import {
+  buildDeploymentSecretMergePatch,
+  buildDeploymentSecrets,
+  deploymentSecretInventory,
+  isDeploymentOwnedSecretResource,
+  obsoleteDeploymentSecretNames,
+} from "./secrets.js";
 import { deploymentSecretNames } from "./helmValues.js";
 import { secretModeForConfig } from "./deploySequence.js";
 import { buildConfigMatrix } from "./configFixtures.js";
@@ -127,6 +135,39 @@ test("ACS API-key relay: connection-string secret created and ESO-mapped, no emp
   );
 });
 
+test("ACS API-key relay: stale smtp credentials on the config never reach the secrets", () => {
+  // Simulates a config that switched to ACS mode but still carries the old
+  // SMTP credentials (hand-edited, or persisted before normalizeSmtpConfig
+  // existed). GoTrue refuses plaintext SMTP AUTH to non-localhost hosts and
+  // the relay ignores credentials, so leaked creds break every auth email -
+  // and via reconcileManagedSecretKeys they would also resurrect inside the
+  // cloud vault entry on every deploy.
+  const base = fixture("azure-acs-api-email");
+  base.smtp.user = "stale-user@corp.example.com";
+  base.smtp.pass = "stale-password";
+  const names = deploymentSecretNames(base);
+  const direct = buildDeploymentSecrets(base);
+
+  const smtp = direct.find((s) => s.name === names.smtp);
+  assert.ok(smtp, "supabase-smtp secret exists in relay mode");
+  assert.deepEqual(smtp!.stringData, { username: "", password: "" });
+
+  const app = direct.find((s) => s.name === names.app)!;
+  assert.equal(app.stringData.SMTP_USER, "");
+  assert.equal(app.stringData.SMTP_PASS, "");
+
+  // The ESO seed JSON is what reconciliation writes into the vault entry.
+  const entries = esoSecretEntries(
+    withBackend(base, { backend: "azure-key-vault" }),
+  );
+  const smtpEntry = entries.find((e) => e.k8sName === names.smtp);
+  assert.ok(smtpEntry, "smtp secret has an ESO entry");
+  assert.deepEqual(JSON.parse(smtpEntry!.json), {
+    username: "",
+    password: "",
+  });
+});
+
 test("ExternalSecret targets are exactly the chart's secretRef names", () => {
   const config = withBackend(fixture("aws-all-features"), {
     backend: "aws-secrets-manager",
@@ -151,6 +192,10 @@ test("ExternalSecret targets are exactly the chart's secretRef names", () => {
     assert.equal(es.spec.secretStoreRef.name, "rulebricks-secrets");
     assert.equal(es.spec.secretStoreRef.kind, "SecretStore");
     assert.equal(es.spec.target.creationPolicy, "Owner");
+    assert.equal(
+      es.spec.target.template.metadata.labels["app.kubernetes.io/managed-by"],
+      "rulebricks-cli",
+    );
     assert.ok(es.spec.dataFrom[0].extract.key);
   }
 
@@ -280,4 +325,187 @@ test("mergeMissingSecretKeys never touches hand-managed non-JSON entries", () =>
   assert.equal(mergeMissingSecretKeys('"a plain string"', desired), null);
   assert.equal(mergeMissingSecretKeys('["array"]', desired), null);
   assert.equal(mergeMissingSecretKeys("null", desired), null);
+});
+
+test("provider switch updates active SMTP credentials in cloud JSON", () => {
+  const before = withBackend(fixture("aws-all-features"), {
+    backend: "aws-secrets-manager",
+  });
+  const names = deploymentSecretNames(before);
+  const previous = esoSecretEntries(before).find(
+    (entry) => entry.k8sName === names.app,
+  )!;
+
+  const after = structuredClone(before);
+  after.smtp = {
+    ...after.smtp,
+    host: "smtp.new-provider.example",
+    user: "new-provider-user",
+    pass: "new-provider-pass",
+  };
+  const desired = esoSecretEntries(after).find(
+    (entry) => entry.k8sName === names.app,
+  )!;
+  const existing = {
+    ...JSON.parse(previous.json),
+    SMTP_USER: "old-provider-user",
+    SMTP_PASS: "old-provider-pass",
+  };
+
+  const reconciled = reconcileManagedSecretKeys(
+    JSON.stringify(existing),
+    desired.json,
+    desired.knownKeys,
+  );
+  assert.ok(reconciled);
+  assert.equal(JSON.parse(reconciled!).SMTP_USER, "new-provider-user");
+  assert.equal(JSON.parse(reconciled!).SMTP_PASS, "new-provider-pass");
+});
+
+test("SSO disable removes inactive known keys from cloud JSON and k8s patches", () => {
+  const enabled = withBackend(fixture("aws-all-features"), {
+    backend: "aws-secrets-manager",
+  });
+  const names = deploymentSecretNames(enabled);
+  const previous = esoSecretEntries(enabled).find(
+    (entry) => entry.k8sName === names.app,
+  )!;
+
+  const disabled = structuredClone(enabled);
+  disabled.features.sso = { enabled: false };
+  const desired = esoSecretEntries(disabled).find(
+    (entry) => entry.k8sName === names.app,
+  )!;
+  const reconciled = reconcileManagedSecretKeys(
+    previous.json,
+    desired.json,
+    desired.knownKeys,
+  );
+  assert.ok(reconciled);
+  assert.equal("SSO_CLIENT_ID" in JSON.parse(reconciled!), false);
+  assert.equal("SSO_CLIENT_SECRET" in JSON.parse(reconciled!), false);
+
+  const appSecret = buildDeploymentSecrets(disabled).find(
+    (secret) => secret.name === names.app,
+  )!;
+  const patch = buildDeploymentSecretMergePatch(disabled, appSecret) as {
+    data: Record<string, string | null>;
+  };
+  assert.equal(patch.data.SSO_CLIENT_ID, null);
+  assert.equal(patch.data.SSO_CLIENT_SECRET, null);
+  assert.equal(
+    Buffer.from(patch.data.SMTP_USER!, "base64").toString("utf8"),
+    disabled.smtp.user,
+  );
+});
+
+test("relay removal prunes deterministic in-cluster and ESO consumers", () => {
+  const relay = withBackend(fixture("azure-acs-api-email"), {
+    backend: "azure-key-vault",
+    azure: { vaultName: "rulebricks-test" },
+  });
+  const names = deploymentSecretNames(relay);
+  const oldRelay = esoSecretEntries(relay).find(
+    (entry) => entry.k8sName === names.smtpRelay,
+  )!;
+
+  const standardSmtp = structuredClone(relay);
+  standardSmtp.smtp = {
+    host: "smtp.example.com",
+    port: 587,
+    user: "smtp-user",
+    pass: "smtp-pass",
+    from: "no-reply@example.com",
+    fromName: "Rulebricks",
+  };
+
+  assert.ok(
+    obsoleteDeploymentSecretNames(standardSmtp).includes(names.smtpRelay),
+  );
+  assert.ok(
+    obsoleteEsoSecretEntries(standardSmtp).some(
+      (entry) =>
+        entry.k8sName === names.smtpRelay &&
+        entry.remoteKey === oldRelay.remoteKey,
+    ),
+  );
+  assert.equal(
+    (buildEsoManifests(standardSmtp) as Array<{ kind: string; metadata: { name: string } }>).some(
+      (manifest) =>
+        manifest.kind === "ExternalSecret" &&
+        manifest.metadata.name === names.smtpRelay,
+    ),
+    false,
+  );
+});
+
+test("cloud reconciliation preserves unknown customer keys", () => {
+  const existing = JSON.stringify({
+    SMTP_USER: "old",
+    SMTP_PASS: "old",
+    CUSTOMER_NOTE: "keep-me",
+    CUSTOMER_NESTED: { owner: "platform" },
+  });
+  const desired = JSON.stringify({
+    SMTP_USER: "new",
+    SMTP_PASS: "new",
+  });
+  const reconciled = reconcileManagedSecretKeys(existing, desired, [
+    "SMTP_USER",
+    "SMTP_PASS",
+    "SSO_CLIENT_ID",
+  ]);
+  assert.deepEqual(JSON.parse(reconciled!), {
+    SMTP_USER: "new",
+    SMTP_PASS: "new",
+    CUSTOMER_NOTE: "keep-me",
+    CUSTOMER_NESTED: { owner: "platform" },
+  });
+});
+
+test("secret inventory never adopts BYO/custom secret references", () => {
+  const config = fixture("everything-external");
+  const inventoryNames = deploymentSecretInventory(config).map(
+    (entry) => entry.name,
+  );
+  assert.equal(inventoryNames.includes("redis-auth"), false);
+  assert.equal(inventoryNames.includes("azure-storage"), false);
+  assert.equal(inventoryNames.includes("metrics"), false);
+});
+
+test("legacy pruning requires deterministic names and known CLI keys", () => {
+  const config = fixture("aws-self-hosted-minimal");
+  const name = deploymentSecretNames(config).smtpRelay;
+  const legacy = (stringData: Record<string, string>) => ({
+    kind: "Secret",
+    metadata: {
+      name,
+      annotations: {
+        "kubectl.kubernetes.io/last-applied-configuration": JSON.stringify({
+          kind: "Secret",
+          metadata: { name },
+          stringData,
+        }),
+      },
+    },
+  });
+
+  assert.equal(
+    isDeploymentOwnedSecretResource(
+      config,
+      legacy({ "connection-string": "old" }),
+      "Secret",
+      name,
+    ),
+    true,
+  );
+  assert.equal(
+    isDeploymentOwnedSecretResource(
+      config,
+      legacy({ "customer-key": "keep" }),
+      "Secret",
+      name,
+    ),
+    false,
+  );
 });

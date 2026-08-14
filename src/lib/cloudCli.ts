@@ -126,7 +126,7 @@ interface ExecCommandOptions {
 async function execCommand(
   command: string,
   options: ExecCommandOptions | number = {},
-): Promise<{ stdout: string; stderr: string }> {
+): Promise<{ stdout: string; stderr: string; failed: boolean }> {
   const opts: ExecCommandOptions =
     typeof options === "number" ? { timeout: options } : options;
   const timeout = opts.timeout ?? CLI_TIMEOUT;
@@ -140,7 +140,7 @@ async function execCommand(
       mutating: opts.mutating,
     });
     const result = await execAsync(command, { timeout });
-    return result;
+    return { ...result, failed: false };
   } catch (error: unknown) {
     if (error && typeof error === "object" && "stdout" in error) {
       // Command executed but returned non-zero exit code
@@ -152,6 +152,7 @@ async function execCommand(
       return {
         stdout: execError.stdout || "",
         stderr: execError.stderr || execError.message || "Command failed",
+        failed: true,
       };
     }
     throw error;
@@ -4872,10 +4873,9 @@ export async function getGcpRedisAuthString(
 //
 // Secret VALUES never appear in a shell string or process argv: writes run
 // through execa (no shell) and stream the value over stdin. The approval
-// prompt shows a redacted command. create-if-absent by default so values a
-// client rotated in their platform are never clobbered (seedCloudSecrets
-// merges newly-required keys into existing entries); overwrite=true forces
-// an update (deploy --sync-secrets).
+// prompt shows a redacted command. Callers choose create-only or overwrite;
+// seedCloudSecrets reads existing JSON first and only overwrites after safely
+// reconciling the CLI-owned keys while preserving unknown customer keys.
 // ============================================================================
 
 export interface SecretWriteResult {
@@ -4929,17 +4929,18 @@ export async function readAwsSecretsManagerSecret(options: {
   name: string;
   region: string;
 }): Promise<string | null> {
-  try {
-    const result = await execCommand(
-      `aws secretsmanager get-secret-value --secret-id "${options.name}" --region ${options.region} --query SecretString --output text`,
-      { intent: "Check secrets manager entry", provider: "aws" },
-    );
-    const raw = result.stdout.trim();
-    if (!raw || raw === "None" || result.stderr) return null;
-    return raw;
-  } catch {
-    return null;
+  const result = await execCommand(
+    `aws secretsmanager get-secret-value --secret-id "${options.name}" --region ${options.region} --query SecretString --output text`,
+    { intent: "Check secrets manager entry", provider: "aws" },
+  );
+  if (result.failed) {
+    if (/ResourceNotFoundException|can't find the specified secret/i.test(result.stderr)) {
+      return null;
+    }
+    throw new Error(`Unable to read Secrets Manager entry ${options.name}: ${result.stderr}`);
   }
+  const raw = result.stdout.trim();
+  return !raw || raw === "None" ? null : raw;
 }
 
 /**
@@ -4950,19 +4951,24 @@ export async function readAzureKeyVaultSecret(options: {
   vaultName: string;
   name: string;
 }): Promise<string | null> {
-  try {
-    // JSON output round-trips values with tabs/newlines that tsv would mangle.
-    const result = await execCommand(
-      `az keyvault secret show --vault-name ${options.vaultName} --name ${options.name} --query value --output json`,
-      { intent: "Check Key Vault entry", provider: "azure" },
-    );
-    const raw = result.stdout.trim();
-    if (!raw || result.stderr) return null;
-    const parsed = JSON.parse(raw);
-    return typeof parsed === "string" ? parsed : null;
-  } catch {
-    return null;
+  // JSON output round-trips values with tabs/newlines that tsv would mangle.
+  const result = await execCommand(
+    `az keyvault secret show --vault-name ${options.vaultName} --name ${options.name} --query value --output json`,
+    { intent: "Check Key Vault entry", provider: "azure" },
+  );
+  if (result.failed) {
+    if (/SecretNotFound|was not found in this key vault/i.test(result.stderr)) {
+      return null;
+    }
+    throw new Error(`Unable to read Key Vault entry ${options.name}: ${result.stderr}`);
   }
+  const raw = result.stdout.trim();
+  if (!raw) return null;
+  const parsed = JSON.parse(raw);
+  if (typeof parsed !== "string") {
+    throw new Error(`Key Vault entry ${options.name} did not contain a string value.`);
+  }
+  return parsed;
 }
 
 /**
@@ -4973,17 +4979,18 @@ export async function readGcpSecretManagerSecret(options: {
   projectId: string;
   name: string;
 }): Promise<string | null> {
-  try {
-    const result = await execCommand(
-      `gcloud secrets versions access latest --secret ${options.name} --project ${options.projectId}`,
-      { intent: "Check Secret Manager entry", provider: "gcp" },
-    );
-    const raw = result.stdout.trim();
-    if (!raw || result.stderr) return null;
-    return raw;
-  } catch {
-    return null;
+  const result = await execCommand(
+    `gcloud secrets versions access latest --secret ${options.name} --project ${options.projectId}`,
+    { intent: "Check Secret Manager entry", provider: "gcp" },
+  );
+  if (result.failed) {
+    if (/(?:NOT_FOUND|not found|does not exist).*secret|secret.*(?:not found|does not exist)/i.test(result.stderr)) {
+      return null;
+    }
+    throw new Error(`Unable to read Secret Manager entry ${options.name}: ${result.stderr}`);
   }
+  const raw = result.stdout.trim();
+  return raw || null;
 }
 
 /**
@@ -5001,7 +5008,7 @@ export async function writeAwsSecretsManagerSecret(options: {
     `aws secretsmanager describe-secret --secret-id "${name}" --region ${region} --query ARN --output text`,
     { intent: "Check secrets manager entry", provider: "aws" },
   );
-  const exists = Boolean(describe.stdout.trim()) && !describe.stderr;
+  const exists = Boolean(describe.stdout.trim()) && !describe.failed;
 
   if (exists && !overwrite) {
     return { created: false, updated: false, skipped: true };
@@ -5068,7 +5075,7 @@ export async function writeAzureKeyVaultSecret(options: {
     `az keyvault secret show --vault-name ${vaultName} --name ${name} --query id --output tsv`,
     { intent: "Check Key Vault entry", provider: "azure" },
   );
-  const exists = Boolean(show.stdout.trim()) && !show.stderr;
+  const exists = Boolean(show.stdout.trim()) && !show.failed;
 
   if (exists && !overwrite) {
     return { created: false, updated: false, skipped: true };
@@ -5115,7 +5122,7 @@ export async function writeGcpSecretManagerSecret(options: {
     `gcloud secrets describe ${name} --project ${projectId} --format="value(name)"`,
     { intent: "Check Secret Manager entry", provider: "gcp" },
   );
-  const exists = Boolean(describe.stdout.trim()) && !describe.stderr;
+  const exists = Boolean(describe.stdout.trim()) && !describe.failed;
 
   if (exists && !overwrite) {
     return { created: false, updated: false, skipped: true };

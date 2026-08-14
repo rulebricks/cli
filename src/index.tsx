@@ -29,6 +29,7 @@ import {
 } from "./commands/host.js";
 import { listDeployments, deploymentExists } from "./lib/config.js";
 import { importValuesFile } from "./lib/valuesImport.js";
+import { syncValuesFile } from "./lib/valuesSync.js";
 import { validateDeploymentName } from "./types/index.js";
 import { DeploymentPicker } from "./components/common/DeploymentPicker.js";
 
@@ -99,7 +100,7 @@ program
   )
   .option(
     "--sync-secrets",
-    "Overwrite the secrets manager entries with this config's values (default: create missing entries and add missing keys, preserving existing values)",
+    "Force a full deploy and immediate ESO refresh (CLI-owned keys reconcile automatically; unknown customer keys are preserved)",
   )
   .action(async (name, options) => {
     const deploymentName = name || (await selectDeployment("deploy"));
@@ -172,6 +173,10 @@ program
     "Target chart version (skips chart picker)",
   )
   .option("--dry-run", "Preview changes without applying")
+  .option(
+    "--force-conflicts",
+    "After an actual Helm 4 SSA conflict, allow one retry that takes field ownership",
+  )
   .action(async (name, options) => {
     const deploymentName = name || (await selectDeployment("upgrade"));
     if (!deploymentName) {
@@ -187,6 +192,7 @@ program
         targetVersion={options.version}
         targetChartVersion={options.chartVersion}
         dryRun={options.dryRun}
+        forceConflicts={options.forceConflicts}
       />,
     );
     await waitUntilExit();
@@ -499,6 +505,103 @@ valuesCommand
       console.error(
         chalk.dim(
           "Chunks already uploaded were applied; re-running the same import is safe (upserts are idempotent).",
+        ),
+      );
+      process.exit(1);
+    }
+  });
+
+valuesCommand
+  .command("sync")
+  .description(
+    "Make a collection exactly equal to a JSON dictionary: values in the file are upserted, values missing from it are archived (or hard-deleted with --permanently-delete)",
+  )
+  .argument("<file>", "Path to a JSON file of the collection's desired members")
+  .requiredOption(
+    "--collection <path>",
+    'Collection to sync (e.g. "Medical Codes"); keys in the file are relative to it',
+  )
+  .requiredOption(
+    "--url <url>",
+    "Instance URL (e.g. https://rulebricks.example.com)",
+  )
+  .option(
+    "--api-key <key>",
+    "API key (defaults to the RULEBRICKS_API_KEY environment variable)",
+  )
+  .option(
+    "--permanently-delete",
+    "Hard-delete removed values instead of archiving them (removals still referenced anywhere are archived and reported)",
+  )
+  .option(
+    "--dry-run",
+    "Preview the full diff without writing anything (single-request syncs only)",
+  )
+  .action(async (file, options) => {
+    const apiKey = options.apiKey || process.env.RULEBRICKS_API_KEY;
+    if (!apiKey) {
+      console.error(
+        chalk.red(
+          "An API key is required. Pass --api-key or set RULEBRICKS_API_KEY.",
+        ),
+      );
+      process.exit(1);
+    }
+
+    try {
+      const started = Date.now();
+      const result = await syncValuesFile({
+        filePath: file,
+        url: options.url,
+        apiKey,
+        collection: options.collection,
+        permanentlyDelete: options.permanentlyDelete === true,
+        dryRun: options.dryRun === true,
+        onProgress: ({ processed, total, chunk, chunkCount }) => {
+          const pct = Math.round((processed / Math.max(total, 1)) * 100);
+          process.stdout.write(
+            `\r${chalk.dim(`Chunk ${chunk}/${chunkCount}`)}  ${processed.toLocaleString()}/${total.toLocaleString()} values (${pct}%)   `,
+          );
+        },
+      });
+      const seconds = ((Date.now() - started) / 1000).toFixed(1);
+      process.stdout.write("\n");
+      const verb = result.dryRun ? "Would sync" : "Synced";
+      console.log(
+        chalk.green(
+          `${verb} "${options.collection}" in ${seconds}s: ` +
+            `${result.created.toLocaleString()} created, ${result.updated.toLocaleString()} updated, ` +
+            `${result.unchanged.toLocaleString()} unchanged, ${result.archived.toLocaleString()} archived, ` +
+            `${result.deleted.toLocaleString()} deleted.`,
+        ),
+      );
+      for (const blocked of result.blocked.slice(0, 10)) {
+        console.log(
+          chalk.yellow(`  archived instead of deleted: ${blocked.name} (${blocked.reason})`),
+        );
+      }
+      if (result.blocked.length > 10) {
+        console.log(chalk.yellow(`  ...and ${result.blocked.length - 10} more`));
+      }
+      for (const failure of result.errors.slice(0, 10)) {
+        console.log(chalk.red(`  skipped: ${failure.name} (${failure.error})`));
+      }
+      if (result.errors.length > 10) {
+        console.log(chalk.red(`  ...and ${result.errors.length - 10} more`));
+      }
+      if (result.errors.length > 0 && !result.dryRun) {
+        process.exit(2);
+      }
+    } catch (error) {
+      process.stdout.write("\n");
+      console.error(
+        chalk.red(
+          `Sync failed: ${error instanceof Error ? error.message : error}`,
+        ),
+      );
+      console.error(
+        chalk.dim(
+          "Nothing was removed: the sweep only runs when a sync completes. Re-running the same sync is safe.",
         ),
       );
       process.exit(1);

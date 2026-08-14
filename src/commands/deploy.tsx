@@ -112,8 +112,8 @@ interface DeployCommandProps {
   // "k8s" (CLI-created cluster Secrets, the "cluster" backend). Either way
   // the generated values carry only secretRef references.
   inlineSecrets?: boolean;
-  // ESO backends only: overwrite provider entries with the config's values
-  // (default is create-if-absent so client-rotated values are preserved).
+  // ESO backends only: force a full deploy and immediate refresh. Known
+  // CLI-owned keys reconcile on every deploy; unknown customer keys survive.
   syncSecrets?: boolean;
   // Bypass DNS/TLS resume detection and run the complete deployment pipeline.
   forceFull?: boolean;
@@ -750,12 +750,21 @@ function DeployCommandInner({
             const { seeded } = await setupExternalSecrets(cfg, {
               overwriteSecrets: syncSecrets,
             });
+            const secretWarnings: string[] = [];
             // Sync succeeded, so the entries exist (pre-seeded by the
             // platform); just flag that this machine could not write them.
             if (seeded.denied.length > 0) {
-              setSecretsWarning(
+              secretWarnings.push(
                 `${seeded.denied.length} secret entr${seeded.denied.length === 1 ? "y was" : "ies were"} not writable from this machine (access denied); existing platform values were used: ${seeded.denied.join(", ")}`,
               );
+            }
+            if (seeded.retained.length > 0) {
+              secretWarnings.push(
+                `Obsolete ExternalSecret consumers were detached; remote vault entries were left untouched (if present): ${seeded.retained.join(", ")}`,
+              );
+            }
+            if (secretWarnings.length > 0) {
+              setSecretsWarning(secretWarnings.join(" "));
             }
             // external-dns's azure.json is provider plumbing, not an
             // application secret - the chart mounts it unconditionally when

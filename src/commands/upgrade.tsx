@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import SelectInput from "ink-select-input";
 import fs from "fs/promises";
-import YAML from "yaml";
+import path from "path";
 import {
   BorderBox,
   Spinner,
@@ -15,6 +15,7 @@ import {
   loadDeploymentState,
   saveDeploymentConfig,
   updateDeploymentStatus,
+  getDeploymentDir,
   getHelmValuesPath,
   loadHelmValues,
 } from "../lib/config.js";
@@ -23,11 +24,11 @@ import {
   upgradeChart,
   dryRunUpgrade,
   getInstalledChartVersion,
+  isHelmSsaConflict,
 } from "../lib/helm.js";
 import {
   deriveTlsEnabled,
   generateHelmValuesPreservingEdits,
-  resolveProductVersion,
 } from "../lib/helmValues.js";
 import { resolveImageCatalog } from "../lib/imageCatalog.js";
 import {
@@ -62,6 +63,7 @@ import {
 import { ensureNamespace, applyDeploymentSecrets } from "../lib/secrets.js";
 import { setupExternalSecrets } from "../lib/eso.js";
 import { secretModeForConfig } from "../lib/deploySequence.js";
+import { runUpgradeReconciliation } from "../lib/upgradeReconciliation.js";
 
 const CHART_RELEASES_URL = "https://github.com/rulebricks/helm/releases";
 
@@ -72,6 +74,8 @@ interface UpgradeCommandProps {
   /** Skip the chart picker and target this chart version. */
   targetChartVersion?: string;
   dryRun?: boolean;
+  /** Allow one guarded Helm 4 SSA conflict retry without prompting. */
+  forceConflicts?: boolean;
 }
 
 function hasSameVersionHpsPatch(
@@ -151,6 +155,7 @@ type UpgradeStep =
   | "selectChart"
   | "preparing"
   | "confirm"
+  | "confirmForceConflicts"
   | "upgrading"
   | "complete"
   | "error";
@@ -160,6 +165,7 @@ function UpgradeCommandInner({
   targetVersion,
   targetChartVersion,
   dryRun,
+  forceConflicts,
 }: UpgradeCommandProps) {
   const { exit } = useApp();
   const { colors } = useTheme();
@@ -175,7 +181,8 @@ function UpgradeCommandInner({
   const [error, setError] = useState<string | null>(null);
   const [dryRunOutput, setDryRunOutput] = useState<string | null>(null);
   const [rolledBack, setRolledBack] = useState(false);
-  const [valuesSnapshot, setValuesSnapshot] = useState<string | null>(null);
+  const [ssaConflictError, setSsaConflictError] = useState<string | null>(null);
+  const [secretsWarning, setSecretsWarning] = useState<string | null>(null);
   const [deployedHpsVersion, setDeployedHpsVersion] = useState<string | null>(
     null,
   );
@@ -271,185 +278,185 @@ function UpgradeCommandInner({
   }
 
   async function afterChartSelect(
-    cfg: DeploymentConfig,
+    _cfg: DeploymentConfig,
     app: AppVersion,
     chart: ChartVersion,
     installed: string | null,
   ) {
     const changing = !chartVersionsEqual(chart.version, installed);
-    if (changing) {
-      await prepareChartUpgrade(cfg, app, chart);
-      return;
-    }
-
-    if (dryRun) {
-      await performAppDryRun(app, chart.version);
+    if (changing || dryRun) {
+      await prepareUpgradeDryRun(app, chart, changing);
       return;
     }
 
     setStep("confirm");
   }
 
-  async function restoreValuesSnapshot(snapshot: string | null) {
-    if (snapshot === null) return;
-    await fs
-      .writeFile(getHelmValuesPath(name), snapshot, "utf8")
-      .catch(() => {});
-  }
-
-  async function readValuesProductVersion(): Promise<string | undefined> {
-    try {
-      const values = await loadHelmValues(name);
-      const global = values?.global as { version?: unknown } | undefined;
-      return typeof global?.version === "string" ? global.version : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  async function syncProductVersion(
-    cfg: DeploymentConfig,
-    version: string,
-  ): Promise<DeploymentConfig> {
-    const valuesPath = getHelmValuesPath(name);
-    try {
-      const content = await fs.readFile(valuesPath, "utf8");
-      const values = YAML.parse(content) as Record<string, unknown>;
-      if (!values.global) {
-        values.global = {};
-      }
-      (values.global as Record<string, unknown>).version = version;
-      await fs.writeFile(valuesPath, YAML.stringify(values), "utf8");
-    } catch (err) {
-      throw new Error(`Failed to update Helm values: ${err}`);
-    }
-
-    const updated = { ...cfg, version };
-    await saveDeploymentConfig(updated);
-    setConfig(updated);
-    return updated;
-  }
-
-  /**
-   * Regenerates values against the target chart's image manifest and gates on
-   * a helm dry run. Any failure restores the values snapshot; nothing has
-   * touched the cluster yet.
-   */
-  async function prepareChartUpgrade(
-    cfg: DeploymentConfig,
+  async function runReconciledUpgrade(
     app: AppVersion,
     chart: ChartVersion,
+    changingChart: boolean,
+    dryRunMode: boolean,
+    retryWithForceConflicts: boolean,
+    onHelmStart?: () => void,
+  ) {
+    let images: Awaited<ReturnType<typeof resolveImageCatalog>> | undefined;
+
+    return runUpgradeReconciliation(
+      {
+        targetVersion: app.version,
+        dryRun: dryRunMode,
+        // Every real upgrade is atomic now, including app-only releases. Keep
+        // local desired files aligned with Helm's rollback when any apply
+        // fails; otherwise config.yaml/values.yaml would claim the target
+        // version while the cluster remained on the previous one.
+        restoreOnFailure: !dryRunMode,
+      },
+      {
+        reloadConfig: () => loadDeploymentConfig(name),
+        captureSnapshot: async () => {
+          let configContent: string;
+          let valuesContent: string;
+          try {
+            [configContent, valuesContent] = await Promise.all([
+              fs.readFile(
+                path.join(getDeploymentDir(name), "config.yaml"),
+                "utf8",
+              ),
+              fs.readFile(getHelmValuesPath(name), "utf8"),
+            ]);
+          } catch {
+            throw new Error(
+              `Could not snapshot config.yaml and values.yaml for ${name}. Run "rulebricks configure ${name}" first.`,
+            );
+          }
+          return { configContent, valuesContent };
+        },
+        prepareArtifacts: async (targetConfig) => {
+          images = await resolveImageCatalog(chart.version);
+
+          if (changingChart && shouldMirrorToAcr(targetConfig)) {
+            const registry = targetConfig.imageRegistry!;
+            const mirror = await mirrorImagesToAcr(
+              registry.split(".")[0],
+              targetConfig.licenseKey,
+              planAcrImports(images.entries()),
+              targetConfig.imageRegistryResourceId,
+            );
+            assertAcrMirrorSucceeded(
+              registry,
+              mirror,
+              `Mirroring chart ${chart.version} image pins`,
+            );
+          }
+
+          if (dryRunMode) {
+            // A full-mirror dry-run renders from the selected chart copy but
+            // intentionally does not mirror the target app release.
+            await ensureMirroredChart(targetConfig, chart.version);
+          } else {
+            await mirrorReleaseArtifactsIfNeeded(
+              targetConfig,
+              app,
+              chart.version,
+            );
+          }
+        },
+        regenerateValues: async (targetConfig) => {
+          const currentValues = await loadHelmValues(name);
+          await generateHelmValuesPreservingEdits(targetConfig, {
+            tlsEnabled: deriveTlsEnabled(currentValues),
+            secretMode: secretModeForConfig(targetConfig),
+            images:
+              images ?? (await resolveImageCatalog(chart.version)),
+          });
+        },
+        persistConfig: (targetConfig) =>
+          saveDeploymentConfig(targetConfig),
+        ensureNamespace: () => ensureNamespace(namespace),
+        applyKubernetesSecrets: async (targetConfig) => {
+          await applyDeploymentSecrets(targetConfig, namespace);
+        },
+        setupExternalSecrets: async (targetConfig) => {
+          const { seeded } = await setupExternalSecrets(targetConfig, {
+            overwriteSecrets: false,
+          });
+          const warnings: string[] = [];
+          if (seeded.denied.length > 0) {
+            warnings.push(
+              `${seeded.denied.length} secret entr${seeded.denied.length === 1 ? "y was" : "ies were"} not writable from this machine; existing platform values were used: ${seeded.denied.join(", ")}`,
+            );
+          }
+          if (seeded.retained.length > 0) {
+            warnings.push(
+              `Obsolete ExternalSecret consumers were detached; remote vault entries were retained: ${seeded.retained.join(", ")}`,
+            );
+          }
+          setSecretsWarning(warnings.length > 0 ? warnings.join(" ") : null);
+        },
+        runHelm: async (targetConfig) => {
+          if (dryRunMode) {
+            return dryRunUpgrade(name, {
+              releaseName,
+              namespace,
+              version: chart.version,
+              chartRef: chartOciRef(targetConfig),
+            });
+          }
+
+          onHelmStart?.();
+          await upgradeChart(name, {
+            releaseName,
+            namespace,
+            version: chart.version,
+            chartRef: chartOciRef(targetConfig),
+            atomic: true,
+            forceConflicts: retryWithForceConflicts,
+          });
+          return "";
+        },
+        restoreSnapshot: async (snapshot) => {
+          await Promise.all([
+            fs.writeFile(
+              path.join(getDeploymentDir(name), "config.yaml"),
+              snapshot.configContent,
+              "utf8",
+            ),
+            fs.writeFile(
+              getHelmValuesPath(name),
+              snapshot.valuesContent,
+              "utf8",
+            ),
+          ]);
+        },
+      },
+    );
+  }
+
+  async function prepareUpgradeDryRun(
+    app: AppVersion,
+    chart: ChartVersion,
+    changingChart: boolean,
   ) {
     setStep("preparing");
-
-    let snapshot: string | null = null;
     try {
-      snapshot = await fs.readFile(getHelmValuesPath(name), "utf8");
-    } catch {
-      setError(
-        `No values.yaml found for ${name}. Run "rulebricks configure ${name}" first.`,
+      const result = await runReconciledUpgrade(
+        app,
+        chart,
+        changingChart,
+        true,
+        false,
       );
-      setStep("error");
-      return;
-    }
-    setValuesSnapshot(snapshot);
-
-    try {
-      const state = await loadDeploymentState(name);
-      const valuesVersion = await readValuesProductVersion();
-      const productVersion = resolveProductVersion({
-        selected: app.version,
-        valuesVersion,
-        stateVersion: state?.application?.version,
-        configVersion: cfg.version,
-      });
-      const cfgWithVersion = {
-        ...cfg,
-        version: productVersion || app.version,
-      };
-
-      const currentValues = await loadHelmValues(name);
-      const tlsEnabled = deriveTlsEnabled(currentValues);
-      const images = await resolveImageCatalog(chart.version);
-
-      if (shouldMirrorToAcr(cfgWithVersion)) {
-        const registry = cfgWithVersion.imageRegistry!;
-        const mirror = await mirrorImagesToAcr(
-          registry.split(".")[0],
-          cfgWithVersion.licenseKey,
-          planAcrImports(images.entries()),
-          cfgWithVersion.imageRegistryResourceId,
-        );
-        assertAcrMirrorSucceeded(
-          registry,
-          mirror,
-          `Mirroring chart ${chart.version} image pins`,
-        );
-      }
-      // The dry run below pulls the chart from the registry in full-mirror
-      // mode, so the target chart version must be imported first.
-      await ensureMirroredChart(cfgWithVersion, chart.version);
-
-      await generateHelmValuesPreservingEdits(cfgWithVersion, {
-        tlsEnabled,
-        secretMode: secretModeForConfig(cfgWithVersion),
-        images,
-      });
-
-      const output = await dryRunUpgrade(name, {
-        releaseName,
-        namespace,
-        version: chart.version,
-        chartRef: chartOciRef(cfgWithVersion),
-      });
-
       if (dryRun) {
-        setDryRunOutput(output);
-        // Dry-run must not leave regenerated values on disk.
-        await restoreValuesSnapshot(snapshot);
+        setDryRunOutput(result.helmResult);
         setStep("complete");
-        return;
+      } else {
+        setStep("confirm");
       }
-
-      setStep("confirm");
     } catch (err) {
-      await restoreValuesSnapshot(snapshot);
       setError(
         `${err instanceof Error ? err.message : "Upgrade dry run failed"}\n\nNo changes were made to the deployment.`,
       );
-      setStep("error");
-    }
-  }
-
-  async function performAppDryRun(app: AppVersion, chartVersion: string) {
-    let snapshot: string | null = null;
-    try {
-      snapshot = await fs.readFile(getHelmValuesPath(name), "utf8");
-      await syncProductVersion(config!, app.version);
-
-      // Full-mirror mode renders from the registry's chart copy; make sure
-      // the (unchanged) chart version is actually there.
-      await ensureMirroredChart(config!, chartVersion);
-
-      const output = await dryRunUpgrade(name, {
-        releaseName,
-        namespace,
-        version: chartVersion,
-        chartRef: chartOciRef(config!),
-      });
-      setDryRunOutput(output);
-      await restoreValuesSnapshot(snapshot);
-      // Restore config version too — syncProductVersion may have rewritten it.
-      if (config) {
-        await saveDeploymentConfig(config);
-      }
-      setStep("complete");
-    } catch (err) {
-      await restoreValuesSnapshot(snapshot);
-      if (config) {
-        await saveDeploymentConfig(config).catch(() => {});
-      }
-      setError(err instanceof Error ? err.message : "Dry run failed");
       setStep("error");
     }
   }
@@ -490,7 +497,7 @@ function UpgradeCommandInner({
     }
   }
 
-  async function performUpgrade() {
+  async function performUpgrade(retryWithForceConflicts = false) {
     if (!selectedApp || !selectedChart || !config) return;
 
     setStep("upgrading");
@@ -498,47 +505,22 @@ function UpgradeCommandInner({
       selectedChart.version,
       installedChartVersion,
     );
+    let helmStarted = false;
 
     try {
-      await mirrorReleaseArtifactsIfNeeded(
-        config,
+      const result = await runReconciledUpgrade(
         selectedApp,
-        selectedChart.version,
+        selectedChart,
+        changingChart,
+        false,
+        retryWithForceConflicts,
+        () => {
+          helmStarted = true;
+        },
       );
+      setConfig(result.config);
 
-      if (changingChart) {
-        // Values were regenerated in prepare with the selected app version.
-        // Ensure config.yaml stays aligned, then apply with --atomic.
-        const updated = { ...config, version: selectedApp.version };
-        await saveDeploymentConfig(updated);
-        setConfig(updated);
-
-        await ensureNamespace(namespace);
-        if (secretModeForConfig(updated) === "eso") {
-          await setupExternalSecrets(updated, { overwriteSecrets: false });
-        } else {
-          await applyDeploymentSecrets(updated, namespace);
-        }
-
-        await upgradeChart(name, {
-          releaseName,
-          namespace,
-          version: selectedChart.version,
-          chartRef: chartOciRef(config),
-          wait: true,
-          atomic: true,
-        });
-      } else {
-        await syncProductVersion(config, selectedApp.version);
-
-        await upgradeChart(name, {
-          releaseName,
-          namespace,
-          version: selectedChart.version,
-          chartRef: chartOciRef(config),
-          wait: true,
-        });
-
+      if (!changingChart) {
         await restartHpsWorkloads(namespace);
       }
 
@@ -556,17 +538,32 @@ function UpgradeCommandInner({
           version: selectedApp.version,
           chartVersion: selectedChart.version,
           namespace,
-          url: `https://${config.domain}`,
+          url: `https://${result.config.domain}`,
         },
       });
 
       setStep("complete");
       setTimeout(() => exit(), 5000);
     } catch (err) {
-      if (changingChart) {
-        await restoreValuesSnapshot(valuesSnapshot);
-        setRolledBack(true);
+      if (!retryWithForceConflicts && isHelmSsaConflict(err)) {
+        if (forceConflicts) {
+          await performUpgrade(true);
+          return;
+        }
+        if (process.stdin.isTTY === true && process.stdout.isTTY === true) {
+          setSsaConflictError(
+            err instanceof Error ? err.message : "Helm SSA conflict",
+          );
+          setStep("confirmForceConflicts");
+          return;
+        }
+        setError(
+          `${err instanceof Error ? err.message : "Helm SSA conflict"}\n\nThis is a Helm 4 server-side apply field ownership conflict. Review the conflicting manager and field, then rerun with --force-conflicts to permit one guarded retry.`,
+        );
+        setStep("error");
+        return;
       }
+      if (helmStarted) setRolledBack(true);
       setError(err instanceof Error ? err.message : "Upgrade failed");
       setStep("error");
     }
@@ -606,23 +603,27 @@ function UpgradeCommandInner({
       if (key.return) {
         performUpgrade();
       } else if (key.escape) {
-        const restore = chartChanging
-          ? restoreValuesSnapshot(valuesSnapshot)
-          : Promise.resolve();
-        restore.then(() => {
-          if (targetChartVersion) {
-            // Pinned chart: back to app select, or exit if app was also pinned.
-            if (targetVersion) {
-              exit();
-            } else {
-              setSelectedChart(null);
-              setStep("selectApp");
-            }
+        if (targetChartVersion) {
+          // Pinned chart: back to app select, or exit if app was also pinned.
+          if (targetVersion) {
+            exit();
           } else {
             setSelectedChart(null);
-            setStep("selectChart");
+            setStep("selectApp");
           }
-        });
+        } else {
+          setSelectedChart(null);
+          setStep("selectChart");
+        }
+      }
+    } else if (step === "confirmForceConflicts") {
+      if (key.return) {
+        performUpgrade(true);
+      } else if (key.escape) {
+        setError(
+          `${ssaConflictError || "Helm SSA conflict"}\n\nUpgrade stopped without taking ownership of the conflicting fields.`,
+        );
+        setStep("error");
       }
     } else if (step === "selectChart" && key.escape) {
       if (targetVersion) {
@@ -677,6 +678,37 @@ function UpgradeCommandInner({
     );
   }
 
+  if (step === "confirmForceConflicts") {
+    return (
+      <BorderBox title="Helm Field Ownership Conflict">
+        <Box flexDirection="column" marginY={1}>
+          <Text color={colors.warning}>
+            Helm 4 server-side apply found fields owned by another manager.
+          </Text>
+          <Box marginTop={1}>
+            <Text color={colors.muted}>
+              {ssaConflictError?.substring(0, 700)}
+            </Text>
+          </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text>
+              Retrying with --force-conflicts transfers those fields to Helm
+              and may override the other manager.
+            </Text>
+            <Text color={colors.warning}>
+              Confirm only after reviewing the manager and field above.
+            </Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text color={colors.success} bold>
+              Press Enter for one forced retry, Esc to stop
+            </Text>
+          </Box>
+        </Box>
+      </BorderBox>
+    );
+  }
+
   if (step === "complete") {
     if (dryRun && dryRunOutput) {
       return (
@@ -707,6 +739,11 @@ function UpgradeCommandInner({
           <Box marginTop={1}>
             <Text>Run `rulebricks status {name}` to verify the deployment</Text>
           </Box>
+          {secretsWarning && (
+            <Box marginTop={1}>
+              <Text color={colors.warning}>{secretsWarning}</Text>
+            </Box>
+          )}
         </Box>
       </BorderBox>
     );

@@ -234,10 +234,67 @@ export interface SMTPConfig {
   pass: string;
   from: string;
   fromName: string;
+  /** ACS SMTP mode: resource metadata for Entra-backed SMTP credentials. */
+  azure?: {
+    communicationServiceId: string;
+    entraApplicationId: string;
+    tenantId?: string;
+  };
   /** ACS API-key mode: connection string for the in-cluster SMTP relay. */
   acsApi?: {
     connectionString: string;
   };
+}
+
+/**
+ * Keeps the three persisted email modes exclusive. ACS API relay wins when
+ * migrating a stale config that contains both ACS blocks because its
+ * connection string is the wizard's existing provider-selection signal.
+ */
+export function normalizeSmtpConfig<T extends SMTPConfig>(smtp: T): T {
+  const { azure, acsApi, ...base } = smtp;
+  if (acsApi) {
+    return {
+      ...base,
+      user: "",
+      pass: "",
+      acsApi,
+    } as T;
+  }
+  if (azure) {
+    return { ...base, azure } as T;
+  }
+  return base as T;
+}
+
+function normalizeSmtpInput(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const smtp = { ...(value as Record<string, unknown>) };
+  if (smtp.acsApi) {
+    delete smtp.azure;
+    smtp.user = "";
+    smtp.pass = "";
+  }
+  return smtp;
+}
+
+type SSOConfig = {
+  enabled: boolean;
+  provider?: SSOProvider;
+  url?: string;
+  clientId?: string;
+  clientSecret?: string;
+};
+
+/** Disabled SSO never retains credentials that could reactivate it later. */
+export function normalizeSsoConfig<T extends SSOConfig>(sso: T): T {
+  return (sso.enabled ? { ...sso } : { enabled: false }) as T;
+}
+
+function normalizeSsoInput(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const sso = value as Record<string, unknown>;
+  return sso.enabled === false ? { enabled: false } : value;
 }
 
 // Default SMTP providers
@@ -822,56 +879,60 @@ export const DeploymentConfigSchema = z.object({
   }),
 
   // SMTP Configuration
-  smtp: z
-    .object({
-      host: z.string().min(1),
-      port: z.number().min(1).max(65535),
-      // Empty user/pass are valid only in the ACS API-key relay mode
-      // (enforced by the superRefine below): the in-cluster relay ignores
-      // SMTP AUTH, and GoTrue refuses AUTH over plaintext anyway.
-      user: z.string(),
-      pass: z.string(),
-      from: z.string().email(),
-      fromName: z.string().min(1),
-      azure: z
-        .object({
-          communicationServiceId: z.string().min(1),
-          entraApplicationId: z.string().uuid(),
-          tenantId: z.string().uuid().optional(),
-        })
-        .optional(),
-      // ACS API-key mode: the connection string feeds the in-cluster
-      // SMTP-to-ACS-REST relay (chart smtpRelay block) instead of SMTP
-      // credentials. Mutually exclusive with `azure` (Entra SMTP) in
-      // practice; the wizard clears one when the other is chosen.
-      acsApi: z
-        .object({
-          connectionString: z
-            .string()
-            .refine(isValidAcsConnectionString, {
-              message:
-                "must look like endpoint=https://<resource>.communication.azure.com/;accesskey=<key>",
-            }),
-        })
-        .optional(),
-    })
-    .superRefine((smtp, ctx) => {
-      if (smtp.acsApi) return;
-      if (!smtp.user) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["user"],
-          message: "SMTP username is required",
-        });
-      }
-      if (!smtp.pass) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["pass"],
-          message: "SMTP password is required",
-        });
-      }
-    }),
+  smtp: z.preprocess(
+    normalizeSmtpInput,
+    z
+      .object({
+        host: z.string().min(1),
+        port: z.number().min(1).max(65535),
+        // Empty user/pass are valid only in the ACS API-key relay mode
+        // (enforced by the superRefine below): the in-cluster relay ignores
+        // SMTP AUTH, and GoTrue refuses AUTH over plaintext anyway.
+        user: z.string(),
+        pass: z.string(),
+        from: z.string().email(),
+        fromName: z.string().min(1),
+        azure: z
+          .object({
+            communicationServiceId: z.string().min(1),
+            entraApplicationId: z.string().uuid(),
+            tenantId: z.string().uuid().optional(),
+          })
+          .optional(),
+        // ACS API-key mode: the connection string feeds the in-cluster
+        // SMTP-to-ACS-REST relay (chart smtpRelay block) instead of SMTP
+        // credentials. Mutually exclusive with `azure` (Entra SMTP) in
+        // practice; the wizard clears one when the other is chosen.
+        acsApi: z
+          .object({
+            connectionString: z
+              .string()
+              .refine(isValidAcsConnectionString, {
+                message:
+                  "must look like endpoint=https://<resource>.communication.azure.com/;accesskey=<key>",
+              }),
+          })
+          .optional(),
+      })
+      .superRefine((smtp, ctx) => {
+        if (smtp.acsApi) return;
+        if (!smtp.user) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["user"],
+            message: "SMTP username is required",
+          });
+        }
+        if (!smtp.pass) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["pass"],
+            message: "SMTP password is required",
+          });
+        }
+      })
+      .transform(normalizeSmtpConfig),
+  ),
 
   // Database
   database: z.object({
@@ -1129,15 +1190,20 @@ export const DeploymentConfigSchema = z.object({
   // Note: AI is configured in-app (Settings -> AI features), not here. Old
   // config.yaml files with a features.ai block still parse; the key is ignored.
   features: z.object({
-    sso: z.object({
-      enabled: z.boolean(),
-      provider: z
-        .enum(["azure", "google", "okta", "keycloak", "ory", "other"])
-        .optional(),
-      url: z.string().url().optional(),
-      clientId: z.string().optional(),
-      clientSecret: z.string().optional(),
-    }),
+    sso: z.preprocess(
+      normalizeSsoInput,
+      z
+        .object({
+          enabled: z.boolean(),
+          provider: z
+            .enum(["azure", "google", "okta", "keycloak", "ory", "other"])
+            .optional(),
+          url: z.string().url().optional(),
+          clientId: z.string().optional(),
+          clientSecret: z.string().optional(),
+        })
+        .transform(normalizeSsoConfig),
+    ),
     monitoring: z.object({
       // Legacy flag kept for existing config files; the in-cluster metrics
       // stack is always installed and this value is ignored.
@@ -1235,6 +1301,20 @@ export const DeploymentConfigSchema = z.object({
 });
 
 export type DeploymentConfig = z.infer<typeof DeploymentConfigSchema>;
+
+/** Normalizes mode-dependent fields before writing a deployment config. */
+export function normalizeDeploymentConfig(
+  config: DeploymentConfig,
+): DeploymentConfig {
+  return {
+    ...config,
+    smtp: normalizeSmtpConfig(config.smtp),
+    features: {
+      ...config.features,
+      sso: normalizeSsoConfig(config.features.sso),
+    },
+  };
+}
 
 /** Secrets backend options (see DeploymentConfigSchema.secrets). */
 export type SecretsBackend = NonNullable<DeploymentConfig["secrets"]>["backend"];
@@ -1387,6 +1467,9 @@ export const ProfileConfigSchema = z.object({
     .optional(),
 
   // SSO (optional)
+  // Explicitly records the user's choice so old provider defaults cannot
+  // silently turn SSO back on after it has been disabled.
+  ssoEnabled: z.boolean().optional(),
   ssoProvider: z
     .enum(["azure", "google", "okta", "keycloak", "ory", "other"])
     .optional(),
