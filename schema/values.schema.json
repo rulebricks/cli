@@ -657,20 +657,21 @@
             "replicas": { "type": "integer", "minimum": 0 },
             "limits": {
               "type": "object",
-              "description": "Payload & deadline envelope rendered into HPS/worker env vars. Sized in lockstep with the Kafka message caps (kafka.config / kafka.topics), the Traefik entrypoint timeouts, and the HPS memory limit + heap.",
+              "description": "Payload & deadline envelope rendered into HPS/worker env vars. The chart profile accepts 20 MiB serialized items, backed by 32 MiB execution topics and 64 MiB per-partition consumer fetches; keep overrides in lockstep with Kafka, ingress, and HPS memory.",
               "properties": {
                 "bodyLimitBytes": { "type": "integer", "minimum": 1024, "description": "Max HTTP request body on HPS execution endpoints (HTTP_BODY_LIMIT_BYTES)." },
                 "rpcTimeoutMs": { "type": "integer", "minimum": 1000, "description": "Whole-request Kafka execution deadline in ms (RPC_TIMEOUT_MS). Traefik graceTimeOut and terminationGracePeriodSeconds must stay above it." },
                 "requestTimeoutMs": { "type": "integer", "minimum": 1000, "description": "Deadline for receiving one request's entire body in ms (HTTP_REQUEST_TIMEOUT_MS)." },
-                "itemMaxBytes": { "type": "integer", "minimum": 1024, "description": "Serialized cap per single payload inside a bulk array (ITEM_MAX_BYTES); must fit the Kafka topic max.message.bytes with envelope headroom." },
+                "itemMaxBytes": { "type": "integer", "minimum": 1024, "description": "Serialized cap per single payload inside a bulk array (ITEM_MAX_BYTES); the 20 MiB chart default leaves envelope headroom under the 32 MiB execution-topic cap." },
                 "contextBatchBodyLimitBytes": { "type": "integer", "minimum": 1024, "description": "Context batch NDJSON body cap (CONTEXT_BATCH_BODY_LIMIT_BYTES)." },
                 "contextBatchMaxItems": { "type": "integer", "minimum": 1, "description": "Max records per context batch request (CONTEXT_BATCH_MAX_ITEMS)." },
                 "largeBodyThresholdBytes": { "type": "integer", "description": "Admission-gate threshold (LARGE_BODY_THRESHOLD_BYTES); <= 0 disables the gate." },
                 "largeBodyMaxConcurrent": { "type": "integer", "minimum": 1, "description": "Concurrent above-threshold requests per HPS replica before shedding with 429 (LARGE_BODY_MAX_CONCURRENT)." },
                 "chunkMaxChunks": { "type": "integer", "minimum": 1, "description": "Max chunk fan-out per bulk request (CHUNK_MAX_CHUNKS); align with workers.solutionPartitions for full-fleet spread." },
                 "chunkHardMaxBytes": { "type": "integer", "minimum": 1024, "description": "Broker-safe per-chunk input cap (CHUNK_HARD_MAX_BYTES); keep well under the Kafka max.message.bytes to preserve response-amplification headroom." },
-                "responseFetchMaxBytes": { "type": "integer", "minimum": 1024, "description": "HPS response-consumer per-partition fetch ceiling (RESPONSE_MAX_BYTES_PER_PARTITION); >= 2x max.message.bytes recommended." },
-                "workerFetchMaxBytes": { "type": "integer", "minimum": 1024, "description": "Worker request-consumer per-partition fetch ceiling (WORKER_MAX_BYTES_PER_PARTITION); >= 2x max.message.bytes recommended." },
+                "responseFetchMaxBytes": { "type": "integer", "minimum": 1024, "description": "HPS response-consumer per-partition fetch ceiling (RESPONSE_MAX_BYTES_PER_PARTITION); keep >= 2x the execution-topic max.message.bytes." },
+                "workerFetchMaxBytes": { "type": "integer", "minimum": 1024, "description": "Worker request-consumer per-partition fetch ceiling (WORKER_MAX_BYTES_PER_PARTITION); keep >= 2x the execution-topic max.message.bytes." },
+                "logRetryBufferMaxBytes": { "type": "integer", "minimum": 1048576, "description": "In-memory retry buffer for decision-log producers (LOG_RETRY_BUFFER_MAX_BYTES); keep >= 2x the logs-topic max.message.bytes so one full record survives a transient failure." },
                 "shutdownDrainMs": { "type": "integer", "minimum": 0, "description": "How long a stopping HPS pod keeps consuming so in-flight RPCs resolve (KAFKA_SHUTDOWN_DRAIN_MS); should cover rpcTimeoutMs." },
                 "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1, "description": "HPS pod terminationGracePeriodSeconds; must exceed shutdownDrainMs plus shutdown overhead." },
                 "nodeHeapMb": { "type": "integer", "minimum": 128, "description": "Node.js --max-old-space-size for the HPS server in MB (rendered as NODE_OPTIONS); size to ~85% of the container memory limit. Unset = image default." }
@@ -1145,7 +1146,7 @@
         "enabled": { "type": "boolean" },
         "provisioning": {
           "type": "object",
-          "description": "Explicit topic management (create + idempotent alignment of existing topics via postScript). Topic names must carry the configured kafkaTopicPrefix.",
+          "description": "External bridge topic management. The pre-install/upgrade Job creates kafka.topics and reconciles max.message.bytes on existing topics; topic names must carry the configured kafkaTopicPrefix.",
           "properties": {
             "enabled": { "type": "boolean" },
             "numPartitions": { "type": "integer", "minimum": 1 },

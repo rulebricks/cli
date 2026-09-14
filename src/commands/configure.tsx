@@ -431,8 +431,10 @@ function ConfigureCommandInner({
   const [wizardState, setWizardState] = useState<WizardState | null>(null);
   const [profile, setProfile] = useState<ProfileConfig | null>(null);
 
-  // Configure only edits the local config and values files, so no cluster
-  // access or health check is needed; `rulebricks deploy` applies the result.
+  // The wizard only edits local config and values files, so loading it needs no
+  // cluster access or health check. After save, the outer command either runs
+  // a full deploy when "apply" was selected or prints the deploy command the
+  // operator must run to apply the result.
   useEffect(() => {
     (async () => {
       try {

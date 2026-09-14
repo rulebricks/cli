@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  applyFlagsForHelmVersion,
   buildUpgradeChartArgs,
   isHelmSsaConflict,
   parseDeployedChartVersion,
   parseGitHubReleases,
+  waitFlagForHelmVersion,
 } from "./helm.js";
 import { deriveTlsEnabled } from "./helmValues.js";
 
@@ -89,6 +91,16 @@ test("strips the v prefix from tags", () => {
     versions.map((v) => v.version),
     ["1.2.4", "1.2.3"],
   );
+});
+
+test("uses Helm 4 hook-only waiting for controller-managed resources", () => {
+  assert.equal(waitFlagForHelmVersion("v4.2.3+g43e8b7f"), "--wait=hookOnly");
+  assert.equal(waitFlagForHelmVersion("4.0.0"), "--wait=hookOnly");
+  assert.equal(waitFlagForHelmVersion("v3.19.0+g3d8990f"), "--wait");
+  assert.deepEqual(applyFlagsForHelmVersion("v4.2.3+g43e8b7f"), [
+    "--server-side=false",
+  ]);
+  assert.deepEqual(applyFlagsForHelmVersion("v3.19.0+g3d8990f"), []);
 });
 
 test("derives TLS state from values with sensible fallbacks", () => {

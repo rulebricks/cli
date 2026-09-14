@@ -1081,13 +1081,12 @@ function generateKafkaConfig(): Record<string, string> {
     "socket.send.buffer.bytes": "1048576",
     "socket.receive.buffer.bytes": "1048576",
     "socket.request.max.bytes": "209715200",
-    // Broker-wide max record size; must exceed every per-topic max.message.bytes.
-    // 8 MiB (large-payload profile): request chunks are planner-capped at
-    // 2 MiB input, but worker RESPONSES ride as one message each - this gives
-    // 4x response-amplification headroom. Kept in lockstep with the chart's
-    // kafka.config and the rpc topic caps below.
-    "message.max.bytes": "8388608",
-    "replica.fetch.max.bytes": "16777216",
+    // Broker-wide cap follows the largest topic: full-fidelity decision logs
+    // can contain a 20 MiB request plus its response inside another JSON
+    // envelope. Replica fetch ceilings stay at 2x the 64 MiB broker cap.
+    "message.max.bytes": "67108864",
+    "replica.fetch.max.bytes": "134217728",
+    "replica.fetch.response.max.bytes": "134217728",
     // Broker-wide default retention; the application topics carry tighter caps.
     "log.retention.bytes": "536870912",
     "log.segment.bytes": "1073741824",
@@ -1116,11 +1115,10 @@ function effectiveTopicPrefix(config: DeploymentConfig): string {
 /**
  * Explicit topic management for in-cluster Kafka.
  *
- * Generates the kafka.provisioning block consumed by BOTH the subchart
- * provisioning Job (creates topics) and the chart's kafka-topic-align Job
- * (idempotently converges pre-existing topics on upgrade). Topic names are
- * derived from the SAME prefix written to app.logging.kafkaTopicPrefix - the
- * chart fails the render if these ever diverge.
+ * Generates kafka.topics for both Strimzi and the external bridge provisioning
+ * Job. That Job creates missing topics and reconciles max.message.bytes on
+ * upgrades. Topic names are derived from the SAME prefix written to
+ * app.logging.kafkaTopicPrefix so producers and consumers cannot drift.
  *
  * Sizing policy (baseline constants, mirroring the chart defaults):
  * - solution/solution-response: SOLUTION_TOPIC_PARTITIONS (the worker-fleet
@@ -1134,25 +1132,24 @@ function effectiveTopicPrefix(config: DeploymentConfig): string {
 function generateKafkaTopics(
   config: DeploymentConfig,
 ): Array<Record<string, unknown>> {
-  // External MSK IAM: the chart's kafka-topic-provision Job creates these on the
-  // managed broker (through the proxy bridge), so they must be populated here -
-  // MSK Serverless won't auto-create them. Other external brokers (SCRAM / Event
-  // Hubs / GCP, no bridge) a plain client can reach stay customer-managed.
+  // External MSK IAM: the chart's kafka-topic-provision Job creates these on a
+  // preconfigured provisioned broker through the proxy bridge. The 64 MiB logs
+  // profile is not compatible with MSK Serverless. Other external brokers
+  // (SCRAM / Event Hubs / GCP, no bridge) stay customer-managed.
   if (isExternalKafka(config) && !kafkaUsesBridge(config)) {
     return [];
   }
 
   const prefix = effectiveTopicPrefix(config);
   // retention.bytes is a PER-PARTITION cap sized for in-flight large-batch
-  // traffic (128 MiB requests spread ~1 MiB/partition); max.message.bytes
-  // matches the broker's message.max.bytes (8 MiB) so worker responses keep
-  // amplification headroom. In lockstep with the chart's kafka.topics.
+  // traffic. A 32 MiB execution record leaves envelope headroom around the
+  // 20 MiB serialized-item cap. In lockstep with the chart's kafka.topics.
   const rpcTopicConfig = {
     "retention.ms": "300000",
     "segment.ms": "300000",
     "segment.bytes": "67108864",
     "retention.bytes": "134217728",
-    "max.message.bytes": "8388608",
+    "max.message.bytes": "33554432",
   };
 
   return [
@@ -1180,7 +1177,9 @@ function generateKafkaTopics(
         // (silent decision-log loss, observed at 256Mi under load). The cap
         // times partitions (24 x 1Gi) must stay within the broker volume.
         "retention.bytes": "1073741824",
-        "max.message.bytes": "2097152",
+        // Full-fidelity single-item logs contain request + response inside a
+        // second JSON envelope, so reserve more than 2x the 20 MiB item cap.
+        "max.message.bytes": "67108864",
       },
     },
   ];
@@ -1795,6 +1794,24 @@ export function buildHelmValues(
   // Corporate root bundle for privately-issued certificates, distributed to
   // in-cluster callers of the deployment's own HTTPS endpoints.
   const tlsPrivateCaBundle = resolveTlsPrivateCaBundle(config);
+  // AKS Admission Enforcer adds these exclusions to admission webhooks. Emit
+  // them up front so Helm 4 server-side apply shares ownership instead of
+  // conflicting with the platform controller on the next upgrade.
+  const aksAdmissionNamespaceExpressions =
+    config.infrastructure.provider === "azure"
+      ? [
+          {
+            key: "control-plane",
+            operator: "NotIn",
+            values: ["true"],
+          },
+          {
+            key: "kubernetes.azure.com/managedby",
+            operator: "NotIn",
+            values: ["aks"],
+          },
+        ]
+      : [];
   // Infrastructure image tags from the chart's images/manifest.yaml. The async
   // generate* entry points resolve the live catalog for the target chart
   // version; direct (sync) callers fall back to the bundled snapshot.
@@ -2514,8 +2531,10 @@ export function buildHelmValues(
     "cert-manager": {
       // Off for provided certificates (nothing to issue) AND for an external
       // issuer (the cluster's own cert-manager installation owns the CRDs -
-      // a second controller instance would fight it).
-      enabled: tlsEnabled && !tlsCertificatesProvided && !tlsExternalIssuer,
+      // a second controller instance would fight it). Auto mode deliberately
+      // installs cert-manager while TLS is still off so a fresh Helm release
+      // can wait for the webhook before a second phase applies Certificates.
+      enabled: !tlsCertificatesProvided && !tlsExternalIssuer,
       // CRDs managed in parent chart (cert-manager v1.15+ uses crds.enabled,
       // not the deprecated installCRDs flag).
       crds: { enabled: false },
@@ -2532,6 +2551,27 @@ export function buildHelmValues(
           repository: IMAGE_REPOSITORIES.certManagerWebhook,
         },
         ...coreScheduling,
+        ...(aksAdmissionNamespaceExpressions.length > 0
+          ? {
+              validatingWebhookConfiguration: {
+                namespaceSelector: {
+                  matchExpressions: [
+                    {
+                      key: "cert-manager.io/disable-validation",
+                      operator: "NotIn",
+                      values: ["true"],
+                    },
+                    ...aksAdmissionNamespaceExpressions,
+                  ],
+                },
+              },
+              mutatingWebhookConfiguration: {
+                namespaceSelector: {
+                  matchExpressions: aksAdmissionNamespaceExpressions,
+                },
+              },
+            }
+          : {}),
       },
       cainjector: {
         image: {
@@ -2625,6 +2665,14 @@ export function buildHelmValues(
             // shared Kafka cluster don't rebalance each other.
             group_id: "${KAFKA_CONSUMER_GROUP:-vector-consumers}",
             auto_offset_reset: "latest",
+            // Full-fidelity single-item logs can approach the 64 MiB topic
+            // cap. librdkafka raises receive.message.max.bytes automatically
+            // above the aggregate fetch size plus protocol overhead.
+            librdkafka_options: {
+              "message.max.bytes": "67108864",
+              "fetch.message.max.bytes": "67108864",
+              "fetch.max.bytes": "134217728",
+            },
             // TLS + SASL driven by env from vector-kafka-env (disabled for
             // in-cluster Kafka and the kafka-proxy bridge path).
             tls: { enabled: "${KAFKA_TLS_ENABLED:-false}" },
@@ -2868,6 +2916,13 @@ export function buildHelmValues(
           },
         },
         admissionWebhooks: {
+          ...(aksAdmissionNamespaceExpressions.length > 0
+            ? {
+                namespaceSelector: {
+                  matchExpressions: aksAdmissionNamespaceExpressions,
+                },
+              }
+            : {}),
           patch: {
             image: {
               registry: reg,
@@ -3471,10 +3526,12 @@ export async function updateHelmValuesForTLS(
       (values.global as Record<string, unknown>).tlsEnabled = tlsEnabled;
     }
 
-    // Update cert-manager
+    // Auto TLS keeps cert-manager running while TLS resources are withheld.
+    // This lets a fresh install wait for the webhook before the TLS-enabling
+    // upgrade applies ClusterIssuer/Certificate custom resources.
     if (values["cert-manager"] && typeof values["cert-manager"] === "object") {
       (values["cert-manager"] as Record<string, unknown>).enabled =
-        tlsEnabled && !certificatesProvided;
+        !certificatesProvided;
     }
 
     // Update cluster issuer

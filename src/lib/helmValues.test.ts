@@ -372,6 +372,41 @@ test("Azure auto-DNS wires workload identity through the external-dns block", ()
   assert.equal(validateHelmValues(values).valid, true);
 });
 
+test("Azure webhook selectors include AKS Admission Enforcer exclusions", () => {
+  const config = cloneFixture("azure-workload-identity");
+  const values = buildHelmValues(config, {
+    tlsEnabled: false,
+  }) as Record<string, any>;
+  const aksExpressions = [
+    {
+      key: "control-plane",
+      operator: "NotIn",
+      values: ["true"],
+    },
+    {
+      key: "kubernetes.azure.com/managedby",
+      operator: "NotIn",
+      values: ["aks"],
+    },
+  ];
+
+  assert.deepEqual(
+    values["cert-manager"].webhook.mutatingWebhookConfiguration
+      .namespaceSelector.matchExpressions,
+    aksExpressions,
+  );
+  assert.deepEqual(
+    values["cert-manager"].webhook.validatingWebhookConfiguration
+      .namespaceSelector.matchExpressions.slice(1),
+    aksExpressions,
+  );
+  assert.deepEqual(
+    values["kube-prometheus-stack"].prometheusOperator.admissionWebhooks
+      .namespaceSelector.matchExpressions,
+    aksExpressions,
+  );
+});
+
 test("AWS auto-DNS pins the external-dns ServiceAccount name without Azure extras", () => {
   const config = cloneFixture("aws-self-hosted-minimal");
   config.dns = { provider: "route53", autoManage: true };
@@ -817,6 +852,13 @@ interface GeneratedKafkaValues {
     config: Record<string, string>;
     topics?: KafkaTopicValues[];
   };
+  vector: {
+    customConfig: {
+      sources: {
+        kafka: { librdkafka_options: Record<string, string> };
+      };
+    };
+  };
 }
 
 function tierFixture(name: string): GeneratedKafkaValues {
@@ -931,6 +973,29 @@ test("in-cluster provisioning uses baseline partitions and the (empty) prefix", 
     assert.equal(byName["solution"].replicas, 1);
     assert.equal(byName["logs"].replicas, 1);
 
+    // Payload envelope: 20 MiB items ride on 32 MiB execution topics, while
+    // full request/response decision logs get a 64 MiB topic and broker cap.
+    assert.equal(byName["solution"].config["max.message.bytes"], "33554432");
+    assert.equal(
+      byName["solution-response"].config["max.message.bytes"],
+      "33554432",
+    );
+    assert.equal(byName["logs"].config["max.message.bytes"], "67108864");
+    assert.equal(values.kafka.config["message.max.bytes"], "67108864");
+    assert.equal(values.kafka.config["replica.fetch.max.bytes"], "134217728");
+    assert.equal(
+      values.kafka.config["replica.fetch.response.max.bytes"],
+      "134217728",
+    );
+
+    const vectorKafka =
+      values.vector.customConfig.sources.kafka.librdkafka_options;
+    assert.deepEqual(vectorKafka, {
+      "message.max.bytes": "67108864",
+      "fetch.message.max.bytes": "67108864",
+      "fetch.max.bytes": "134217728",
+    });
+
     // MAX_WORKERS source must match the solution topic exactly.
     assert.equal(values.rulebricks.hps.workers.solutionPartitions, 128);
 
@@ -953,8 +1018,8 @@ test("in-cluster provisioning uses baseline partitions and the (empty) prefix", 
 
 test("external MSK IAM populates topics for provisioning; other external Kafka stays customer-managed", () => {
   // AWS MSK IAM: the chart's kafka-topic-provision Job creates these on the
-  // managed broker (through the proxy bridge), so they MUST be populated - MSK
-  // Serverless won't auto-create them.
+  // preconfigured provisioned broker through the proxy bridge, so they MUST be
+  // populated. The 64 MiB logs profile intentionally excludes MSK Serverless.
   const msk = tierFixture("aws-external-kafka-msk");
   assert.equal(msk.kafka.enabled, false, "msk: kafka subchart off");
   assert.equal(
@@ -2156,6 +2221,18 @@ test("supabase kong ingress carries Traefik websecure router annotations under T
   const b = notls.supabase.kong.ingress.annotations;
   assert.equal(b["traefik.ingress.kubernetes.io/router.entrypoints"], "web");
   assert.equal(b["traefik.ingress.kubernetes.io/router.tls"], "false");
+});
+
+test("automatic TLS bootstrap installs cert-manager before TLS resources", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const values = buildHelmValues(config, {
+    tlsEnabled: false,
+    secretMode: "k8s",
+  }) as Record<string, any>;
+
+  assert.equal(values.global.tlsEnabled, false);
+  assert.equal(values["cert-manager"].enabled, true);
+  assert.equal(values.clusterIssuer.enabled, false);
 });
 
 // ===========================================================================

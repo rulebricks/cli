@@ -88,6 +88,41 @@ export async function getHelmVersion(): Promise<string> {
 }
 
 /**
+ * Helm 4's watcher strategy waits on arbitrary custom resources and all
+ * DaemonSet targets. That strands healthy AKS installs when Strimzi/KEDA are
+ * still reconciling or autoscaled Deallocate-mode nodes remain NotReady.
+ * hookOnly still gates on chart hooks, including cert-manager's API startup
+ * check, while the CLI performs its own certificate/application verification.
+ */
+export function waitFlagForHelmVersion(version: string): string {
+  return /^v?4(?:\.|$)/.test(version.trim()) ? "--wait=hookOnly" : "--wait";
+}
+
+export function applyFlagsForHelmVersion(version: string): string[] {
+  // Helm 4 defaults new releases to server-side apply. Controllers routinely
+  // own runtime fields (HPA replicas, AKS Admission Enforcer selectors), which
+  // then makes an ordinary chart upgrade conflict. Retain Helm 3's client-side
+  // behavior for CLI-managed releases.
+  return /^v?4(?:\.|$)/.test(version.trim()) ? ["--server-side=false"] : [];
+}
+
+async function currentHelmWaitFlag(): Promise<string> {
+  try {
+    return waitFlagForHelmVersion(await getHelmVersion());
+  } catch {
+    return "--wait";
+  }
+}
+
+async function currentHelmApplyFlags(): Promise<string[]> {
+  try {
+    return applyFlagsForHelmVersion(await getHelmVersion());
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Fetches available chart versions from the OCI registry
  */
 export async function fetchChartVersions(): Promise<ChartVersion[]> {
@@ -315,8 +350,10 @@ export async function installChart(
     args.push("--create-namespace");
   }
 
+  args.push(...(await currentHelmApplyFlags()));
+
   if (wait) {
-    args.push("--wait");
+    args.push(await currentHelmWaitFlag());
     args.push("--timeout", timeout);
   }
 
@@ -332,6 +369,23 @@ interface HelmHistoryEntry {
   status?: string;
 }
 
+async function readReleaseHistory(
+  releaseName: string,
+  namespace: string,
+): Promise<HelmHistoryEntry[]> {
+  try {
+    const { stdout } = await execa(
+      "helm",
+      ["history", releaseName, "--namespace", namespace, "--output", "json"],
+      { timeout: 30000 },
+    );
+    const entries = JSON.parse(stdout) as HelmHistoryEntry[];
+    return Array.isArray(entries) ? entries : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Latest revision status for a release, or undefined when it has none.
  * Used by the stranded-release recovery to pick the right cleanup: helm can
@@ -343,19 +397,23 @@ export async function latestReleaseStatus(
   releaseName: string,
   namespace: string,
 ): Promise<string | undefined> {
-  try {
-    const { stdout } = await execa(
-      "helm",
-      ["history", releaseName, "--namespace", namespace, "--output", "json"],
-      { timeout: 30000 },
-    );
-    const entries = JSON.parse(stdout) as HelmHistoryEntry[];
-    return Array.isArray(entries) && entries.length > 0
-      ? entries[entries.length - 1].status
-      : undefined;
-  } catch {
-    return undefined;
-  }
+  const entries = await readReleaseHistory(releaseName, namespace);
+  return entries.length > 0 ? entries[entries.length - 1].status : undefined;
+}
+
+/**
+ * True once any revision of this release deployed successfully. Fresh installs
+ * need a cert-manager bootstrap pass before TLS custom resources are applied;
+ * releases that have ever deployed already have a usable webhook.
+ */
+export async function hasReleaseEverDeployed(
+  releaseName: string,
+  namespace: string,
+): Promise<boolean> {
+  const entries = await readReleaseHistory(releaseName, namespace);
+  return entries.some(
+    (entry) => entry.status === "deployed" || entry.status === "superseded",
+  );
 }
 
 interface HelmListEntry {
@@ -462,38 +520,22 @@ async function isReleaseStrandedBeforeFirstDeploy(
   releaseName: string,
   namespace: string,
 ): Promise<boolean> {
-  let stdout: string;
-  try {
-    ({ stdout } = await execa(
-      "helm",
-      ["history", releaseName, "--namespace", namespace, "--output", "json"],
-      { timeout: 30000 },
-    ));
-  } catch {
-    // Release not found (fresh install) or history unavailable.
-    return false;
-  }
-
-  try {
-    const entries = JSON.parse(stdout) as HelmHistoryEntry[];
-    if (!Array.isArray(entries) || entries.length === 0) return false;
-    const everDeployed = entries.some(
-      (entry) => entry.status === "deployed" || entry.status === "superseded",
-    );
-    if (everDeployed) return false;
-    const latest = entries[entries.length - 1];
-    // "uninstalling" appears when a previous uninstall was interrupted (e.g.
-    // process killed mid-wait): resources may be gone but the record stays,
-    // and helm can neither install over it nor upgrade it. Re-running
-    // uninstall clears it.
-    return (
-      latest.status === "failed" ||
-      latest.status === "pending-install" ||
-      latest.status === "uninstalling"
-    );
-  } catch {
-    return false;
-  }
+  const entries = await readReleaseHistory(releaseName, namespace);
+  if (entries.length === 0) return false;
+  const everDeployed = entries.some(
+    (entry) => entry.status === "deployed" || entry.status === "superseded",
+  );
+  if (everDeployed) return false;
+  const latest = entries[entries.length - 1];
+  // "uninstalling" appears when a previous uninstall was interrupted (e.g.
+  // process killed mid-wait): resources may be gone but the record stays,
+  // and helm can neither install over it nor upgrade it. Re-running
+  // uninstall clears it.
+  return (
+    latest.status === "failed" ||
+    latest.status === "pending-install" ||
+    latest.status === "uninstalling"
+  );
 }
 
 /**
@@ -600,8 +642,10 @@ export async function installOrUpgradeChart(
     args.push("--create-namespace");
   }
 
+  args.push(...(await currentHelmApplyFlags()));
+
   if (wait) {
-    args.push("--wait");
+    args.push(await currentHelmWaitFlag());
     args.push("--timeout", timeout);
   }
 
@@ -683,6 +727,11 @@ export async function upgradeChart(
   options: UpgradeChartOptions,
 ): Promise<void> {
   const args = buildUpgradeChartArgs(deploymentName, options);
+  args.push(...(await currentHelmApplyFlags()));
+  const waitIndex = args.indexOf("--wait");
+  if (waitIndex >= 0) {
+    args[waitIndex] = await currentHelmWaitFlag();
+  }
 
   try {
     await execa("helm", args);

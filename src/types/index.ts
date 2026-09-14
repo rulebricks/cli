@@ -808,7 +808,7 @@ export const DeploymentConfigSchema = z.object({
 
   // Domain & TLS
   domain: z.string().min(1),
-  adminEmail: z.string().email(),
+  adminEmail: z.string().trim().toLowerCase().email(),
   tlsEmail: z.string().email(),
 
   // TLS certificate issuance. Absent or "auto" = Let's Encrypt via
@@ -1308,6 +1308,7 @@ export function normalizeDeploymentConfig(
 ): DeploymentConfig {
   return {
     ...config,
+    adminEmail: config.adminEmail.trim().toLowerCase(),
     smtp: normalizeSmtpConfig(config.smtp),
     features: {
       ...config.features,

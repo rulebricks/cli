@@ -17,6 +17,44 @@ export function secretModeForConfig(config: DeploymentConfig): SecretMode {
   return backend === "cluster" ? "k8s" : "eso";
 }
 
+export interface TlsInstallPlanInput {
+  tlsMode: "auto" | "external-issuer" | "provided";
+  externalDnsEnabled: boolean;
+  assumeDnsConfigured: boolean;
+  releaseEverDeployed: boolean;
+}
+
+export interface TlsInstallPlan {
+  initialTlsEnabled: boolean;
+  enableTlsAfterInstall: boolean;
+}
+
+/**
+ * A fresh auto-TLS release needs two Helm phases. The first installs
+ * cert-manager with TLS resources withheld, allowing --wait to gate on its
+ * webhook. The second enables the ClusterIssuer and Certificates. Existing
+ * releases already have a ready webhook and keep the single-phase path.
+ */
+export function planTlsInstall(input: TlsInstallPlanInput): TlsInstallPlan {
+  if (input.tlsMode !== "auto") {
+    return { initialTlsEnabled: true, enableTlsAfterInstall: false };
+  }
+
+  const enableImmediately =
+    input.externalDnsEnabled || input.assumeDnsConfigured;
+  if (input.releaseEverDeployed) {
+    return {
+      initialTlsEnabled: enableImmediately,
+      enableTlsAfterInstall: false,
+    };
+  }
+
+  return {
+    initialTlsEnabled: false,
+    enableTlsAfterInstall: enableImmediately,
+  };
+}
+
 export interface DnsTlsResumeInput {
   forceFull: boolean;
   valuesExist: boolean;

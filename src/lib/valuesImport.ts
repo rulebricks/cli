@@ -1,14 +1,14 @@
 /**
  * Chunked vocabulary (dynamic values) import against a Rulebricks instance.
  *
- * Streams a large JSON dictionary into POST /api/v1/values/bulk in
+ * Streams a large JSON dictionary into POST /api/v1/values in
  * byte-bounded chunks. Each chunk is an idempotent upsert server-side, so
  * failed chunks are retried safely without re-importing everything.
  */
 
 import { promises as fs } from "node:fs";
 
-// Self-hosted instances accept large bodies on the bulk endpoint; stay well
+// Self-hosted instances accept large bodies on the values endpoint; stay well
 // under typical proxy limits while keeping round trips low.
 const TARGET_CHUNK_BYTES = 2 * 1024 * 1024;
 const CHUNK_RETRIES = 3;
@@ -185,7 +185,7 @@ async function postChunk(
   apiKey: string,
   values: Record<string, unknown>,
 ): Promise<{ created: number; updated: number }> {
-  const endpoint = `${baseUrl.replace(/\/$/, "")}/api/v1/values/bulk`;
+  const endpoint = `${baseUrl.replace(/\/$/, "")}/api/v1/values`;
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= CHUNK_RETRIES; attempt++) {

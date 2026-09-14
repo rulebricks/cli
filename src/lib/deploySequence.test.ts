@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  planTlsInstall,
   runInstallSequence,
   shouldResumeDnsTlsSetup,
   DnsTlsResumeInput,
@@ -45,6 +46,54 @@ const resumableDnsTlsInput: DnsTlsResumeInput = {
   configModifiedAtMs: 100,
   valuesModifiedAtMs: 200,
 };
+
+test("fresh automatic TLS bootstraps cert-manager before enabling TLS", () => {
+  assert.deepEqual(
+    planTlsInstall({
+      tlsMode: "auto",
+      externalDnsEnabled: true,
+      assumeDnsConfigured: false,
+      releaseEverDeployed: false,
+    }),
+    { initialTlsEnabled: false, enableTlsAfterInstall: true },
+  );
+});
+
+test("existing automatic TLS release keeps the single-phase path", () => {
+  assert.deepEqual(
+    planTlsInstall({
+      tlsMode: "auto",
+      externalDnsEnabled: true,
+      assumeDnsConfigured: false,
+      releaseEverDeployed: true,
+    }),
+    { initialTlsEnabled: true, enableTlsAfterInstall: false },
+  );
+});
+
+test("manual DNS keeps TLS off after the cert-manager bootstrap install", () => {
+  assert.deepEqual(
+    planTlsInstall({
+      tlsMode: "auto",
+      externalDnsEnabled: false,
+      assumeDnsConfigured: false,
+      releaseEverDeployed: false,
+    }),
+    { initialTlsEnabled: false, enableTlsAfterInstall: false },
+  );
+});
+
+test("non-auto TLS modes do not use the cert-manager bootstrap", () => {
+  assert.deepEqual(
+    planTlsInstall({
+      tlsMode: "provided",
+      externalDnsEnabled: true,
+      assumeDnsConfigured: false,
+      releaseEverDeployed: false,
+    }),
+    { initialTlsEnabled: true, enableTlsAfterInstall: false },
+  );
+});
 
 test("resumes a deployed release waiting for manual DNS", () => {
   assert.equal(shouldResumeDnsTlsSetup(resumableDnsTlsInput), true);

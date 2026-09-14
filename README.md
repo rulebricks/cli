@@ -93,6 +93,7 @@ worker images together.
 | Command                     | Description                              |
 | --------------------------- | ---------------------------------------- |
 | `rulebricks init`           | Interactive setup wizard                 |
+| `rulebricks configure [name]` | Update a saved deployment configuration |
 | `rulebricks deploy [name]`  | Deploy to Kubernetes                     |
 | `rulebricks upgrade [name]` | Upgrade to a new version                 |
 | `rulebricks destroy [name]` | Remove a deployment                      |
@@ -105,9 +106,14 @@ worker images together.
 
 Use `rulebricks -h` to explore all commands, and add `-h` to any command to learn more about a particular command's options.
 
+`rulebricks configure` saves configuration changes locally. Select **apply**
+when prompted to deploy them immediately; otherwise run
+`rulebricks deploy <name>` afterward. Runtime environment changes such as the
+administrator email do not reach existing pods until that deploy completes.
+
 ### Importing vocabulary at scale
 
-`rulebricks values import` streams a large (flat or nested) JSON dictionary into an instance's bulk values API in idempotent chunks, with progress and throughput reporting:
+`rulebricks values import` streams a large (flat or nested) JSON dictionary into an instance's values API in idempotent chunks, with progress and throughput reporting:
 
 ```bash
 rulebricks values import vocabulary.json \

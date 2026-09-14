@@ -31,6 +31,7 @@ import {
   isHelmInstalled,
   latestReleaseStatus,
   getDeployedChartVersion,
+  hasReleaseEverDeployed,
 } from "../lib/helm.js";
 import { assertValidHelmValues } from "../lib/validateValues.js";
 import {
@@ -86,6 +87,7 @@ import {
 import { setupExternalSecrets } from "../lib/eso.js";
 import { normalizeVersion } from "../lib/dockerHub.js";
 import {
+  planTlsInstall,
   runInstallSequence,
   secretModeForConfig,
   shouldResumeDnsTlsSetup,
@@ -506,6 +508,15 @@ function DeployCommandInner({
 
       const namespace = getNamespace(cfg.name);
       const releaseName = getReleaseName(cfg.name);
+      const tlsInstallPlan = planTlsInstall({
+        tlsMode,
+        externalDnsEnabled,
+        assumeDnsConfigured,
+        releaseEverDeployed: await hasReleaseEverDeployed(
+          releaseName,
+          namespace,
+        ),
+      });
 
       // Resolve the infrastructure image tags from the chart's own
       // images/manifest.yaml for the exact chart version being installed
@@ -721,7 +732,7 @@ function DeployCommandInner({
       await runInstallSequence(
         {
           regenerateValues,
-          tlsEnabled: externalDnsEnabled || tlsMode !== "auto",
+          tlsEnabled: tlsInstallPlan.initialTlsEnabled,
           secretMode,
         },
         {
@@ -791,12 +802,44 @@ function DeployCommandInner({
         },
       );
 
+      if (tlsInstallPlan.enableTlsAfterInstall) {
+        // Helm cannot wait between applying a dependency's Deployment and
+        // custom resources validated by that dependency's webhook. On the
+        // first auto-TLS install, the initial phase deliberately withholds the
+        // ClusterIssuer/Certificates while installing cert-manager. --wait
+        // returns only after its webhook is ready, so this upgrade is safe.
+        markSuccess("helmInstall");
+        setStep("helm-upgrade-tls");
+        markRunning("helmUpgradeTls");
+        await updateHelmValuesForTLS(name, true);
+
+        if (shouldMirrorToAcr(cfg)) {
+          const registry = cfg.imageRegistry!;
+          await helmRegistryLoginToAcr(
+            registry.split(".")[0],
+            registry,
+            cfg.imageRegistryResourceId,
+          );
+        }
+
+        await upgradeChart(name, {
+          releaseName,
+          namespace,
+          version: chartSourceRef.current.version,
+          chartRef: chartSourceRef.current.chartRef,
+          wait: true,
+        });
+        markSuccess("helmUpgradeTls");
+      }
+
       if (externalDnsEnabled) {
         setStatus((s) => ({
           ...s,
           helmInstall: "success",
           dnsConfig: "skipped",
-          helmUpgradeTls: "skipped",
+          helmUpgradeTls: tlsInstallPlan.enableTlsAfterInstall
+            ? "success"
+            : "skipped",
           certCheck: tlsProvided ? "skipped" : "running",
         }));
 
@@ -818,7 +861,9 @@ function DeployCommandInner({
         setStatus((s) => ({
           ...s,
           dnsConfig: "skipped",
-          helmUpgradeTls: "skipped",
+          helmUpgradeTls: tlsInstallPlan.enableTlsAfterInstall
+            ? "success"
+            : "skipped",
           certCheck: tlsProvided ? "skipped" : "running",
         }));
         if (!tlsProvided) {
