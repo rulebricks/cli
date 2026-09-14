@@ -207,16 +207,7 @@ function decisionLogPathPrefix(config: DeploymentConfig): string {
 function generateVectorSinks(
   config: DeploymentConfig,
 ): Record<string, unknown> {
-  const sinks: Record<string, unknown> = {
-    // Console sink is always enabled
-    console: {
-      type: "console",
-      inputs: ["normalize_logs"],
-      encoding: {
-        codec: "json",
-      },
-    },
-  };
+  const sinks: Record<string, unknown> = {};
 
   if (config.storage) {
     const storage = config.storage;
@@ -433,6 +424,20 @@ function generateVectorSinks(
         };
         break;
     }
+  }
+
+  // Console is only a validity fallback when no durable or external sink exists.
+  // Printing normalized decision logs alongside the object-storage/ClickHouse
+  // sinks makes ClickStack's pod-log collector ingest a second full copy back
+  // into the same ClickHouse volume.
+  if (Object.keys(sinks).length === 0) {
+    sinks.console = {
+      type: "console",
+      inputs: ["normalize_logs"],
+      encoding: {
+        codec: "json",
+      },
+    };
   }
 
   return sinks;

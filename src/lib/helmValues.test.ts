@@ -1212,7 +1212,7 @@ test("owned values reconciliation removes tracing, logging sinks, and TLS materi
   assert.equal(values["vector-agent"].enabled, false);
   assert.deepEqual(values["vector-agent"].customConfig.sinks, {});
   assert.equal(values.vector.customConfig.sinks.datadog, undefined);
-  assert.ok(values.vector.customConfig.sinks.console);
+  assert.equal(values.vector.customConfig.sinks.console, undefined);
   assert.deepEqual(values.vector.customConfig.sinks.customer_archive, {
     type: "http",
     uri: "https://logs.customer.example",
@@ -1487,6 +1487,18 @@ function vectorSinks(
   };
   return values.vector?.customConfig?.sinks ?? {};
 }
+
+test("durable decision-log sinks are not duplicated to Vector stdout", () => {
+  for (const name of [
+    "aws-self-hosted-minimal",
+    "gcp-self-hosted",
+    "azure-workload-identity",
+  ]) {
+    const sinks = vectorSinks(matrix.find((c) => c.name === name)!.config);
+    assert.ok(sinks.decision_logs, `${name}: expected durable archive sink`);
+    assert.equal(sinks.console, undefined, `${name}: unexpected console copy`);
+  }
+});
 
 test("decision_logs sink writes zstd NDJSON (never parquet) for every cloud", () => {
   // Vector's azure_blob/gcs sinks have no parquet encoder and `parquet` is not a
