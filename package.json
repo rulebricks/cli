@@ -1,6 +1,6 @@
 {
   "name": "@rulebricks/cli",
-  "version": "2.5.9",
+  "version": "2.6.0",
   "description": "CLI for deploying and managing private Rulebricks instances",
   "type": "module",
   "bin": {
