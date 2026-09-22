@@ -27,10 +27,7 @@ import {
   normalizeDeploymentConfig,
 } from "../../types/index.js";
 import { generateSecureSecret } from "../../lib/validation.js";
-import {
-  DEFAULT_CLICKHOUSE_STORAGE_SIZE,
-  DEFAULT_DECISION_LOG_RETENTION_DAYS,
-} from "../../lib/chartDefaults.js";
+import { DEFAULT_CLICKHOUSE_STORAGE_SIZE } from "../../lib/chartDefaults.js";
 
 // Partial config during wizard flow
 export interface WizardState {
@@ -116,7 +113,8 @@ export interface WizardState {
   eligibleMemoryGi: number;
   totalPersistentStorageGi: number;
 
-  // Shared object storage (one bucket/container; decision logs + backups are prefixes)
+  // Shared object storage (one bucket/container; raw logs, native ClickHouse
+  // objects, and backups use separate prefixes)
   storageProvider: ObjectStorageProvider | null;
   storageBucket: string;
   storageRegion: string;
@@ -127,6 +125,7 @@ export interface WizardState {
   storageAzureBlobTenantId: string;
   storageAzureBlobConnectionStringSecretRef: string;
   storageGcpServiceAccountEmail: string;
+  storageClickHousePath: string;
 
   // Secrets backend (External Secrets Operator by default; "cluster" = plain
   // CLI-applied Kubernetes Secrets for dev/test)
@@ -151,11 +150,13 @@ export interface WizardState {
   // Features - Monitoring (Prometheus). In-cluster Prometheus is always
   // installed; this toggle only controls exporting metrics via remote_write.
   clickStackEnabled: boolean;
-  clickStackTelemetryRetentionDays: number;
+  // Standalone persistent-mode object cache PVC.
   clickHouseStorageSize: string;
-  decisionLogRetentionDays: number;
+  // Original StatefulSet claim retained for catalog and object metadata.
+  clickHouseMetadataStorageSize: string;
   // Config-file escape hatch: when ClickStack is off, keep ClickHouse
-  // persistent and write decision logs directly instead of archive-only mode.
+  // persistent. Native MergeTree parts live in object storage; false keeps the
+  // raw-archive query mode.
   clickHousePersistenceEnabled: boolean;
   metricsExportEnabled: boolean;
   prometheusMonitoringDestination: MonitoringDestination | null;
@@ -366,13 +367,11 @@ type WizardAction =
     }
   | { type: "SET_CLICKSTACK_ENABLED"; enabled: boolean }
   | {
-      type: "SET_CLICKSTACK_CONFIG";
+      type: "SET_CLICKHOUSE_CONFIG";
       config: Partial<
         Pick<
           WizardState,
-          | "clickStackTelemetryRetentionDays"
-          | "clickHouseStorageSize"
-          | "decisionLogRetentionDays"
+          "clickHouseStorageSize" | "clickHouseMetadataStorageSize"
         >
       >;
     }
@@ -632,6 +631,8 @@ export function getInitialState(profile?: ProfileConfig | null): WizardState {
         : "",
     storageGcpServiceAccountEmail:
       profile?.storage?.gcpServiceAccountEmail ?? "",
+    storageClickHousePath:
+      profile?.storage?.paths?.clickhouse ?? "clickhouse",
 
     // Secrets backend - the SecretsStep defaults this to the cloud-native
     // manager once the provider is known.
@@ -658,9 +659,8 @@ export function getInitialState(profile?: ProfileConfig | null): WizardState {
     // Features - Monitoring (metrics export is opt-in; in-cluster Prometheus
     // is always installed)
     clickStackEnabled: true,
-    clickStackTelemetryRetentionDays: 7,
     clickHouseStorageSize: DEFAULT_CLICKHOUSE_STORAGE_SIZE,
-    decisionLogRetentionDays: DEFAULT_DECISION_LOG_RETENTION_DAYS,
+    clickHouseMetadataStorageSize: DEFAULT_CLICKHOUSE_STORAGE_SIZE,
     clickHousePersistenceEnabled: false,
     metricsExportEnabled: false,
     prometheusMonitoringDestination: null,
@@ -1013,12 +1013,6 @@ export function collectConfigIssues(state: WizardState): string[] {
     }
   }
 
-  if (
-    !Number.isInteger(state.decisionLogRetentionDays) ||
-    state.decisionLogRetentionDays < 1
-  ) {
-    issues.push("Decision-log retention must be at least 1 day.");
-  }
   if (
     state.ssoEnabled &&
     (!state.ssoProvider || !state.ssoClientId || !state.ssoClientSecret)
@@ -1397,6 +1391,8 @@ export function configToWizardState(
       storage?.azureBlobConnectionStringSecretRef,
     ),
     storageGcpServiceAccountEmail: storage?.gcpServiceAccountEmail ?? "",
+    storageClickHousePath:
+      storage?.paths?.clickhouse ?? base.storageClickHousePath,
     secretsBackend: config.secrets?.backend ?? null,
     secretsPrefix: config.secrets?.prefix ?? "",
     secretsAwsRoleArn: config.secrets?.aws?.roleArn ?? "",
@@ -1416,15 +1412,13 @@ export function configToWizardState(
     ssoClientSecret: sso.enabled ? (sso.clientSecret ?? "") : "",
     clickStackEnabled:
       config.features.observability?.clickstack?.enabled ?? true,
-    clickStackTelemetryRetentionDays:
-      config.features.observability?.clickstack?.telemetryRetentionDays ??
-      base.clickStackTelemetryRetentionDays,
     clickHouseStorageSize:
-      config.features.observability?.clickstack?.clickHouseStorageSize ??
+      config.clickhouse?.cache?.size ??
+      config.clickhouse?.persistence?.size ??
       base.clickHouseStorageSize,
-    decisionLogRetentionDays:
-      config.clickhouse?.decisionLogs?.retentionDays ??
-      base.decisionLogRetentionDays,
+    clickHouseMetadataStorageSize:
+      config.clickhouse?.persistence?.size ??
+      base.clickHouseMetadataStorageSize,
     clickHousePersistenceEnabled:
       config.clickhouse?.persistence?.enabled ?? false,
     // The toggle reflects whether remote_write is actually configured, so
@@ -1823,7 +1817,7 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
         tracingEnabled: action.enabled ? false : state.tracingEnabled,
         appLogsEnabled: action.enabled ? false : state.appLogsEnabled,
       };
-    case "SET_CLICKSTACK_CONFIG":
+    case "SET_CLICKHOUSE_CONFIG":
       return { ...state, ...action.config };
     case "SET_TRACING_ENABLED":
       return {
@@ -2114,15 +2108,20 @@ export function WizardProvider({
             : undefined,
         paths: {
           decisionLogs: "decision-logs",
+          clickhouse: state.storageClickHousePath || "clickhouse",
           dbBackups: "db-backups",
         },
       },
       clickhouse: {
         persistence: {
           enabled: state.clickHousePersistenceEnabled,
+          size:
+            state.clickHouseMetadataStorageSize ||
+            DEFAULT_CLICKHOUSE_STORAGE_SIZE,
         },
-        decisionLogs: {
-          retentionDays: state.decisionLogRetentionDays,
+        cache: {
+          size:
+            state.clickHouseStorageSize || DEFAULT_CLICKHOUSE_STORAGE_SIZE,
         },
       },
       backup: {
@@ -2193,8 +2192,6 @@ export function WizardProvider({
         observability: {
           clickstack: {
             enabled: state.clickStackEnabled,
-            telemetryRetentionDays: state.clickStackTelemetryRetentionDays,
-            clickHouseStorageSize: state.clickHouseStorageSize,
           },
         },
         // Distributed tracing (self-hosted only). Omitted when disabled. The

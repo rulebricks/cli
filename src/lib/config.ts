@@ -55,7 +55,7 @@ export async function deploymentExists(name: string): Promise<boolean> {
   }
 }
 
-function migrateStorageConfig(parsed: any): void {
+export function migrateStorageConfig(parsed: any): void {
   if (!parsed || typeof parsed !== "object") return;
 
   // Collapse the older per-purpose storage shape (separate decisionLogs/dbBackups
@@ -80,13 +80,88 @@ function migrateStorageConfig(parsed: any): void {
       gcpServiceAccountEmail: storage.gcpServiceAccountEmail,
       paths: {
         decisionLogs: dl.path || "decision-logs",
+        clickhouse: "clickhouse",
         dbBackups: db.path || "db-backups",
       },
     };
   }
 
+  const migratedStorage = parsed.storage;
+  if (migratedStorage && typeof migratedStorage === "object") {
+    const paths =
+      migratedStorage.paths &&
+      typeof migratedStorage.paths === "object" &&
+      !Array.isArray(migratedStorage.paths)
+        ? migratedStorage.paths
+        : {};
+    migratedStorage.paths = {
+      ...paths,
+      clickhouse: paths.clickhouse || "clickhouse",
+    };
+  }
+
   if (parsed.features?.decisionLogQuery) {
     delete parsed.features.decisionLogQuery;
+  }
+}
+
+/**
+ * Migrates retired ClickHouse settings before schema parsing. Older CLI
+ * configs stored the PVC size under ClickStack and advertised two independent
+ * retention windows. Native object-backed ClickHouse owns neither retention
+ * value; preserve the old capacity for both the retained metadata claim and
+ * the new standalone cache unless either has an explicit replacement.
+ */
+export function migrateLegacyClickHouseConfig(parsed: unknown): void {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  const config = parsed as Record<string, any>;
+  const clickstack = config.features?.observability?.clickstack;
+  const legacySize =
+    clickstack && typeof clickstack === "object"
+      ? clickstack.clickHouseStorageSize
+      : undefined;
+
+  if (typeof legacySize === "string" && legacySize) {
+    const clickhouse =
+      config.clickhouse &&
+      typeof config.clickhouse === "object" &&
+      !Array.isArray(config.clickhouse)
+        ? config.clickhouse
+        : {};
+    const persistence =
+      clickhouse.persistence &&
+      typeof clickhouse.persistence === "object" &&
+      !Array.isArray(clickhouse.persistence)
+        ? clickhouse.persistence
+        : {};
+    config.clickhouse = {
+      ...clickhouse,
+      persistence: {
+        ...persistence,
+        size: persistence.size || legacySize,
+      },
+      cache: {
+        ...(clickhouse.cache &&
+        typeof clickhouse.cache === "object" &&
+        !Array.isArray(clickhouse.cache)
+          ? clickhouse.cache
+          : {}),
+        size:
+          (clickhouse.cache &&
+          typeof clickhouse.cache === "object" &&
+          !Array.isArray(clickhouse.cache)
+            ? clickhouse.cache.size
+            : undefined) || legacySize,
+      },
+    };
+  }
+
+  if (config.clickhouse && typeof config.clickhouse === "object") {
+    delete config.clickhouse.decisionLogs;
+  }
+  if (clickstack && typeof clickstack === "object") {
+    delete clickstack.telemetryRetentionDays;
+    delete clickstack.clickHouseStorageSize;
   }
 }
 
@@ -156,6 +231,7 @@ async function migrateConfig(
   if (!parsed || typeof parsed !== "object") return;
   const config = parsed as Record<string, unknown>;
   migrateStorageConfig(config);
+  migrateLegacyClickHouseConfig(config);
 
   if (typeof config.version !== "string" || !config.version) {
     config.version = await inferMissingVersion(name, config);

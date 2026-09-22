@@ -26,7 +26,11 @@ function s3Storage(): StorageConfig {
     awsIamRoleArn: "arn:aws:iam::123456789012:role/rulebricks-cluster-data-access",
     bucket: "rulebricks-cluster-data-123456789012",
     region: "us-east-1",
-    paths: { decisionLogs: "decision-logs", dbBackups: "db-backups" },
+    paths: {
+      decisionLogs: "decision-logs",
+      clickhouse: "clickhouse",
+      dbBackups: "db-backups",
+    },
   };
 }
 
@@ -37,7 +41,11 @@ function gcsStorage(): StorageConfig {
     gcpServiceAccountEmail: "rulebricks@my-project.iam.gserviceaccount.com",
     bucket: "rulebricks-cluster-data",
     region: "us-central1",
-    paths: { decisionLogs: "decision-logs", dbBackups: "db-backups" },
+    paths: {
+      decisionLogs: "decision-logs",
+      clickhouse: "clickhouse",
+      dbBackups: "db-backups",
+    },
   };
 }
 
@@ -60,7 +68,11 @@ function azureStorage(mode: "workload-identity" | "secret"): StorageConfig {
     bucket: "rbstorageacct",
     region: "eastus",
     azureBlobContainer: "rulebricks-cluster-data",
-    paths: { decisionLogs: "decision-logs", dbBackups: "db-backups" },
+    paths: {
+      decisionLogs: "decision-logs",
+      clickhouse: "clickhouse",
+      dbBackups: "db-backups",
+    },
   };
 }
 
@@ -178,8 +190,11 @@ function build(options: MatrixOptions): DeploymentConfig {
     database: databaseConfig,
     storage,
     clickhouse: {
-      decisionLogs: {
-        retentionDays: 30,
+      persistence: {
+        size: "100Gi",
+      },
+      cache: {
+        size: "100Gi",
       },
     },
     externalServices: options.externalServices,

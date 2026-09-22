@@ -331,10 +331,9 @@ export function plannedBindings(config: DeploymentConfig): SubjectBinding[] {
 
   if (storage && !usesSecretAuth && storagePrincipal) {
     bindings.push({ serviceAccount: "vector", principal: storagePrincipal });
-    // ClickHouse reads the decision-log archive straight from object storage
-    // (the rulebricks.decision_logs view / named collection), so it needs the
-    // same storage identity as Vector. Without this trust the cloud IdP rejects
-    // ClickHouse's token and every decision_logs query fails to authenticate.
+    // ClickHouse reads the raw archive in stateless mode and reads/writes native
+    // MergeTree objects in persistent mode, so it needs the same storage
+    // identity as Vector in both modes.
     bindings.push({
       serviceAccount: `${releaseName}-clickhouse`,
       principal: storagePrincipal,

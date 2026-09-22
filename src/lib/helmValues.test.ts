@@ -12,8 +12,8 @@ import {
 } from "./helmValues.js";
 import { AZURE_POSTGRES_CA_BUNDLE } from "./azurePostgresCa.js";
 import {
+  DECISION_LOG_BATCH,
   DECISION_LOG_CLICKHOUSE_SINK,
-  DEFAULT_DECISION_LOG_RETENTION_DAYS,
 } from "./chartDefaults.js";
 import { bundledImageCatalog } from "./imageCatalog.js";
 import { getActiveWizardSteps } from "./wizardSteps.js";
@@ -25,6 +25,8 @@ import {
 import { applyHelmValuesToConfig } from "../commands/configure.js";
 import {
   extractProfileFromConfig,
+  migrateLegacyClickHouseConfig,
+  migrateStorageConfig,
   normalizeProfileConfig,
 } from "./config.js";
 import {
@@ -119,21 +121,46 @@ test("config matrix parses against the deployment schema", () => {
   }
 });
 
-test("deployment config validates decision-log retention", () => {
+test("deployment config supports the persistent mode and optional PVC size", () => {
   const config = cloneFixture("aws-self-hosted-minimal");
   config.clickhouse = {
-    decisionLogs: {
-      retentionDays: 0,
-    },
+    persistence: { enabled: true, size: "250Gi" },
+    cache: { size: "80Gi" },
   };
 
   const result = DeploymentConfigSchema.safeParse(config);
-  assert.equal(result.success, false);
-  assert.ok(
-    result.error!.issues.some(
-      (issue) => issue.path.join(".") === "clickhouse.decisionLogs.retentionDays",
-    ),
-  );
+  assert.ok(result.success);
+  assert.deepEqual(result.data.clickhouse?.persistence, {
+    enabled: true,
+    size: "250Gi",
+  });
+  assert.deepEqual(result.data.clickhouse?.cache, { size: "80Gi" });
+});
+
+test("legacy config migration preserves PVC size and removes retired retention", () => {
+  const legacy = cloneFixture("aws-self-hosted-minimal") as any;
+  delete legacy.storage.paths.clickhouse;
+  legacy.features.observability.clickstack.telemetryRetentionDays = 14;
+  legacy.features.observability.clickstack.clickHouseStorageSize = "275Gi";
+  legacy.clickhouse = {
+    persistence: { enabled: true },
+    decisionLogs: { retentionDays: 45 },
+  };
+
+  migrateStorageConfig(legacy);
+  migrateLegacyClickHouseConfig(legacy);
+  const migrated = DeploymentConfigSchema.parse(legacy);
+
+  assert.equal(migrated.storage?.paths?.clickhouse, "clickhouse");
+  assert.deepEqual(migrated.clickhouse?.persistence, {
+    enabled: true,
+    size: "275Gi",
+  });
+  assert.deepEqual(migrated.clickhouse?.cache, { size: "275Gi" });
+  assert.deepEqual(migrated.features.observability?.clickstack, {
+    enabled: true,
+  });
+  assert.equal((migrated.clickhouse as any)?.decisionLogs, undefined);
 });
 
 test("generated Helm values are valid against the chart schema for every config", () => {
@@ -178,29 +205,38 @@ test("ClickStack is the default in-cluster observability backend", () => {
   assert.equal(values.clickstack.enabled, undefined);
   assert.equal(values.clickhouse.persistence.enabled, true);
   assert.equal(values.clickhouse.persistence.size, "100Gi");
+  assert.equal(values.clickhouse.persistence.keepFreeSpaceBytes, 21474836480);
+  assert.equal(values.rulebricks.hps.keda.inFlightPrometheus, undefined);
+  assert.deepEqual(values.clickhouse.cache, {
+    storageClass: "gp3",
+    size: "100Gi",
+  });
+  assert.deepEqual(values.clickhouse.temp, { sizeLimit: "20Gi" });
+  assert.equal(values.rulebricks.app.clickhouse.username, "rulebricks");
   assert.equal(
-    values.clickhouse.decisionLogs.retentionDays,
-    DEFAULT_DECISION_LOG_RETENTION_DAYS,
+    values.vector.customConfig.sinks.decision_logs_clickhouse.auth.user,
+    "rulebricks",
   );
+  assert.equal(values.clickstack.clickhouse.username, "rulebricks");
+  assert.equal(values.clickstack.clickhouse.createSchema, false);
+  assert.equal(values.clickhouse.decisionLogs, undefined);
+  assert.equal(values.global.storage.paths.clickhouse, "clickhouse");
   assert.deepEqual(values.clickhouse.resources, {
     requests: { cpu: "1000m", memory: "4Gi" },
     limits: { cpu: "4", memory: "12Gi" },
   });
-  assert.deepEqual(values.clickhouse.otelQueryLimits, {
-    maxMemoryUsage: 4294967296,
-    maxThreads: 8,
-    maxExecutionTime: 120,
-  });
-  assert.equal(values.clickstack.clickhouse.retentionDays, 7);
-  assert.equal(values.clickstack.clickhouse.ttl, "");
+  assert.equal(values.clickhouse.queryLimits.readOverflowMode, undefined);
+  assert.equal(values.clickstack.clickhouse.retentionDays, undefined);
+  assert.equal(values.clickstack.clickhouse.ttl, undefined);
   assert.equal(values.clickstack.clickhouse.decisionLogs, undefined);
   assert.deepEqual(values.clickstack.hyperdx.resources, {
     requests: { cpu: "250m", memory: "512Mi" },
     limits: { cpu: "1000m", memory: "1Gi" },
   });
+  assert.equal(values.clickstack.collector.memoryLimitMiB, 1600);
   assert.deepEqual(values.clickstack.collector.gateway.resources, {
-    requests: { cpu: "250m", memory: "512Mi" },
-    limits: { cpu: "2000m", memory: "1Gi" },
+    requests: { cpu: "250m", memory: "1Gi" },
+    limits: { cpu: "2000m", memory: "3Gi" },
   });
   assert.deepEqual(values.clickstack.collector.agent.resources, {
     requests: { cpu: "100m", memory: "256Mi" },
@@ -232,6 +268,7 @@ test("ClickStack is the default in-cluster observability backend", () => {
     chSink.buffer.max_size,
     DECISION_LOG_CLICKHOUSE_SINK.bufferMaxSize,
   );
+  assert.deepEqual(chSink.acknowledgements, { enabled: false });
   // drop_newest is load-bearing: a ClickHouse outage or full disk must not
   // backpressure Kafka and stall the durable object-storage export.
   assert.equal(chSink.buffer.when_full, "drop_newest");
@@ -241,6 +278,7 @@ test("ClickStack is the default in-cluster observability backend", () => {
     true,
   );
   assert.equal(values.global.tracing, undefined);
+  assert.equal(values.traefik.tracing.sampleRate, 1);
   assert.equal(values.traefik.tracing.otlp.enabled, true);
 
   const remoteWrite =
@@ -248,29 +286,90 @@ test("ClickStack is the default in-cluster observability backend", () => {
   assert.deepEqual(remoteWrite, []);
 });
 
-test("built-in observability settings flow into generated Helm values", () => {
+test("manual in-flight Prometheus opt-in survives value regeneration", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  const existing = buildHelmValues(config) as Record<string, any>;
+  existing.rulebricks.hps.keda.inFlightPrometheus = {
+    enabled: true,
+    serverAddress: "http://prometheus.monitoring.svc:9090",
+    threshold: "1",
+  };
+
+  const values = buildDeployValues(existing, config) as Record<string, any>;
+  assert.deepEqual(
+    values.rulebricks.hps.keda.inFlightPrometheus,
+    existing.rulebricks.hps.keda.inFlightPrometheus,
+  );
+});
+
+test("the wizard-facing ClickHouse size controls only the cache PVC", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  config.clickhouse = { cache: { size: "250Gi" } };
+
+  const values = buildHelmValues(config) as Record<string, any>;
+
+  assert.equal(values.clickhouse.persistence.size, "100Gi");
+  assert.equal(values.clickhouse.cache.size, "250Gi");
+});
+
+test("ClickHouse metadata and cache PVC sizes remain independent", () => {
   const config = cloneFixture("aws-self-hosted-minimal");
   config.features.observability = {
     clickstack: {
       enabled: true,
-      telemetryRetentionDays: 14,
-      clickHouseStorageSize: "250Gi",
     },
   };
   config.clickhouse = {
-    decisionLogs: {
-      retentionDays: 45,
-    },
+    persistence: { size: "250Gi" },
+    cache: { size: "75Gi" },
   };
 
   const values = buildHelmValues(config) as Record<string, any>;
 
-  assert.equal(values.clickstack.clickhouse.retentionDays, 14);
+  assert.equal(values.clickstack.clickhouse.retentionDays, undefined);
+  assert.equal(values.clickstack.clickhouse.ttl, undefined);
   assert.equal(values.clickstack.clickhouse.decisionLogs, undefined);
   assert.equal(values.global.clickstack.clickhouse, undefined);
-  assert.equal(values.clickhouse.decisionLogs.retentionDays, 45);
+  assert.equal(values.clickhouse.decisionLogs, undefined);
   assert.equal(values.clickhouse.persistence.size, "250Gi");
+  assert.equal(values.clickhouse.cache.size, "75Gi");
   assert.equal(values.clickstack.ferretdb.persistence.size, "10Gi");
+});
+
+test("ClickStack keeps stateless ClickHouse configurations incompatible", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  config.clickhouse = {
+    persistence: { enabled: false, size: "150Gi" },
+  };
+
+  const values = buildHelmValues(config) as Record<string, any>;
+  assert.equal(values.global.clickstack.enabled, true);
+  assert.equal(values.clickhouse.persistence.enabled, true);
+  assert.equal(values.clickhouse.persistence.size, "150Gi");
+  assert.ok(values.vector.customConfig.sinks.decision_logs_clickhouse);
+});
+
+test("native ClickHouse objects use a prefix separate from raw archives", () => {
+  const config = cloneFixture("aws-self-hosted-minimal");
+  config.storage!.paths = {
+    decisionLogs: "raw-decisions",
+    clickhouse: "native-clickhouse",
+    dbBackups: "postgres-backups",
+  };
+
+  const values = buildHelmValues(config) as Record<string, any>;
+  assert.equal(
+    values.vector.customConfig.sinks.decision_logs.key_prefix,
+    "raw-decisions/year=%Y/month=%m/day=%d/hour=%H/",
+  );
+  assert.equal(
+    values.global.storage.paths.clickhouse,
+    "native-clickhouse",
+  );
+  assert.equal(
+    configToWizardState(config).storageClickHousePath,
+    "native-clickhouse",
+  );
 });
 
 test("provided certificates keep TLS on with zero in-chart issuance", () => {
@@ -341,6 +440,64 @@ test("metrics export coexists with built-in ClickStack observability", () => {
     prometheus.prometheusSpec.podMetadata.labels["azure.workload.identity/use"],
     "true",
   );
+});
+
+test("ClickHouse keeps object-store identity wiring for every cloud", () => {
+  const aws = buildHelmValues(
+    cloneFixture("aws-self-hosted-minimal"),
+  ) as Record<string, any>;
+  assert.deepEqual(aws.clickhouse.serviceAccount.annotations, {});
+  assert.equal(
+    aws.global.storage.s3.iamRoleArn,
+    "arn:aws:iam::123456789012:role/rulebricks-cluster-data-access",
+  );
+
+  const gcp = buildHelmValues(
+    cloneFixture("gcp-self-hosted"),
+  ) as Record<string, any>;
+  assert.equal(
+    gcp.clickhouse.serviceAccount.annotations[
+      "iam.gke.io/gcp-service-account"
+    ],
+    "rulebricks@my-project.iam.gserviceaccount.com",
+  );
+
+  const azure = buildHelmValues(
+    cloneFixture("azure-workload-identity"),
+  ) as Record<string, any>;
+  assert.equal(
+    azure.clickhouse.serviceAccount.annotations[
+      "azure.workload.identity/client-id"
+    ],
+    "11111111-1111-1111-1111-111111111111",
+  );
+  assert.equal(
+    azure.clickhouse.podLabels["azure.workload.identity/use"],
+    "true",
+  );
+});
+
+test("Azure connection-string storage is shared by Vector and ClickHouse", () => {
+  const values = buildHelmValues(
+    cloneFixture("azure-storage-secret"),
+  ) as Record<string, any>;
+
+  assert.equal(values.global.storage.azure.authMode, "connection-string");
+  assert.deepEqual(values.global.storage.azure.connectionStringSecretRef, {
+    name: "azure-storage",
+    key: "connection-string",
+  });
+  assert.deepEqual(values.clickhouse.serviceAccount.annotations, {});
+  assert.equal(values.clickhouse.podLabels, undefined);
+
+  const vectorConnection = values.vector.env.find(
+    (entry: { name?: string }) =>
+      entry.name === "AZURE_STORAGE_CONNECTION_STRING",
+  );
+  assert.deepEqual(vectorConnection?.valueFrom.secretKeyRef, {
+    name: "azure-storage",
+    key: "connection-string",
+  });
 });
 
 test("Azure auto-DNS wires workload identity through the external-dns block", () => {
@@ -451,17 +608,18 @@ test("configure wizard backfills missing self-hosted Supabase JWT secret", () =>
   );
 });
 
-test("configure wizard hydrates decision-log retention and persistence override", () => {
+test("configure wizard hydrates ClickHouse persistence and cache size", () => {
   const config = cloneFixture("aws-tracing-elastic");
   config.clickhouse = {
-    persistence: { enabled: true },
-    decisionLogs: { retentionDays: 60 },
+    persistence: { enabled: true, size: "240Gi" },
+    cache: { size: "90Gi" },
   };
 
   const state = configToWizardState(config);
 
   assert.equal(state.clickHousePersistenceEnabled, true);
-  assert.equal(state.decisionLogRetentionDays, 60);
+  assert.equal(state.clickHouseMetadataStorageSize, "240Gi");
+  assert.equal(state.clickHouseStorageSize, "90Gi");
 });
 
 test("deployment schema normalizes mutually exclusive SMTP and disabled SSO", () => {
@@ -580,38 +738,40 @@ test("disabled SSO clears profile defaults and cannot re-enable the wizard", () 
   assert.equal(initial.ssoClientSecret, "");
 });
 
-test("configure reconciles live decision-log retention and BYO persistence", () => {
+test("configure ignores retired retention values and hydrates persistence", () => {
   const config = cloneFixture("aws-tracing-elastic");
   const hydrated = applyHelmValuesToConfig(config, {
     global: { clickstack: { enabled: false } },
     clickstack: { clickhouse: { retentionDays: 12 } },
     clickhouse: {
       persistence: { enabled: true, size: "300Gi" },
+      cache: { size: "85Gi" },
       decisionLogs: { retentionDays: 90 },
     },
   });
 
-  assert.equal(
-    hydrated.features.observability?.clickstack.telemetryRetentionDays,
-    12,
-  );
-  assert.equal(
-    hydrated.features.observability?.clickstack.clickHouseStorageSize,
-    "300Gi",
-  );
-  assert.equal(hydrated.clickhouse?.persistence?.enabled, true);
-  assert.equal(hydrated.clickhouse?.decisionLogs?.retentionDays, 90);
+  assert.deepEqual(hydrated.features.observability?.clickstack, {
+    enabled: false,
+  });
+  assert.deepEqual(hydrated.clickhouse?.persistence, {
+    enabled: true,
+    size: "300Gi",
+  });
+  assert.deepEqual(hydrated.clickhouse?.cache, { size: "85Gi" });
+  assert.equal((hydrated.clickhouse as any)?.decisionLogs, undefined);
 
   const builtIn = cloneFixture("aws-self-hosted-minimal");
   const builtInHydrated = applyHelmValuesToConfig(builtIn, {
     global: { clickstack: { enabled: true } },
-    clickhouse: { persistence: { enabled: true } },
+    clickhouse: {
+      persistence: { enabled: true, size: "350Gi" },
+      cache: { size: "95Gi" },
+    },
   });
-  assert.equal(
-    builtInHydrated.clickhouse?.persistence,
-    undefined,
-    "derived ClickStack persistence must not become an explicit BYO override",
-  );
+  assert.deepEqual(builtInHydrated.clickhouse?.persistence, {
+    size: "350Gi",
+  });
+  assert.deepEqual(builtInHydrated.clickhouse?.cache, { size: "95Gi" });
 });
 
 test("self-hosted Supabase keys derive from the configured JWT secret", () => {
@@ -734,7 +894,7 @@ test("Valkey Admin ingress emits public hostname and BasicAuth users", () => {
   assert.deepEqual(valkeyAdmin.ingress.allowedIPs, ["203.0.113.0/24"]);
 });
 
-test("ClickHouse bootstrap ships one TTL-bounded persistent decision_logs table", (t) => {
+test("ClickHouse bootstrap uses a reset-gated object-storage default", (t) => {
   const candidates = [
     process.env.RULEBRICKS_CHART_DIR,
     path.resolve(process.cwd(), "../private/helm"),
@@ -753,6 +913,22 @@ test("ClickHouse bootstrap ships one TTL-bounded persistent decision_logs table"
     path.join(chartDir, "templates", "_defaults.tpl"),
     "utf8",
   );
+  const resetJob = fs.readFileSync(
+    path.join(chartDir, "templates", "clickhouse-reset-job.yaml"),
+    "utf8",
+  );
+  const clickhouseConfig = fs.readFileSync(
+    path.join(chartDir, "templates", "clickhouse-config.yaml"),
+    "utf8",
+  );
+  const clickhouseWorkload = fs.readFileSync(
+    path.join(chartDir, "templates", "clickhouse-workload.yaml"),
+    "utf8",
+  );
+  const bootstrapJob = fs.readFileSync(
+    path.join(chartDir, "templates", "clickhouse-view-job.yaml"),
+    "utf8",
+  );
 
   assert.match(defaults, /rulebricks\.decision_logs_archive/);
   // Persistent mode creates the app's query surface directly as a MergeTree
@@ -761,8 +937,10 @@ test("ClickHouse bootstrap ships one TTL-bounded persistent decision_logs table"
   assert.match(defaults, /CREATE TABLE IF NOT EXISTS rulebricks\.decision_logs/);
   assert.doesNotMatch(defaults, /decision_logs_recent/);
   assert.match(defaults, /PARTITION BY toYYYYMMDD\(timestamp\)/);
-  assert.match(defaults, /TTL toDateTime\(timestamp\)/);
-  assert.match(defaults, /min_free_disk_ratio_to_perform_insert/);
+  assert.match(defaults, /storage_policy\s*=\s*'object_storage'/);
+  assert.match(defaults, /<merge_tree>[\s\S]*<storage_policy>object_storage<\/storage_policy>/);
+  assert.doesNotMatch(defaults, /TTL toDateTime\(timestamp\)/);
+  assert.doesNotMatch(defaults, /min_free_disk_ratio_to_perform_insert/);
   // Correlation columns are part of the single table and normalized by Vector.
   assert.match(defaults, /path_trace Nullable\(String\)/);
   assert.match(defaults, /\.path_trace = to_string\(\.path_trace\) \?\? null/);
@@ -772,6 +950,21 @@ test("ClickHouse bootstrap ships one TTL-bounded persistent decision_logs table"
   assert.doesNotMatch(defaults, /decision_logs_parquet_/);
   assert.doesNotMatch(defaults, /<format>Parquet<\/format>/);
   assert.doesNotMatch(defaults, /minOrNull\(toUInt32\(partition\)\)/);
+  assert.match(resetJob, /"helm\.sh\/hook": pre-upgrade/);
+  assert.match(resetJob, /EXPECTED_GENERATION/);
+  assert.match(resetJob, /DROP DATABASE IF EXISTS rulebricks/);
+  assert.match(resetJob, /clickhouse_compatibility/);
+  assert.match(clickhouseConfig, /<level>information<\/level>/);
+  assert.match(clickhouseConfig, /<size>100M<\/size>/);
+  assert.match(clickhouseConfig, /<count>3<\/count>/);
+  assert.match(
+    clickhouseWorkload,
+    /- name: logs\s+emptyDir:\s+sizeLimit: 1Gi/,
+  );
+  assert.match(
+    bootstrapJob,
+    /- name: ENABLE_PROMQL\s+[\s\S]*?value: "false"/,
+  );
 });
 
 test("BYO observability opt-out disables ClickStack and keeps export paths", () => {
@@ -785,6 +978,8 @@ test("BYO observability opt-out disables ClickStack and keeps export paths", () 
   // no ClickHouse credentials in Vector, decision logs served straight from
   // the object-storage archive view.
   assert.equal(values.clickhouse.persistence.enabled, false);
+  assert.equal(values.clickhouse.cache, undefined);
+  assert.equal(values.clickhouse.temp, undefined);
   assert.equal(values.vector.customConfig.sinks.decision_logs_clickhouse, undefined);
   assert.ok(values.vector.customConfig.sinks.decision_logs);
   assert.equal(
@@ -801,19 +996,23 @@ test("BYO observability opt-out disables ClickStack and keeps export paths", () 
 test("BYO observability can explicitly keep persistent decision logs", () => {
   const config = cloneFixture("aws-tracing-elastic");
   config.clickhouse = {
-    persistence: { enabled: true },
-    decisionLogs: { retentionDays: 21 },
+    persistence: { enabled: true, size: "175Gi" },
   };
 
   const values = buildHelmValues(config) as Record<string, any>;
 
   assert.equal(values.global.clickstack.enabled, false);
   assert.equal(values.clickhouse.persistence.enabled, true);
-  assert.equal(values.clickhouse.persistence.size, "100Gi");
-  assert.equal(values.clickhouse.decisionLogs.retentionDays, 21);
+  assert.equal(values.clickhouse.persistence.size, "175Gi");
+  assert.equal(values.clickhouse.cache.size, "175Gi");
+  assert.equal(values.clickhouse.decisionLogs, undefined);
   assert.equal(
     values.vector.customConfig.sinks.decision_logs_clickhouse.table,
     "decision_logs",
+  );
+  assert.equal(
+    values.vector.customConfig.sinks.decision_logs_clickhouse.auth.user,
+    "rulebricks",
   );
   assert.ok(values.vector.customConfig.sinks.decision_logs);
   assert.equal(
@@ -822,6 +1021,35 @@ test("BYO observability can explicitly keep persistent decision logs", () => {
     ),
     true,
   );
+});
+
+test("persistent-to-stateless reconciliation removes only the owned ClickHouse sink", () => {
+  const persistent = cloneFixture("aws-tracing-elastic");
+  persistent.clickhouse = {
+    persistence: { enabled: true, size: "175Gi" },
+  };
+  const existing = buildHelmValues(persistent) as Record<string, any>;
+  existing.vector.customConfig.sinks.customer_sink = {
+    type: "http",
+    uri: "https://logs.customer.example",
+  };
+
+  const stateless = cloneFixture("aws-tracing-elastic");
+  stateless.clickhouse = {
+    persistence: { enabled: false, size: "175Gi" },
+  };
+  const values = buildDeployValues(existing, stateless) as Record<string, any>;
+
+  assert.ok(values.vector.customConfig.sinks.decision_logs);
+  assert.equal(
+    values.vector.customConfig.sinks.decision_logs_clickhouse,
+    undefined,
+  );
+  assert.deepEqual(values.vector.customConfig.sinks.customer_sink, {
+    type: "http",
+    uri: "https://logs.customer.example",
+  });
+  assert.equal(values.vector.customConfig.sinks.console, undefined);
 });
 
 interface KafkaTopicValues {
@@ -1104,6 +1332,15 @@ test("invariant checker catches partition/worker and prefix drift", () => {
       e.includes("kafka.storage.size"),
     ),
   );
+
+  const collidingClickHousePrefix = JSON.parse(JSON.stringify(base));
+  collidingClickHousePrefix.global.storage.paths.clickhouse =
+    "/decision-logs/";
+  assert.ok(
+    validateValuesInvariants(collidingClickHousePrefix).some((e) =>
+      e.includes("paths.clickhouse must be separate"),
+    ),
+  );
 });
 
 test("self-hosted deployments emit supabase.db.enabled so backup validation holds", () => {
@@ -1270,6 +1507,9 @@ test("owned values reconciliation removes tracing, logging sinks, and TLS materi
     type: "http",
     uri: "https://logs.customer.example",
   };
+  existing.clickhouse.decisionLogs = { retentionDays: 30 };
+  existing.clickstack.clickhouse.retentionDays = 7;
+  existing.clickstack.clickhouse.ttl = "168h";
 
   const values = buildDeployValues(existing, next) as Record<string, any>;
   assert.equal(values.global.tracing, undefined);
@@ -1282,6 +1522,9 @@ test("owned values reconciliation removes tracing, logging sinks, and TLS materi
     type: "http",
     uri: "https://logs.customer.example",
   });
+  assert.equal(values.clickhouse.decisionLogs, undefined);
+  assert.equal(values.clickstack.clickhouse.retentionDays, undefined);
+  assert.equal(values.clickstack.clickhouse.ttl, undefined);
   assert.equal(values.global.tlsPrivateCaBundle, undefined);
   assert.deepEqual(values.customOperatorBlock, { keep: true });
 
@@ -1587,6 +1830,26 @@ test("decision_logs sink writes zstd NDJSON (never parquet) for every cloud", ()
       `${name}: framing.method`,
     );
     assert.equal(sink.compression, "zstd", `${name}: compression`);
+    assert.equal(
+      (sink.batch as { max_bytes?: number })?.max_bytes,
+      DECISION_LOG_BATCH.max_bytes,
+      `${name}: size-based flush`,
+    );
+    assert.equal(
+      (sink.batch as { timeout_secs?: number })?.timeout_secs,
+      30,
+      `${name}: low-volume flush`,
+    );
+    assert.deepEqual(
+      sink.acknowledgements,
+      { enabled: true },
+      `${name}: archive acknowledgements`,
+    );
+    assert.deepEqual(
+      sink.buffer,
+      { type: "memory", max_events: 500, when_full: "block" },
+      `${name}: archive backpressure buffer`,
+    );
     // azure_blob has no filename_extension field; its blob suffix comes from
     // Vector's Compression::extension() (".log.zst" for zstd - verified
     // against the pinned 0.57 source). aws_s3 and gcs support it. The

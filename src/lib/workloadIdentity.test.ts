@@ -160,6 +160,99 @@ test("federation denied warning lists every subject and its create command", () 
   assert.match(warning, /Ask your cloud admin to run/);
 });
 
+test("object storage binds both Vector and ClickHouse on AWS, Azure, and GCP", () => {
+  const cases: Array<{
+    name: string;
+    provider: "aws" | "azure" | "gcp";
+    storage: DeploymentConfig["storage"];
+  }> = [
+    {
+      name: "aws-p1",
+      provider: "aws",
+      storage: {
+        provider: "s3",
+        bucket: "bucket",
+        region: "us-east-1",
+        awsIamRoleArn: "arn:aws:iam::123456789012:role/storage",
+      },
+    },
+    {
+      name: "azure-p1",
+      provider: "azure",
+      storage: {
+        provider: "azure-blob",
+        bucket: "account",
+        region: "eastus",
+        azureBlobContainer: "container",
+        azureBlobClientId: "11111111-1111-1111-1111-111111111111",
+      },
+    },
+    {
+      name: "gcp-p1",
+      provider: "gcp",
+      storage: {
+        provider: "gcs",
+        bucket: "bucket",
+        region: "us-central1",
+        gcpServiceAccountEmail: "storage@example.iam.gserviceaccount.com",
+      },
+    },
+  ];
+
+  for (const entry of cases) {
+    const config = {
+      name: entry.name,
+      infrastructure: { provider: entry.provider },
+      database: { type: "self-hosted" },
+      features: { monitoring: {} },
+      storage: entry.storage,
+    } as unknown as DeploymentConfig;
+    const storageBindings = plannedBindings(config)
+      .filter((binding) =>
+        ["vector", `rulebricks-${entry.name}-clickhouse`].includes(
+          binding.serviceAccount,
+        ),
+      )
+      .map((binding) => binding.serviceAccount)
+      .sort();
+
+    assert.deepEqual(storageBindings, [
+      `rulebricks-${entry.name}-clickhouse`,
+      "vector",
+    ]);
+  }
+});
+
+test("Azure connection-string storage does not create workload identity bindings", () => {
+  const config = {
+    name: "azure-secret",
+    infrastructure: { provider: "azure" },
+    database: { type: "self-hosted" },
+    features: { monitoring: {} },
+    storage: {
+      provider: "azure-blob",
+      cloudAuthMode: "secret",
+      bucket: "account",
+      region: "eastus",
+      azureBlobContainer: "container",
+      azureBlobClientId: "stale-client-id",
+      azureBlobConnectionStringSecretRef: {
+        name: "azure-storage",
+        key: "connection-string",
+      },
+    },
+  } as unknown as DeploymentConfig;
+
+  const serviceAccounts = plannedBindings(config).map(
+    (binding) => binding.serviceAccount,
+  );
+  assert.equal(serviceAccounts.includes("vector"), false);
+  assert.equal(
+    serviceAccounts.includes("rulebricks-azure-secret-clickhouse"),
+    false,
+  );
+});
+
 test("external MSK IAM binds hps, worker, topic-provision, and keda-operator SAs (one association each)", () => {
   const cfg = {
     name: "aws-p1",

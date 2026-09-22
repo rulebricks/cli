@@ -101,6 +101,7 @@ export function ReviewStep({
   const decisionLogsPersistent =
     state.clickStackEnabled || state.clickHousePersistenceEnabled;
   const clickHouseStorageGi =
+    Number.parseInt(state.clickHouseMetadataStorageSize || "0", 10) +
     Number.parseInt(state.clickHouseStorageSize || "0", 10) +
     (state.clickStackEnabled ? 10 : 0);
   const usesInClusterPostgres =
@@ -387,24 +388,20 @@ export function ReviewStep({
         {decisionLogsPersistent ? (
           <>
             <ConfigRow
-              label="Retention"
-              value={
-                state.clickStackEnabled
-                  ? `telemetry ${state.clickStackTelemetryRetentionDays}d, decision logs ${state.decisionLogRetentionDays}d`
-                  : `decision logs ${state.decisionLogRetentionDays}d`
-              }
-            />
-            <ConfigRow
               label="Storage"
-              value={`ClickHouse ${state.clickHouseStorageSize}${
+              value={`ClickHouse catalog ${state.clickHouseMetadataStorageSize}, cache ${state.clickHouseStorageSize}${
                 state.clickStackEnabled ? ", HyperDX metadata 10Gi" : ""
               } (${clickHouseStorageGi} Gi requested)`}
+            />
+            <ConfigRow
+              label="Decision logs"
+              value="Object-backed ClickHouse with bounded local cache"
             />
           </>
         ) : (
           <ConfigRow
             label="Decision logs"
-            value="Archive-only object-storage querying (no ClickHouse PVC)"
+            value="Raw object archive via stateless ClickHouse (no PVC)"
           />
         )}
         <ConfigRow label="Monitoring" value={monitoringDestination} />

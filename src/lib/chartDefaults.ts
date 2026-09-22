@@ -21,7 +21,8 @@ export const LOGS_TOPIC_PARTITIONS = 24;
 export const TOPIC_REPLICATION_FACTOR = 1;
 
 // Decision-log archive batching: flush a zstd-compressed NDJSON file at ~64 MiB
-// (uncompressed) or after 5 minutes, whichever comes first.
+// (uncompressed) or after 30 seconds, whichever comes first. The shorter
+// low-volume timeout keeps PVC-less archive queries close to real time.
 //
 // max_bytes MUST stay well below the Vector pod's memory limit
 // (vector.resources.limits.memory in the chart): the object-storage sink
@@ -32,11 +33,14 @@ export const TOPIC_REPLICATION_FACTOR = 1;
 // scan-efficient files for ClickHouse.
 export const DECISION_LOG_BATCH = {
   max_bytes: 67108864,
-  timeout_secs: 300,
+  timeout_secs: 30,
 } as const;
 
-export const DEFAULT_DECISION_LOG_RETENTION_DAYS = 30;
+// Persistent ClickHouse keeps the pre-existing StatefulSet claim for its
+// catalog/object metadata and adds an independently bounded cache claim.
 export const DEFAULT_CLICKHOUSE_STORAGE_SIZE = "100Gi";
+export const DEFAULT_CLICKHOUSE_TEMP_SIZE = "20Gi";
+export const CLICKHOUSE_CATALOG_KEEP_FREE_BYTES = 21474836480;
 
 // Vector -> ClickHouse writes into the persistent decision_logs table.
 // Small, frequent batches keep decisions queryable within seconds. The bounded

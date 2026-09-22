@@ -20,8 +20,9 @@ import {
   TOPIC_REPLICATION_FACTOR,
   DECISION_LOG_CLICKHOUSE_SINK,
   DECISION_LOG_BATCH,
+  CLICKHOUSE_CATALOG_KEEP_FREE_BYTES,
   DEFAULT_CLICKHOUSE_STORAGE_SIZE,
-  DEFAULT_DECISION_LOG_RETENTION_DAYS,
+  DEFAULT_CLICKHOUSE_TEMP_SIZE,
   PROMETHEUS_RETENTION,
   PROMETHEUS_STORAGE_SIZE,
   TRAEFIK_MIN_REPLICAS,
@@ -231,6 +232,12 @@ function generateVectorSinks(
           encoding: { codec: "json" },
           framing: { method: "newline_delimited" },
           batch: { ...DECISION_LOG_BATCH },
+          acknowledgements: { enabled: true },
+          buffer: {
+            type: "memory",
+            max_events: 500,
+            when_full: "block",
+          },
         };
         break;
       case "azure-blob": {
@@ -248,6 +255,12 @@ function generateVectorSinks(
           encoding: { codec: "json" },
           framing: { method: "newline_delimited" },
           batch: { ...DECISION_LOG_BATCH },
+          acknowledgements: { enabled: true },
+          buffer: {
+            type: "memory",
+            max_events: 500,
+            when_full: "block",
+          },
         };
         if (config.storage.cloudAuthMode === "secret") {
           sink.connection_string = "${AZURE_STORAGE_CONNECTION_STRING}";
@@ -274,6 +287,12 @@ function generateVectorSinks(
           encoding: { codec: "json" },
           framing: { method: "newline_delimited" },
           batch: { ...DECISION_LOG_BATCH },
+          acknowledgements: { enabled: true },
+          buffer: {
+            type: "memory",
+            max_events: 500,
+            when_full: "block",
+          },
         };
         break;
     }
@@ -307,6 +326,7 @@ function generateVectorSinks(
         max_size: DECISION_LOG_CLICKHOUSE_SINK.bufferMaxSize,
         when_full: "drop_newest",
       },
+      acknowledgements: { enabled: false },
     };
   }
 
@@ -601,6 +621,36 @@ function generateVectorPodLabels(config: DeploymentConfig): Record<string, strin
   return labels;
 }
 
+function generateClickHouseServiceAccount(
+  config: DeploymentConfig,
+): Record<string, unknown> {
+  // AWS credentials are injected by EKS Pod Identity associations. Azure and
+  // GCP additionally require annotations on the Kubernetes ServiceAccount.
+  const annotations: Record<string, string> = {};
+
+  if (
+    config.storage?.provider === "azure-blob" &&
+    config.storage.cloudAuthMode !== "secret" &&
+    config.storage.azureBlobClientId
+  ) {
+    annotations["azure.workload.identity/client-id"] =
+      config.storage.azureBlobClientId;
+  }
+
+  if (
+    config.storage?.provider === "gcs" &&
+    config.storage.gcpServiceAccountEmail
+  ) {
+    annotations["iam.gke.io/gcp-service-account"] =
+      config.storage.gcpServiceAccountEmail;
+  }
+
+  return {
+    create: true,
+    annotations,
+  };
+}
+
 /**
  * Maps DNS provider to external-dns provider name
  */
@@ -795,8 +845,8 @@ function isClickStackEnabled(config: DeploymentConfig): boolean {
 
 function isClickHousePersistenceEnabled(config: DeploymentConfig): boolean {
   // ClickStack telemetry lives in ClickHouse and therefore always forces a PVC.
-  // Without ClickStack, config-file users can explicitly retain persistent,
-  // directly queried decision logs; absent/false keeps the archive-only mode.
+  // Without ClickStack, config-file users can explicitly retain the persistent
+  // native object-backed cache; absent/false keeps raw-archive query mode.
   return (
     isClickStackEnabled(config) ||
     config.clickhouse?.persistence?.enabled === true
@@ -811,10 +861,6 @@ function generateClickStackValues(
   operationalDaemonSetTolerations: Array<Record<string, string>>,
   images: ImageCatalog,
 ): Record<string, unknown> {
-  const clickstack = config.features.observability?.clickstack;
-  const telemetryRetentionDays =
-    clickstack?.telemetryRetentionDays ?? 7;
-
   // Registry host for the clickstack images. The clickstack subchart routes
   // these through its own image helper, so the split { registry, repository }
   // shape lets global.imageRegistry + digest pinning flow through.
@@ -826,8 +872,7 @@ function generateClickStackValues(
       username: "rulebricks",
       existingSecret: "",
       existingSecretKey: "admin-password",
-      retentionDays: telemetryRetentionDays,
-      ttl: "",
+      createSchema: false,
     },
     hyperdx: {
       enabled,
@@ -856,7 +901,10 @@ function generateClickStackValues(
         tag: images.image("clickstack-otel-collector").tag,
         pullPolicy: "IfNotPresent",
       },
-      memoryLimitMiB: 800,
+      // Keep the collector's limiter below its cgroup ceiling. At high
+      // execution rates the exporter queues and Prometheus receiver retain
+      // substantial RSS that is not reflected immediately in Go heap usage.
+      memoryLimitMiB: 1600,
       agent: {
         enabled,
         securityContext: {
@@ -873,8 +921,8 @@ function generateClickStackValues(
       gateway: {
         replicas: 1,
         resources: {
-          requests: { cpu: "250m", memory: "512Mi" },
-          limits: { cpu: "2000m", memory: "1Gi" },
+          requests: { cpu: "250m", memory: "1Gi" },
+          limits: { cpu: "2000m", memory: "3Gi" },
         },
         podLabels: infrastructurePodLabels,
       },
@@ -1649,7 +1697,10 @@ function generateTraefikTracing(
   releaseName: string,
 ): Record<string, unknown> {
   if (!isClickStackEnabled(config) && !config.features.tracing?.enabled) return {};
+  const sampleRate =
+    config.features.tracing?.samplingRatio ?? 1;
   return {
+    sampleRate,
     otlp: {
       enabled: true,
       http: {
@@ -1909,12 +1960,10 @@ export function buildHelmValues(
   const clickStackEnabled = isClickStackEnabled(config);
   const clickHousePersistenceEnabled =
     isClickHousePersistenceEnabled(config);
-  const clickStackConfig = config.features.observability?.clickstack;
-  const clickHouseStorageSize =
-    clickStackConfig?.clickHouseStorageSize ?? DEFAULT_CLICKHOUSE_STORAGE_SIZE;
-  const decisionLogRetentionDays =
-    config.clickhouse?.decisionLogs?.retentionDays ??
-    DEFAULT_DECISION_LOG_RETENTION_DAYS;
+  const clickHouseMetadataStorageSize =
+    config.clickhouse?.persistence?.size ?? DEFAULT_CLICKHOUSE_STORAGE_SIZE;
+  const clickHouseCacheStorageSize =
+    config.clickhouse?.cache?.size ?? clickHouseMetadataStorageSize;
   // Distributed tracing (self-hosted only). Lives under global so the
   // rulebricks subchart deployments can read it; the collector + traefik are
   // wired below from the same source.
@@ -2066,8 +2115,9 @@ export function buildHelmValues(
 
       storage: config.storage
         ? {
-            // One provider, one identity, one bucket/container. decision-logs and
-            // db-backups are key prefixes under paths.* within it.
+            // One provider, one identity, one bucket/container. Raw decision
+            // logs, native ClickHouse parts, and DB backups use distinct
+            // prefixes under paths.*.
             provider: config.storage.provider,
             bucket: config.storage.bucket,
             region: config.storage.region,
@@ -2094,6 +2144,7 @@ export function buildHelmValues(
             },
             paths: {
               decisionLogs: config.storage.paths?.decisionLogs || "decision-logs",
+              clickhouse: config.storage.paths?.clickhouse || "clickhouse",
               dbBackups: config.storage.paths?.dbBackups || "db-backups",
             },
           }
@@ -2151,6 +2202,9 @@ export function buildHelmValues(
 
         // Logging configuration (in-cluster auto-discovery or external Kafka)
         logging: generateAppLogging(config),
+        clickhouse: {
+          username: "rulebricks",
+        },
       },
 
       // HPS (High Performance Server)
@@ -2340,21 +2394,32 @@ export function buildHelmValues(
       priorityClassName: criticalPriorityClass,
       podAnnotations: safeToEvictAnnotations,
       auth: {
+        // Hook-only schema/migration identity. Application, Vector, and
+        // ClickStack values below use the config-managed runtime user.
         username: "rulebricks",
         password: "",
         existingSecret: '{{ printf "%s-clickhouse-credentials" .Release.Name }}',
         existingSecretKey: "admin-password",
       },
-      decisionLogs: {
-        retentionDays: decisionLogRetentionDays,
-      },
       persistence: clickHousePersistenceEnabled
         ? {
             enabled: true,
             storageClass: storageClass,
-            size: clickHouseStorageSize,
+            size: clickHouseMetadataStorageSize,
+            keepFreeSpaceBytes: CLICKHOUSE_CATALOG_KEEP_FREE_BYTES,
           }
         : { enabled: false },
+      ...(clickHousePersistenceEnabled
+        ? {
+            cache: {
+              storageClass,
+              size: clickHouseCacheStorageSize,
+            },
+            temp: {
+              sizeLimit: DEFAULT_CLICKHOUSE_TEMP_SIZE,
+            },
+          }
+        : {}),
       resources: clickHousePersistenceEnabled
         ? {
             requests: { cpu: "1000m", memory: "4Gi" },
@@ -2364,25 +2429,10 @@ export function buildHelmValues(
             requests: { cpu: "500m", memory: "2Gi" },
             limits: { cpu: "2", memory: "6Gi" },
           },
-      // AKS workload identity: ClickHouse reads the decision-log archive
-      // straight from Blob storage (the named-collection views), so like
-      // Vector it needs the webhook-injected credentials - SA annotation plus
-      // pod label. The federated credential on the storage identity is
-      // created by deploy (plannedBindings includes the clickhouse SA); on
-      // AWS/GCP the control-plane association alone suffices, which is why
-      // only Azure needs pod-level wiring here.
-      serviceAccount: {
-        create: true,
-        annotations:
-          config.storage?.provider === "azure-blob" &&
-          config.storage.cloudAuthMode !== "secret" &&
-          config.storage.azureBlobClientId
-            ? {
-                "azure.workload.identity/client-id":
-                  config.storage.azureBlobClientId,
-              }
-            : {},
-      },
+      // ClickHouse reads raw archives in stateless mode and reads/writes native
+      // MergeTree objects in persistent mode. Keep the storage identity on its
+      // own ServiceAccount for every cloud.
+      serviceAccount: generateClickHouseServiceAccount(config),
       ...(config.storage?.provider === "azure-blob" &&
       config.storage.cloudAuthMode !== "secret" &&
       config.storage.azureBlobClientId
@@ -2399,14 +2449,7 @@ export function buildHelmValues(
         maxThreads: 4,
         maxExecutionTime: 120,
         maxRowsToRead: 50000000,
-        readOverflowMode: "break",
       },
-      otelQueryLimits: {
-        maxMemoryUsage: 4294967296,
-        maxThreads: 8,
-        maxExecutionTime: 120,
-      },
-      otelDatabase: "otel",
       // config.d / users.d / the decision-log view are rendered by the parent
       // chart's clickhouse templates (no longer passed as Bitnami subchart values).
     },
@@ -3621,6 +3664,12 @@ const CLI_OWNED_EXCLUSIVE_PATHS: readonly HelmValuePath[] = [
   ["global", "sso"],
   ["global", "tracing"],
   ["traefik", "tracing"],
+
+  // Retired retention controls must not survive an edit-preserving upgrade.
+  // Decision logs have no table TTL; ClickStack uses its fixed upstream TTL.
+  ["clickhouse", "decisionLogs"],
+  ["clickstack", "clickhouse", "retentionDays"],
+  ["clickstack", "clickhouse", "ttl"],
 
   // Reconcile only the sink names generated by the CLI. Customers may add
   // other chart-supported sinks beside these.

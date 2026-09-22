@@ -187,6 +187,9 @@ export function applyHelmValuesToConfig(
           decisionLogs:
             stringValue(storage.paths.decisionLogs) ??
             next.storage.paths?.decisionLogs,
+          clickhouse:
+            stringValue(storage.paths.clickhouse) ??
+            next.storage.paths?.clickhouse,
           dbBackups:
             stringValue(storage.paths.dbBackups) ??
             next.storage.paths?.dbBackups,
@@ -219,17 +222,6 @@ export function applyHelmValuesToConfig(
     };
   }
 
-  const clickStackValues = isRecord(values.clickstack)
-    ? values.clickstack
-    : null;
-  const clickStackClickHouse =
-    clickStackValues && isRecord(clickStackValues.clickhouse)
-      ? clickStackValues.clickhouse
-      : null;
-  const telemetryRetentionDays = numberValue(
-    clickStackClickHouse?.retentionDays,
-  );
-
   const clickHouseValues = isRecord(values.clickhouse)
     ? values.clickhouse
     : null;
@@ -237,36 +229,12 @@ export function applyHelmValuesToConfig(
     clickHouseValues && isRecord(clickHouseValues.persistence)
       ? clickHouseValues.persistence
       : null;
-  const decisionLogs =
-    clickHouseValues && isRecord(clickHouseValues.decisionLogs)
-      ? clickHouseValues.decisionLogs
+  const cache =
+    clickHouseValues && isRecord(clickHouseValues.cache)
+      ? clickHouseValues.cache
       : null;
-  const decisionLogRetentionDays = numberValue(decisionLogs?.retentionDays);
-  const clickHouseStorageSize = stringValue(persistence?.size);
-
-  if (telemetryRetentionDays !== undefined || clickHouseStorageSize) {
-    const saved = next.features.observability?.clickstack;
-    next.features.observability = {
-      clickstack: {
-        enabled: saved?.enabled ?? true,
-        ...saved,
-        telemetryRetentionDays:
-          telemetryRetentionDays ?? saved?.telemetryRetentionDays,
-        clickHouseStorageSize:
-          clickHouseStorageSize ?? saved?.clickHouseStorageSize,
-      },
-    };
-  }
-
-  if (decisionLogRetentionDays !== undefined) {
-    next.clickhouse = {
-      ...next.clickhouse,
-      decisionLogs: {
-        ...next.clickhouse?.decisionLogs,
-        retentionDays: decisionLogRetentionDays,
-      },
-    };
-  }
+  const clickHouseMetadataStorageSize = stringValue(persistence?.size);
+  const clickHouseCacheStorageSize = stringValue(cache?.size);
 
   // clickhouse.persistence.enabled is derived while ClickStack is on, so only
   // hydrate it as an explicit decision-log override in BYO mode. This avoids a
@@ -274,13 +242,28 @@ export function applyHelmValuesToConfig(
   // ClickStack off.
   const persistenceEnabled = booleanValue(persistence?.enabled);
   if (
-    next.features.observability?.clickstack?.enabled === false &&
-    persistenceEnabled !== undefined
+    clickHouseMetadataStorageSize ||
+    clickHouseCacheStorageSize ||
+    (next.features.observability?.clickstack?.enabled === false &&
+      persistenceEnabled !== undefined)
   ) {
     next.clickhouse = {
       ...next.clickhouse,
       persistence: {
-        enabled: persistenceEnabled,
+        ...next.clickhouse?.persistence,
+        ...(next.features.observability?.clickstack?.enabled === false &&
+        persistenceEnabled !== undefined
+          ? { enabled: persistenceEnabled }
+          : {}),
+        ...(clickHouseMetadataStorageSize
+          ? { size: clickHouseMetadataStorageSize }
+          : {}),
+      },
+      cache: {
+        ...next.clickhouse?.cache,
+        ...(clickHouseCacheStorageSize
+          ? { size: clickHouseCacheStorageSize }
+          : {}),
       },
     };
   }

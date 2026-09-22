@@ -265,7 +265,26 @@ export function validateValuesInvariants(values: unknown): string[] {
     }
   }
 
-  // 4. Distributed tracing: when enabled, the collector must have a non-empty
+  // 4. Persistent ClickHouse stores native objects separately from the raw
+  //    decision archive. Sharing a prefix would mix ClickHouse-managed objects
+  //    with lifecycle-managed NDJSON and is rejected by the chart.
+  if (get(values, ["clickhouse", "persistence", "enabled"]) === true) {
+    const normalizePrefix = (value: unknown) =>
+      typeof value === "string" ? value.replace(/^\/+|\/+$/g, "") : undefined;
+    const rawPrefix = normalizePrefix(
+      get(values, ["global", "storage", "paths", "decisionLogs"]),
+    );
+    const clickHousePrefix = normalizePrefix(
+      get(values, ["global", "storage", "paths", "clickhouse"]),
+    );
+    if (rawPrefix && clickHousePrefix && rawPrefix === clickHousePrefix) {
+      errors.push(
+        "global.storage.paths.clickhouse must be separate from global.storage.paths.decisionLogs",
+      );
+    }
+  }
+
+  // 5. Distributed tracing: when enabled, the collector must have a non-empty
   //    endpoint for the selected destination (the JSON schema also enforces
   //    this, but we surface a clearer message), and the active auth mode must
   //    carry its credential.
@@ -315,7 +334,7 @@ export function validateValuesInvariants(values: unknown): string[] {
     }
   }
 
-  // 5. Application/container log shipping: when the Vector agent is enabled it
+  // 6. Application/container log shipping: when the Vector agent is enabled it
   //    must have exactly one configured external sink.
   const vectorAgent = get(values, ["vector-agent"]);
   if (vectorAgent && vectorAgent.enabled) {

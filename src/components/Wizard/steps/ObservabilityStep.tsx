@@ -11,10 +11,7 @@ import {
   WizardSelect,
   useTheme,
 } from "../../common/index.js";
-import {
-  DEFAULT_CLICKHOUSE_STORAGE_SIZE,
-  DEFAULT_DECISION_LOG_RETENTION_DAYS,
-} from "../../../lib/chartDefaults.js";
+import { DEFAULT_CLICKHOUSE_STORAGE_SIZE } from "../../../lib/chartDefaults.js";
 
 interface ObservabilityStepProps {
   onComplete: () => void;
@@ -33,11 +30,6 @@ const MODE_OPTIONS = [
   },
 ];
 
-function parsePositiveInt(value: string, fallback: number): number {
-  const parsed = Number.parseInt(value.trim(), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
 export function ObservabilityStep({
   onComplete,
   onBack,
@@ -50,16 +42,8 @@ export function ObservabilityStep({
   const [mode, setMode] = useState<"built-in" | "byo">(
     state.clickStackEnabled ? "built-in" : "byo",
   );
-  const [telemetryRetention, setTelemetryRetention] = useState(
-    String(state.clickStackTelemetryRetentionDays || 7),
-  );
   const [clickHouseStorage, setClickHouseStorage] = useState(
     state.clickHouseStorageSize || DEFAULT_CLICKHOUSE_STORAGE_SIZE,
-  );
-  const [decisionLogRetention, setDecisionLogRetention] = useState(
-    String(
-      state.decisionLogRetentionDays || DEFAULT_DECISION_LOG_RETENTION_DAYS,
-    ),
   );
 
   const hyperDxStorageGi = mode === "built-in" ? 10 : 0;
@@ -96,7 +80,7 @@ export function ObservabilityStep({
       render: (flow) => (
         <WizardSelect
           label="How should Rulebricks observability be set up?"
-          hint="Built-in ClickStack gives you logs, traces, mirrored metrics, and dashboards. It also keeps queryable decision logs in persistent ClickHouse while continuing the durable object-storage export."
+          hint="Built-in ClickStack gives you logs, traces, mirrored metrics, and dashboards. Persistent ClickHouse stores native data in object storage and uses its PVC as a bounded local cache."
           items={MODE_OPTIONS}
           initialValue={mode}
           onSelect={(value) => {
@@ -112,78 +96,20 @@ export function ObservabilityStep({
       ),
     },
     {
-      id: "telemetry-retention",
-      when: () => mode === "built-in",
-      render: (flow) => (
-        <TextField
-          label="Telemetry retention (days)"
-          hint="How many days of ClickStack operational logs, traces, and metrics to retain. Decision logs use their own retention window next."
-          value={telemetryRetention}
-          onChange={setTelemetryRetention}
-          placeholder="7"
-          onSubmit={() => {
-            dispatch({
-              type: "SET_CLICKSTACK_CONFIG",
-              config: {
-                clickStackTelemetryRetentionDays: parsePositiveInt(
-                  telemetryRetention,
-                  7,
-                ),
-              },
-            });
-            flow.next();
-          }}
-        />
-      ),
-    },
-    {
-      id: "decision-log-retention",
-      when: () => mode === "built-in" || state.clickHousePersistenceEnabled,
-      render: (flow) => (
-        <TextField
-          label="Decision-log retention (days)"
-          hint="How long decision logs stay queryable in persistent ClickHouse. The object-storage export is unaffected and remains the durable history."
-          value={decisionLogRetention}
-          onChange={setDecisionLogRetention}
-          placeholder={String(DEFAULT_DECISION_LOG_RETENTION_DAYS)}
-          onSubmit={() => {
-            dispatch({
-              type: "SET_CLICKSTACK_CONFIG",
-              config: {
-                decisionLogRetentionDays: parsePositiveInt(
-                  decisionLogRetention,
-                  DEFAULT_DECISION_LOG_RETENTION_DAYS,
-                ),
-              },
-            });
-            flow.next();
-          }}
-        />
-      ),
-    },
-    {
       id: "clickhouse-storage",
       when: () => mode === "built-in" || state.clickHousePersistenceEnabled,
       render: (flow) => (
         <Box flexDirection="column">
           <TextField
-            label="ClickHouse PVC size"
-            hint="Stores retained decision logs and, with ClickStack, operational telemetry. Start at 100Gi; size for retained ingest plus about 30% free merge headroom."
+            label="ClickHouse cache PVC size"
+            hint="Sets only the disposable native-object read cache. Stateful installs also keep a separate 100Gi catalog/metadata PVC; stateless installs create neither PVC."
             value={clickHouseStorage}
             onChange={setClickHouseStorage}
             placeholder={DEFAULT_CLICKHOUSE_STORAGE_SIZE}
             onSubmit={() => {
               dispatch({
-                type: "SET_CLICKSTACK_CONFIG",
+                type: "SET_CLICKHOUSE_CONFIG",
                 config: {
-                  clickStackTelemetryRetentionDays: parsePositiveInt(
-                    telemetryRetention,
-                    7,
-                  ),
-                  decisionLogRetentionDays: parsePositiveInt(
-                    decisionLogRetention,
-                    DEFAULT_DECISION_LOG_RETENTION_DAYS,
-                  ),
                   clickHouseStorageSize:
                     clickHouseStorage.trim() ||
                     DEFAULT_CLICKHOUSE_STORAGE_SIZE,

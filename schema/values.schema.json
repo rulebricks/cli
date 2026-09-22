@@ -99,7 +99,7 @@
         },
         "storage": {
           "type": "object",
-          "description": "Shared object storage: one provider, one identity, and one bucket/container with per-purpose path prefixes",
+          "description": "Shared object storage: one provider, one identity, and one bucket/container with separate raw decision-log, native ClickHouse, and database-backup prefixes",
           "properties": {
             "provider": { "type": "string", "enum": ["s3", "azure-blob", "gcs"], "default": "s3" },
             "bucket": { "type": "string", "description": "Single bucket (S3/GCS) or storage account (azure-blob) holding all Rulebricks data" },
@@ -140,9 +140,10 @@
             },
             "paths": {
               "type": "object",
-              "description": "Per-purpose key prefixes within the single bucket/container",
+              "description": "Per-purpose key prefixes within the single bucket/container. The ClickHouse prefix contains native database objects and must not be lifecycle-deleted outside ClickHouse.",
               "properties": {
                 "decisionLogs": { "type": "string" },
+                "clickhouse": { "type": "string", "minLength": 1 },
                 "dbBackups": { "type": "string" }
               }
             }
@@ -263,7 +264,7 @@
           "properties": {
             "enabled": { "type": "boolean", "default": false },
             "destination": { "type": "string", "enum": ["elastic", "otlp", "azure-monitor"], "default": "elastic" },
-            "samplingRatio": { "type": "number", "minimum": 0, "maximum": 1, "default": 1 },
+            "samplingRatio": { "type": "number", "minimum": 0, "maximum": 1, "default": 1.0 },
             "collector": {
               "type": "object",
               "properties": {
@@ -646,6 +647,20 @@
           "type": "object",
           "properties": {
             "enabled": { "type": "boolean" },
+            "directDatabase": {
+              "type": "object",
+              "description": "Direct PostgreSQL access for Context operations using the existing database. Reuses the chart's database settings when available; existingSecret optionally overrides them. External Supabase without a connection Secret keeps PostgREST. Only HPS API pods receive database credentials.",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "existingSecret": { "type": "string" },
+                "connectionKey": { "type": "string", "minLength": 1 },
+                "poolSize": { "type": "integer", "minimum": 1, "description": "Maximum PostgreSQL connections per API replica; budget against maxReplicaCount and other database clients." }
+              },
+              "allOf": [{
+                "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+                "then": { "required": ["poolSize"] }
+              }]
+            },
             "image": {
               "type": "object",
               "properties": {
@@ -663,8 +678,6 @@
                 "rpcTimeoutMs": { "type": "integer", "minimum": 1000, "description": "Whole-request Kafka execution deadline in ms (RPC_TIMEOUT_MS). Traefik graceTimeOut and terminationGracePeriodSeconds must stay above it." },
                 "requestTimeoutMs": { "type": "integer", "minimum": 1000, "description": "Deadline for receiving one request's entire body in ms (HTTP_REQUEST_TIMEOUT_MS)." },
                 "itemMaxBytes": { "type": "integer", "minimum": 1024, "description": "Serialized cap per single payload inside a bulk array (ITEM_MAX_BYTES); the 20 MiB chart default leaves envelope headroom under the 32 MiB execution-topic cap." },
-                "contextBatchBodyLimitBytes": { "type": "integer", "minimum": 1024, "description": "Context batch NDJSON body cap (CONTEXT_BATCH_BODY_LIMIT_BYTES)." },
-                "contextBatchMaxItems": { "type": "integer", "minimum": 1, "description": "Max records per context batch request (CONTEXT_BATCH_MAX_ITEMS)." },
                 "largeBodyThresholdBytes": { "type": "integer", "description": "Admission-gate threshold (LARGE_BODY_THRESHOLD_BYTES); <= 0 disables the gate." },
                 "largeBodyMaxConcurrent": { "type": "integer", "minimum": 1, "description": "Concurrent above-threshold requests per HPS replica before shedding with 429 (LARGE_BODY_MAX_CONCURRENT)." },
                 "chunkMaxChunks": { "type": "integer", "minimum": 1, "description": "Max chunk fan-out per bulk request (CHUNK_MAX_CHUNKS); align with workers.solutionPartitions for full-fleet spread." },
@@ -672,8 +685,8 @@
                 "responseFetchMaxBytes": { "type": "integer", "minimum": 1024, "description": "HPS response-consumer per-partition fetch ceiling (RESPONSE_MAX_BYTES_PER_PARTITION); keep >= 2x the execution-topic max.message.bytes." },
                 "workerFetchMaxBytes": { "type": "integer", "minimum": 1024, "description": "Worker request-consumer per-partition fetch ceiling (WORKER_MAX_BYTES_PER_PARTITION); keep >= 2x the execution-topic max.message.bytes." },
                 "logRetryBufferMaxBytes": { "type": "integer", "minimum": 1048576, "description": "In-memory retry buffer for decision-log producers (LOG_RETRY_BUFFER_MAX_BYTES); keep >= 2x the logs-topic max.message.bytes so one full record survives a transient failure." },
-                "shutdownDrainMs": { "type": "integer", "minimum": 0, "description": "How long a stopping HPS pod keeps consuming so in-flight RPCs resolve (KAFKA_SHUTDOWN_DRAIN_MS); should cover rpcTimeoutMs." },
-                "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1, "description": "HPS pod terminationGracePeriodSeconds; must exceed shutdownDrainMs plus shutdown overhead." },
+                "shutdownDrainMs": { "type": "integer", "minimum": 0, "description": "Fallback Kafka response-handler drain after accepted HTTP requests finish (KAFKA_SHUTDOWN_DRAIN_MS); should cover rpcTimeoutMs if HTTP shutdown errors." },
+                "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1, "description": "HPS pod terminationGracePeriodSeconds; must exceed preStop, rpcTimeoutMs, and final producer-drain overhead." },
                 "nodeHeapMb": { "type": "integer", "minimum": 128, "description": "Node.js --max-old-space-size for the HPS server in MB (rendered as NODE_OPTIONS); size to ~85% of the container memory limit. Unset = image default." }
               }
             },
@@ -687,7 +700,16 @@
                 "pollingInterval": { "type": "integer", "minimum": 1 },
                 "cooldownPeriod": { "type": "integer", "minimum": 0 },
                 "lagThreshold": { "type": ["integer", "string"] },
-                "cpuThreshold": { "type": ["integer", "string"] }
+                "cpuThreshold": { "type": ["integer", "string"] },
+                "inFlightPrometheus": {
+                  "type": "object",
+                  "description": "Optional Prometheus-backed hold signal for in-flight executions. Disabled by default so Prometheus availability cannot block an upgrade.",
+                  "properties": {
+                    "enabled": { "type": "boolean", "default": false },
+                    "serverAddress": { "type": "string" },
+                    "threshold": { "type": ["integer", "string"], "default": "1" }
+                  }
+                }
               }
             },
             "warmup": {
@@ -821,7 +843,7 @@
                 },
                 "topologySpreadConstraints": {
                   "type": "array",
-                  "description": "Optional custom topology spread constraints for HPS worker pods. Unset by default so workers can prefer non-infrastructure nodes.",
+                  "description": "Optional custom topology spread constraints for HPS worker pods. Without an override, the chart softly prefers even placement across eligible nodes.",
                   "items": { "type": "object" }
                 },
                 "serviceAccount": {
@@ -1192,18 +1214,27 @@
         "enabled": { "type": "boolean", "default": true },
         "persistence": {
           "type": "object",
-          "description": "Local MergeTree storage for the direct decision_logs table and optional ClickStack telemetry. This is the statefulness switch; ClickStack requires it, while disabling it without ClickStack selects an archive-backed Deployment with emptyDir.",
+          "description": "Statefulness switch. Enabled keeps ClickHouse catalog/object metadata on the original StatefulSet PVC and defaults MergeTree tables to object storage. An incompatible internal storage generation triggers a ClickHouse-only reset before upgrade; ordinary upgrades preserve data. Disabled selects the archive-backed Deployment with emptyDir; ClickStack requires persistence.",
           "properties": {
             "enabled": { "type": "boolean", "default": true },
             "size": { "type": "string" },
+            "storageClass": { "type": "string" },
+            "keepFreeSpaceBytes": { "type": "integer", "minimum": 1048576, "default": 21474836480 }
+          }
+        },
+        "cache": {
+          "type": "object",
+          "description": "Disposable ClickHouse object-storage read cache on a standalone release-scoped PVC.",
+          "properties": {
+            "size": { "type": "string", "default": "100Gi" },
             "storageClass": { "type": "string" }
           }
         },
-        "decisionLogs": {
+        "temp": {
           "type": "object",
-          "description": "Persistent decision-log table configuration. Stateless archive retention is managed by object-storage lifecycle policy.",
+          "description": "Node-ephemeral ClickHouse query spill, isolated from persistent metadata and cache.",
           "properties": {
-            "retentionDays": { "type": "integer", "minimum": 1, "default": 30 }
+            "sizeLimit": { "type": "string", "default": "20Gi" }
           }
         },
         "queryLimits": {
@@ -1212,19 +1243,9 @@
             "maxMemoryUsage": { "type": "integer", "minimum": 1, "default": 4294967296 },
             "maxThreads": { "type": "integer", "minimum": 1, "default": 4 },
             "maxExecutionTime": { "type": "integer", "minimum": 1, "default": 120 },
-            "maxRowsToRead": { "type": "integer", "minimum": 1, "default": 50000000 },
-            "readOverflowMode": { "type": "string", "enum": ["throw", "break"], "default": "break" }
+            "maxRowsToRead": { "type": "integer", "minimum": 1, "default": 50000000 }
           }
-        },
-        "otelQueryLimits": {
-          "type": "object",
-          "properties": {
-            "maxMemoryUsage": { "type": "integer", "minimum": 1, "default": 4294967296 },
-            "maxThreads": { "type": "integer", "minimum": 1, "default": 8 },
-            "maxExecutionTime": { "type": "integer", "minimum": 1, "default": 120 }
-          }
-        },
-        "otelDatabase": { "type": "string", "default": "otel" }
+        }
       }
     },
     "clickstack": {
@@ -1234,12 +1255,14 @@
         "clickhouse": {
           "type": "object",
           "properties": {
-            "database": { "type": "string" },
-            "username": { "type": "string" },
+            "database": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "username": { "const": "rulebricks", "default": "rulebricks" },
             "existingSecret": { "type": "string" },
             "existingSecretKey": { "type": "string" },
-            "retentionDays": { "type": "integer", "minimum": 1, "default": 7 },
-            "ttl": { "type": "string", "description": "Advanced ClickHouse exporter TTL override. Leave empty to derive from retentionDays." }
+            "createSchema": { "const": false, "default": false }
           }
         },
         "hyperdx": {

@@ -147,15 +147,25 @@ sum(rate(rulebricks_app_frontend_errors_total[5m])) by (source)
 
 ## Object Storage and Backups
 
-The wizard now collects a shared object storage backend for every deployment. Rulebricks uses separate prefixes in that bucket for decision logs (`decision-logs/`) and self-hosted Supabase database backups (`db-backups/`).
+The wizard collects one shared object storage backend for every deployment. Rulebricks uses separate prefixes for the raw decision-log archive (`decision-logs/`), ClickHouse-managed native table objects (`clickhouse/`), and self-hosted Supabase database backups (`db-backups/`).
 
 Database backups are optional for self-hosted Supabase deployments. When enabled, the Helm chart schedules Barman base backups according to the configured cron schedule and retention window. You can also run `rulebricks backup <name>` to trigger an on-demand backup, or `rulebricks restore <name>` to list backups in object storage and interactively restore one after confirmation.
 
-## Decision-log Retention and ClickHouse Storage
+## Decision-log and ClickHouse Storage
 
-Persistent mode keeps decision logs directly queryable in ClickHouse for 30 days by default while Vector continues exporting the same records to object storage. Set the window in `config.yaml` at `clickhouse.decisionLogs.retentionDays`. ClickStack enables persistent mode automatically; with ClickStack disabled, the default is stateless object-storage querying, and advanced config-file users can opt back into a PVC with `clickhouse.persistence.enabled: true`.
+Persistent mode keeps decision logs directly queryable in an object-backed ClickHouse MergeTree while Vector independently exports the same records to the raw archive. ClickHouse keeps catalog/object metadata on the original StatefulSet PVC, uses a separate release-scoped PVC for its bounded native read cache, and sends temporary spill to a size-limited `emptyDir`. There is no local retention-days setting or custom disk-pressure eviction job. ClickStack enables persistent mode automatically; with ClickStack disabled, the default remains stateless, date-bounded raw-archive querying, and config-file users can opt into persistence with `clickhouse.persistence.enabled: true`.
 
-The wizard defaults the ClickHouse PVC to `100Gi` and preserves any explicit `features.observability.clickstack.clickHouseStorageSize` value. There is intentionally no traffic estimator: start with 100Gi, use observed ClickHouse disk growth over representative days to account for the chosen retention window, and leave roughly 30% free for MergeTree merges. ClickStack telemetry shares this PVC when enabled.
+The wizard defaults both the retained metadata PVC and the standalone cache PVC to `100Gi`. Advanced config can set `clickhouse.persistence.size` and `clickhouse.cache.size` independently. ClickStack logs, traces, and metrics use the same object-backed ClickHouse policy when enabled. Never apply an external lifecycle policy to the native `clickhouse/` prefix; ClickHouse owns those objects.
+
+Existing deployments move to this policy in one Helm execution. The
+migration-safe ClickHouse configuration has no global MergeTree default, so
+legacy local tables can attach before the admin-only hook probes remote storage,
+drops and reseeds known disposable tables, and audits every non-system
+MergeTree. Every managed decision-log, OTel, and TimeSeries table explicitly
+selects `object_storage`, while the runtime user cannot execute persistent DDL.
+The CLI uses one waited, atomic Helm upgrade so a failed rollout restores the
+previous chart manifests and local desired files. The ClickHouse reset itself
+is not transactional and cannot be undone by Helm.
 
 ## Infrastructure Image Versions
 
