@@ -43,7 +43,8 @@ export const DEFAULT_CLICKHOUSE_TEMP_SIZE = "20Gi";
 export const CLICKHOUSE_CATALOG_KEEP_FREE_BYTES = 21474836480;
 
 // Vector -> ClickHouse writes into the persistent decision_logs table.
-// Small, frequent batches keep decisions queryable within seconds. The bounded
+// Larger batches amortize parsing and part creation under sustained load;
+// the five-second flush still keeps quiet deployments responsive. The bounded
 // 4 GiB disk buffer gives transient ClickHouse restarts substantially more
 // headroom than the old 1 GiB cache buffer without allowing an outage to consume
 // unbounded node disk. when_full: drop_newest remains load-bearing: object
@@ -51,8 +52,9 @@ export const CLICKHOUSE_CATALOG_KEEP_FREE_BYTES = 21474836480;
 // source and stall that sink.
 // Internal tuning constants, deliberately NOT user-facing config.
 export const DECISION_LOG_CLICKHOUSE_SINK = {
-  batchMaxBytes: 10485760,
+  batchMaxBytes: 67108864,
   batchTimeoutSecs: 5,
+  requestConcurrency: 2,
   bufferMaxSize: 4294967296,
 } as const;
 

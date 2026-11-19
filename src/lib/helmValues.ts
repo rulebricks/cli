@@ -321,6 +321,11 @@ function generateVectorSinks(
         max_bytes: DECISION_LOG_CLICKHOUSE_SINK.batchMaxBytes,
         timeout_secs: DECISION_LOG_CLICKHOUSE_SINK.batchTimeoutSecs,
       },
+      // Keep whole batches moving without flooding the single ClickHouse
+      // server with concurrent inserts and the parts they create.
+      request: {
+        concurrency: DECISION_LOG_CLICKHOUSE_SINK.requestConcurrency,
+      },
       buffer: {
         type: "disk",
         max_size: DECISION_LOG_CLICKHOUSE_SINK.bufferMaxSize,
@@ -1137,7 +1142,7 @@ function generateKafkaConfig(): Record<string, string> {
     "replica.fetch.response.max.bytes": "134217728",
     // Broker-wide default retention; the application topics carry tighter caps.
     "log.retention.bytes": "536870912",
-    "log.segment.bytes": "1073741824",
+    "log.segment.bytes": "134217728",
     "num.replica.fetchers": "4",
     "queued.max.requests": "10000",
     "replica.socket.receive.buffer.bytes": "1048576",
@@ -1219,11 +1224,15 @@ function generateKafkaTopics(
       replicas: TOPIC_REPLICATION_FACTOR,
       config: {
         "retention.ms": "86400000",
+        // Retention deletes whole segments. A 1Gi segment made a 1Gi
+        // per-partition target approach 2Gi before cleanup could reclaim it.
+        "segment.bytes": "134217728",
+        "segment.ms": "60000",
         // Per-partition byte cap sized for a HOT partition: single-tenant
         // bursts key most log records onto one partition, and a cap smaller
         // than the burst backlog makes the broker delete unconsumed segments
         // (silent decision-log loss, observed at 256Mi under load). The cap
-        // times partitions (24 x 1Gi) must stay within the broker volume.
+        // times partitions plus segment overhead must fit the broker volume.
         "retention.bytes": "1073741824",
         // Full-fidelity single-item logs contain request + response inside a
         // second JSON envelope, so reserve more than 2x the 20 MiB item cap.
@@ -2321,12 +2330,9 @@ export function buildHelmValues(
       // Single combined controller+broker node (KRaft, no ZooKeeper).
       replicas: TOPIC_REPLICATION_FACTOR,
       storage: {
-        // Must cover the per-topic retention.bytes caps: logs 24 x 1Gi = 24Gi
-        // plus solution/solution-response 2 x 128 x 128Mi = 32Gi, leaving
-        // ~10Gi for KRaft metadata / active segments / fs overhead. A full
-        // disk halts the broker and takes the whole request path down with
-        // it (observed at 50k solutions/s). validateValuesInvariants enforces
-        // caps <= 85% of this size.
+        // Nominal retention targets total 56Gi. These are not hard limits:
+        // whole segments, replicas and internal topics also occupy disk.
+        // The 85% target check below is not a worst-case capacity guarantee.
         size: "75Gi",
         class: storageClass,
       },
@@ -2709,11 +2715,13 @@ export function buildHelmValues(
             group_id: "${KAFKA_CONSUMER_GROUP:-vector-consumers}",
             auto_offset_reset: "latest",
             // Full-fidelity single-item logs can approach the 64 MiB topic
-            // cap. librdkafka raises receive.message.max.bytes automatically
-            // above the aggregate fetch size plus protocol overhead.
+            // cap. Start with 1 MiB per-partition prefetch, matching the chart;
+            // librdkafka grows this for an individual larger message. Fetching
+            // 64 MiB from each busy partition can exhaust Vector's memory when
+            // those compressed records are decoded. The record limit is separate.
             librdkafka_options: {
               "message.max.bytes": "67108864",
-              "fetch.message.max.bytes": "67108864",
+              "fetch.message.max.bytes": "1048576",
               "fetch.max.bytes": "134217728",
             },
             // TLS + SASL driven by env from vector-kafka-env (disabled for

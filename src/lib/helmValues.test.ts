@@ -1220,7 +1220,7 @@ test("in-cluster provisioning uses baseline partitions and the (empty) prefix", 
       values.vector.customConfig.sources.kafka.librdkafka_options;
     assert.deepEqual(vectorKafka, {
       "message.max.bytes": "67108864",
-      "fetch.message.max.bytes": "67108864",
+      "fetch.message.max.bytes": "1048576",
       "fetch.max.bytes": "134217728",
     });
 
